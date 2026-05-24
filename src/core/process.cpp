@@ -21,6 +21,7 @@
 #include <string_view>
 #include <sys/poll.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -222,9 +223,20 @@ namespace {
     return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
   }
 
+  void emitOutputCallback(const process::OutputCallback* callback, const char* data, std::size_t len) {
+    if (callback == nullptr || !*callback || len == 0) {
+      return;
+    }
+
+    try {
+      (*callback)(std::string_view(data, len));
+    } catch (...) {
+    }
+  }
+
   void drainAvailable(
       int& fd, std::string& out, std::size_t maxBytes = std::numeric_limits<std::size_t>::max(),
-      bool* truncated = nullptr
+      bool* truncated = nullptr, const process::OutputCallback* outputCallback = nullptr
   ) {
     if (fd < 0) {
       return;
@@ -235,6 +247,8 @@ namespace {
       const ssize_t n = ::read(fd, tmp, sizeof(tmp));
       if (n > 0) {
         const auto bytesRead = static_cast<std::size_t>(n);
+        emitOutputCallback(outputCallback, tmp, bytesRead);
+
         const auto remaining = out.size() < maxBytes ? maxBytes - out.size() : 0;
         const auto appendBytes = std::min(bytesRead, remaining);
         if (appendBytes > 0) {
@@ -328,7 +342,8 @@ namespace {
 
   process::RunResult runSyncProcess(
       const std::vector<std::string>& args, std::optional<std::chrono::milliseconds> timeout,
-      std::size_t maxOutputBytes = std::numeric_limits<std::size_t>::max()
+      std::size_t maxOutputBytes = std::numeric_limits<std::size_t>::max(),
+      const process::RunCallbacks* callbacks = nullptr
   ) {
     if (args.empty() || args.front().empty()) {
       return {-1, {}, {}};
@@ -381,17 +396,19 @@ namespace {
     if (timeout.has_value()) {
       deadline = std::chrono::steady_clock::now() + std::max(*timeout, std::chrono::milliseconds(0));
     }
+    const auto* stdOutCallback = callbacks != nullptr ? &callbacks->stdOut : nullptr;
+    const auto* stdErrCallback = callbacks != nullptr ? &callbacks->stdErr : nullptr;
 
     for (;;) {
-      drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated);
-      drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated);
+      drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated, stdOutCallback);
+      drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated, stdErrCallback);
 
       if (!exited) {
         exited = waitNoHang(pid, exitCode);
       }
       if (exited) {
-        drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated);
-        drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated);
+        drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated, stdOutCallback);
+        drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated, stdErrCallback);
         closeFd(outPipe[0]);
         closeFd(errPipe[0]);
         break;
@@ -403,8 +420,8 @@ namespace {
       }
 
       if (timedOut) {
-        drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated);
-        drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated);
+        drainAvailable(outPipe[0], out, maxOutputBytes, &outTruncated, stdOutCallback);
+        drainAvailable(errPipe[0], err, maxOutputBytes, &errTruncated, stdErrCallback);
         closeFd(outPipe[0]);
         closeFd(errPipe[0]);
         break;
@@ -439,6 +456,10 @@ namespace {
     trimTrailingLineEndings(out);
     trimTrailingLineEndings(err);
     return {exitCode, std::move(out), std::move(err), timedOut, outTruncated, errTruncated};
+  }
+
+  [[nodiscard]] bool hasAnyCallback(const process::RunCallbacks& callbacks) {
+    return callbacks.stdOut || callbacks.stdErr || callbacks.onExit;
   }
 
   // Double-fork + setsid so the exec'd process is not a direct child of the caller (matches
@@ -684,16 +705,51 @@ namespace process {
     return doubleForkExecDetached(args, nullptr, activationToken, workingDir);
   }
 
+  bool runAsync(const std::vector<std::string>& args, RunCallbacks callbacks, RunOptions options) {
+    if (args.empty() || args.front().empty() || !hasAnyCallback(callbacks)) {
+      return false;
+    }
+
+    try {
+      std::thread([args, callbacks = std::move(callbacks), options]() mutable {
+        const std::size_t maxOutputBytes = callbacks.onExit ? options.maxOutputBytes : 0;
+        RunResult result = runSyncProcess(args, options.timeout, maxOutputBytes, &callbacks);
+        if (callbacks.onExit) {
+          try {
+            callbacks.onExit(std::move(result));
+          } catch (...) {
+          }
+        }
+      }).detach();
+    } catch (...) {
+      return false;
+    }
+
+    return true;
+  }
+
   bool runAsync(std::initializer_list<const char*> args) {
     const auto command = makeCommand(args);
-    return command.has_value() && runAsync(*command, {});
+    return command.has_value() && runAsync(*command);
+  }
+
+  bool runAsync(std::initializer_list<const char*> args, RunCallbacks callbacks, RunOptions options) {
+    const auto command = makeCommand(args);
+    return command.has_value() && runAsync(*command, std::move(callbacks), options);
   }
 
   bool runAsync(const std::string& command) {
     if (command.empty()) {
       return false;
     }
-    return runAsync(std::vector<std::string>{"/bin/sh", "-lc", command}, {});
+    return runAsync(std::vector<std::string>{"/bin/sh", "-lc", command});
+  }
+
+  bool runAsync(const std::string& command, RunCallbacks callbacks, RunOptions options) {
+    if (command.empty()) {
+      return false;
+    }
+    return runAsync(std::vector<std::string>{"/bin/sh", "-lc", command}, std::move(callbacks), options);
   }
 
   std::optional<int> launchDetachedTracked(const std::vector<std::string>& args) {

@@ -817,6 +817,16 @@ log_test = executable('log_test',
 
 test('log', log_test)
 
+process_test = executable('process_test',
+  sources: files(
+    'tests/process_test.cpp',
+    'src/core/process.cpp',
+  ),
+  include_directories: _noctalia_inc,
+)
+
+test('process', process_test)
+
 string_utils_test = executable('string_utils_test',
   sources: files(
     'tests/string_utils_test.cpp',
