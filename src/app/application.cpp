@@ -1138,7 +1138,7 @@ void Application::initUi() {
           &m_weatherService, m_pipewireSpectrum.get(), m_upowerService.get(), m_powerProfilesService.get(),
           m_networkService.get(), m_networkSecretAgent.get(), m_bluetoothService.get(), m_bluetoothAgent.get(),
           m_brightnessService.get(), m_systemMonitor.get(), &m_screenTimeService, &m_gammaService, &m_themeService,
-          &m_idleInhibitor, &m_dependencyService, &m_compositorPlatform, &m_wallpaper
+          &m_idleInhibitor, &m_dependencyService, &m_compositorPlatform, &m_wallpaper, &m_calendarService
       )
   );
   {

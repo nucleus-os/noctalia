@@ -399,8 +399,9 @@
     },
     "calendar": {
       "today": "Today",
-      "tasks": "Tasks",
-      "no-tasks": "No tasks yet."
+      "events": "Events",
+      "no-events": "No events.",
+      "all-day": "All day"
     },
     "system": {
       "titles": {

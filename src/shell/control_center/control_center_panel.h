@@ -41,6 +41,7 @@ class PipeWireSpectrum;
 class PowerProfilesService;
 class ScreenTimeService;
 class SystemMonitorService;
+class CalendarService;
 class UPowerService;
 class Wallpaper;
 class WeatherService;
@@ -60,7 +61,8 @@ public:
       BrightnessService* brightness = nullptr, SystemMonitorService* sysmon = nullptr,
       ScreenTimeService* screenTime = nullptr, GammaService* nightLight = nullptr,
       noctalia::theme::ThemeService* theme = nullptr, IdleInhibitor* idleInhibitor = nullptr,
-      DependencyService* dependencies = nullptr, CompositorPlatform* platform = nullptr, Wallpaper* wallpaper = nullptr
+      DependencyService* dependencies = nullptr, CompositorPlatform* platform = nullptr, Wallpaper* wallpaper = nullptr,
+      CalendarService* calendar = nullptr
   );
 
   void create() override;
