@@ -217,17 +217,20 @@ namespace noctalia::config {
       if (calendar == nullptr) {
         return;
       }
-      const auto* accounts = (*calendar)["accounts"].as_array();
+      if ((*calendar)["accounts"].as_array() != nullptr) {
+        diag.error("calendar.accounts", "calendar accounts now use [calendar.account.<id>] named tables");
+      }
+      const auto* accounts = (*calendar)["account"].as_table();
       if (accounts == nullptr) {
         return;
       }
-      for (const auto& node : *accounts) {
+      for (const auto& [id, node] : *accounts) {
         const auto* account = node.as_table();
         if (account == nullptr || !account->contains("url")) {
           continue;
         }
         diag.error(
-            "calendar.accounts.url",
+            "calendar.account." + std::string(id.str()) + ".url",
             "CalDAV collection url was removed; use provider/server_url discovery syntax instead"
         );
       }

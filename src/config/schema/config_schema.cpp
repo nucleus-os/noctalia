@@ -299,7 +299,6 @@ namespace noctalia::config::schema {
     // TOML key is "name" but the field is displayName.
     const Schema<CalendarConfig::Account>& calendarAccountSchema() {
       static const Schema<CalendarConfig::Account> s = {
-          field(&CalendarConfig::Account::id, "id"),
           field(&CalendarConfig::Account::type, "type"),
           field(&CalendarConfig::Account::displayName, "name"),
           field(&CalendarConfig::Account::color, "color"),
@@ -1134,9 +1133,10 @@ namespace noctalia::config::schema {
     static const Schema<CalendarConfig> s = {
         field(&CalendarConfig::enabled, "enabled"),
         field(&CalendarConfig::refreshMinutes, "refresh_minutes", kRefreshMinutesRange),
-        arrayOf<CalendarConfig, CalendarConfig::Account>(
-            &CalendarConfig::accounts, "accounts", calendarAccountSchema(),
-            [](const CalendarConfig::Account& a) { return !a.id.empty() && !a.type.empty(); }
+        namedMap<CalendarConfig, CalendarConfig::Account>(
+            &CalendarConfig::accounts, "account", calendarAccountSchema(),
+            [](CalendarConfig::Account& a, std::string_view id) { a.id = std::string(id); },
+            [](const CalendarConfig::Account& a) { return a.id; }, true
         ),
     };
     return s;
