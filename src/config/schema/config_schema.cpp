@@ -74,6 +74,13 @@ namespace noctalia::config::schema {
     return s;
   }
 
+  const Schema<TooltipConfig>& tooltipSchema() {
+    static const Schema<TooltipConfig> s = {
+        field(&TooltipConfig::backgroundOpacity, "background_opacity", kUnitRange),
+    };
+    return s;
+  }
+
   const Schema<BackdropConfig>& backdropSchema() {
     static const Schema<BackdropConfig> s = {
         field(&BackdropConfig::enabled, "enabled"),

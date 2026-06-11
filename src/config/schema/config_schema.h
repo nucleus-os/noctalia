@@ -10,6 +10,7 @@ namespace noctalia::config::schema {
   const Schema<AudioConfig>& audioSchema();
   const Schema<WeatherConfig>& weatherSchema();
   const Schema<OsdConfig>& osdSchema();
+  const Schema<TooltipConfig>& tooltipSchema();
   const Schema<BackdropConfig>& backdropSchema();
   const Schema<LockscreenConfig>& lockscreenSchema();
   const Schema<SystemConfig>& systemSchema();

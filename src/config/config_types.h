@@ -663,6 +663,12 @@ struct OsdConfig {
   bool operator==(const OsdConfig&) const = default;
 };
 
+struct TooltipConfig {
+  float backgroundOpacity = 0.9f; // tooltip card background alpha (0.0–1.0)
+
+  bool operator==(const TooltipConfig&) const = default;
+};
+
 struct NotificationConfig {
   bool enableDaemon = true;
   bool showAppName = true;
@@ -1462,6 +1468,7 @@ struct Config {
   HotCornersConfig hotCorners;
   ShellConfig shell;
   OsdConfig osd;
+  TooltipConfig tooltip;
   NotificationConfig notification;
   WeatherConfig weather;
   CalendarConfig calendar;
@@ -1493,6 +1500,7 @@ struct ConfigChangeSet {
   bool dock = true;
   bool shell = true;
   bool osd = true;
+  bool tooltip = true;
   bool notification = true;
   bool weather = true;
   bool calendar = true;
@@ -1522,6 +1530,7 @@ struct ConfigChangeSet {
         || dock
         || shell
         || osd
+        || tooltip
         || notification
         || weather
         || calendar

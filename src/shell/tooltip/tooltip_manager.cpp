@@ -612,15 +612,29 @@ void TooltipManager::buildScene(const TooltipContent& content, float w, float h,
   m_sceneRoot->setHitTestVisible(false);
   m_surface->setSceneRoot(m_sceneRoot.get());
 
+  const float bgOpacity =
+      m_config != nullptr ? std::clamp(m_config->config().tooltip.backgroundOpacity, 0.0f, 1.0f) : 1.0f;
+
   m_sceneRoot->addChild(
       ui::box({
-          .fill = colorSpecFromRole(ColorRole::Surface),
+          .fill = colorSpecFromRole(ColorRole::Surface, bgOpacity),
           .radius = Style::scaledRadiusMd(),
           .width = w,
           .height = h,
           .configure = [](Box& box) { box.setBorder(colorSpecFromRole(ColorRole::Outline), kBorder); },
       })
   );
+
+  // Request compositor blur behind the (possibly translucent) tooltip background,
+  // mirroring the other shell surfaces (OSD, notifications, panels). The region
+  // matches the rounded card; the compositor decides whether/how to blur.
+  if (m_surface != nullptr) {
+    m_surface->setBlurRegion(
+        Surface::tessellateRoundedRect(
+            0, 0, static_cast<int>(std::ceil(w)), static_cast<int>(std::ceil(h)), Style::scaledRadiusMd()
+        )
+    );
+  }
 
   const float scale = (m_config != nullptr) ? std::max(0.1f, m_config->config().accessibility.uiScale) : 1.0f;
   const float maxContentWidth = kMaxContentWidth * scale;

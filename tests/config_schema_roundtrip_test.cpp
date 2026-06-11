@@ -311,6 +311,7 @@ location = "https://example.invalid/bad"
     c.osd.monitors = {"DP-1", "HDMI-A-1"};
     c.osd.kinds.lockKeys = false;
     c.osd.kinds.keyboardLayout = false;
+    c.tooltip.backgroundOpacity = 0.55f;
     c.backdrop = BackdropConfig{true, 0.8f, 0.2f};
     c.lockscreen =
         LockscreenConfig{.blurredDesktop = true, .blurIntensity = 0.6f, .tintIntensity = 0.25f, .monitors = {"DP-1"}};
