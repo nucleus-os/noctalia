@@ -88,10 +88,7 @@ void FingerprintAuthenticator::start() {
   if (m_active) {
     return;
   }
-  if (!m_bus.nameHasOwner(kFprintBusName)) {
-    kLog.debug("fprintd not available on system bus; fingerprint disabled");
-    return;
-  }
+
   m_active = true;
   m_abort = false;
   m_retries = 0;
