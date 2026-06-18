@@ -107,6 +107,16 @@ private:
 
   void onRegisterStatusNotifierItem(const std::string& serviceOrPath, const std::string& senderBusName);
   void onRegisterStatusNotifierHost(const std::string& host);
+  void startAsWatcherOwner();
+  void startAsWatcherClient();
+  void connectToExternalWatcher();
+  void disconnectExternalWatcher();
+  void onExternalItemRegistered(const std::string& service);
+  void onExternalItemUnregistered(const std::string& service);
+  [[nodiscard]] bool externalWatcherHasOwner() const;
+  void notifyWatcherItemRegistered(const std::string& itemId);
+  void notifyWatcherItemUnregistered(const std::string& itemId);
+  void removeItemById(const std::string& itemId);
   void discoverExistingItems();
   void tryRegisterItemForBusName(const std::string& busName, std::function<void(bool)> callback = {});
   void scheduleBusOnlyRegistrationProbe(const std::string& busName, int retriesRemaining);
@@ -133,13 +143,17 @@ private:
   [[nodiscard]] static std::string canonicalItemId(const std::string& busName, const std::string& objectPath);
 
   SessionBus& m_bus;
+  enum class WatcherRole { Owner, Client };
+  WatcherRole m_watcherRole = WatcherRole::Owner;
   std::unique_ptr<sdbus::IObject> m_watcherObject;
+  std::unique_ptr<sdbus::IProxy> m_watcherProxy;
   std::unique_ptr<sdbus::IProxy> m_dbusProxy;
   std::unordered_map<std::string, TrayItemInfo> m_items;
   std::unordered_map<std::string, std::unique_ptr<sdbus::IProxy>> m_itemProxies;
   std::unordered_map<std::string, MenuCache> m_menuCache;
   std::unordered_set<std::string> m_pathOnlyResolutionsInFlight;
-  bool m_hostRegistered = true;
+  bool m_hostRegistered = false;
+  bool m_externalWatcherConnected = false;
   bool m_started = false;
   ChangeCallback m_changeCallback;
   MenuToggleCallback m_menuToggleCallback;

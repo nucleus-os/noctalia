@@ -35,10 +35,11 @@ namespace shell::dock {
     wl_surface* wlSurface = nullptr;
     bool pointerInside = false;
     std::vector<zwlr_foreign_toplevel_handle_v1*> handles;
+    std::vector<ToplevelInfo> windows;
   };
 
   struct DockMenuCallbacks {
-    std::function<void(zwlr_foreign_toplevel_handle_v1*)> activateWindow;
+    std::function<void(std::size_t windowIndex)> activateWindow;
     std::function<void(zwlr_foreign_toplevel_handle_v1*)> closeWindow;
     std::function<void(const DesktopAction&)> launchAction;
     std::function<void(bool pinned)> setEntryPinned;

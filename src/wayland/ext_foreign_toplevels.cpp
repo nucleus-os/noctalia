@@ -136,6 +136,7 @@ WaylandExtForeignToplevels::windowsForApp(const std::string& idLower, const std:
             .info = ToplevelInfo{
                 .title = state.title,
                 .appId = appId,
+                .identifier = state.identifier,
                 .order = state.order,
                 .handle = nullptr,
                 .extHandle = handle,

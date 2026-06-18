@@ -411,14 +411,16 @@ void SettingsWindow::openSearchPickerPopup(
   if (m_widgetAddPopup != nullptr && m_widgetAddPopup->isOpen()) {
     m_widgetAddPopup->close();
   }
-  if (m_editorSheetPopup != nullptr && m_editorSheetPopup->isOpen()) {
-    m_editorSheetPopup->close();
-  }
 
   m_searchPickerPopup->setOnSelect([this, settingPath, selectedValue](const std::string& value) {
-    if (value != selectedValue) {
-      setSettingOverride(settingPath, value);
+    if (value == selectedValue) {
+      return;
     }
+    if (value.empty()) {
+      clearSettingOverride(settingPath);
+      return;
+    }
+    setSettingOverride(settingPath, value);
   });
 
   std::vector<SearchPickerOption> pickerOptions;
@@ -441,9 +443,20 @@ void SettingsWindow::openSearchPickerPopup(
     output = m_output;
   }
 
+  xdg_surface* parentXdgSurface = m_surface->xdgSurface();
+  wl_surface* parentWlSurface = m_surface->wlSurface();
+  std::uint32_t parentWidth = m_surface->width();
+  std::uint32_t parentHeight = m_surface->height();
+  if (m_editorSheetPopup != nullptr && m_editorSheetPopup->isOpen()) {
+    parentXdgSurface = m_editorSheetPopup->xdgSurface();
+    parentWlSurface = m_editorSheetPopup->wlSurface();
+    parentWidth = m_editorSheetPopup->width();
+    parentHeight = m_editorSheetPopup->height();
+  }
+
   m_searchPickerPopup->open(
-      m_surface->xdgSurface(), output, m_wayland->lastInputSerial(), m_surface->wlSurface(), m_surface->width(),
-      m_surface->height(), title, pickerOptions, selectedValue, placeholder, emptyText, uiScale()
+      parentXdgSurface, output, m_wayland->lastInputSerial(), parentWlSurface, parentWidth, parentHeight, title,
+      pickerOptions, selectedValue, placeholder, emptyText, uiScale()
   );
 }
 

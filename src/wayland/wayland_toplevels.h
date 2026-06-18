@@ -25,6 +25,7 @@ struct ActiveToplevel {
 struct ToplevelInfo {
   std::string title;
   std::string appId;
+  std::string identifier;
   std::uint64_t order = 0;
   zwlr_foreign_toplevel_handle_v1* handle = nullptr;
   ext_foreign_toplevel_handle_v1* extHandle = nullptr;

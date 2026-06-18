@@ -182,7 +182,7 @@ uint32_t NotificationManager::addOrReplace(
     uint32_t replacesId, std::string appName, std::string summary, std::string body, Urgency urgency, int32_t timeout,
     NotificationOrigin origin, bool transient, std::vector<std::string> actions, std::optional<std::string> icon,
     std::optional<NotificationImageData> imageData, std::optional<std::string> category,
-    std::optional<std::string> desktopEntry
+    std::optional<std::string> desktopEntry, std::optional<uint32_t> forcedId
 ) {
   const auto now = Clock::now();
   const auto wallNow = WallClock::now();
@@ -278,7 +278,10 @@ uint32_t NotificationManager::addOrReplace(
     }
   }
 
-  const uint32_t id = m_nextId++;
+  const uint32_t id = forcedId.has_value() ? *forcedId : m_nextId++;
+  if (forcedId.has_value() && *forcedId >= m_nextId) {
+    m_nextId = *forcedId + 1;
+  }
   m_notifications.push_back(
       Notification{
           .id = id,
@@ -323,6 +326,39 @@ uint32_t NotificationManager::addOrReplace(
   }
 
   return n.id;
+}
+
+uint32_t NotificationManager::adoptExternal(
+    uint32_t id, std::string appName, std::string summary, std::string body, Urgency urgency, int32_t timeout,
+    bool transient, std::vector<std::string> actions, std::optional<std::string> icon,
+    std::optional<NotificationImageData> imageData, std::optional<std::string> category,
+    std::optional<std::string> desktopEntry
+) {
+  if (id == 0) {
+    return addOrReplace(
+        0, std::move(appName), std::move(summary), std::move(body), urgency, timeout, NotificationOrigin::External,
+        transient, std::move(actions), std::move(icon), std::move(imageData), std::move(category),
+        std::move(desktopEntry)
+    );
+  }
+
+  if (m_idToIndex.contains(id)) {
+    return addOrReplace(
+        id, std::move(appName), std::move(summary), std::move(body), urgency, timeout, NotificationOrigin::External,
+        transient, std::move(actions), std::move(icon), std::move(imageData), std::move(category),
+        std::move(desktopEntry)
+    );
+  }
+
+  if (id >= m_nextId) {
+    m_nextId = id + 1;
+  }
+
+  return addOrReplace(
+      0, std::move(appName), std::move(summary), std::move(body), urgency, timeout, NotificationOrigin::External,
+      transient, std::move(actions), std::move(icon), std::move(imageData), std::move(category),
+      std::move(desktopEntry), id
+  );
 }
 
 uint32_t NotificationManager::addInternal(

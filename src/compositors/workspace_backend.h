@@ -9,6 +9,7 @@
 
 struct wl_output;
 struct ext_workspace_manager_v1;
+struct org_kde_plasma_virtual_desktop_management;
 struct zdwl_ipc_manager_v2;
 
 struct Workspace {
@@ -86,6 +87,12 @@ class DwlIpcWorkspaceProtocolBinder {
 public:
   virtual ~DwlIpcWorkspaceProtocolBinder() = default;
   virtual void bindDwlIpcWorkspace(zdwl_ipc_manager_v2* manager) = 0;
+};
+
+class KdeVirtualDesktopProtocolBinder {
+public:
+  virtual ~KdeVirtualDesktopProtocolBinder() = default;
+  virtual void bindKdeVirtualDesktop(org_kde_plasma_virtual_desktop_management* management) = 0;
 };
 
 class WorkspaceOutputNameResolver {

@@ -209,9 +209,12 @@ void LockscreenWidgetsHost::createInstance(
 
   widget->create();
   widget->setBox(state.boxWidth, state.boxHeight);
-  m_renderContext->makeCurrent(surface.renderTarget());
-  widget->update(*m_renderContext);
-  widget->layout(*m_renderContext);
+
+  if (surface.renderTarget().isReady()) {
+    m_renderContext->makeCurrent(surface.renderTarget());
+    widget->update(*m_renderContext);
+    widget->layout(*m_renderContext);
+  }
 
   const float intrinsicWidth = std::max(1.0f, widget->intrinsicWidth());
   const float intrinsicHeight = std::max(1.0f, widget->intrinsicHeight());

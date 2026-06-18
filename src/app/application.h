@@ -20,6 +20,8 @@
 #include "dbus/mpris/mpris_service.h"
 #include "dbus/network/inetwork_service.h"
 #include "dbus/network/network_secret_agent.h"
+#include "dbus/notification/kde_notification_client.h"
+#include "dbus/notification/notification_dbus_host.h"
 #include "dbus/notification/notification_poll_source.h"
 #include "dbus/notification/notification_service.h"
 #include "dbus/polkit/polkit_agent.h"
@@ -121,6 +123,10 @@
 #include <optional>
 #include <vector>
 
+namespace sdbus {
+  class IProxy;
+}
+
 class LauncherPanel;
 
 class Application {
@@ -141,6 +147,7 @@ private:
   void reloadPluginLauncherProviders();
   void startTrayService();
   void syncNotificationDaemon();
+  void installNotificationBusNameWatch();
   void scheduleNotificationShellRefresh();
   void syncPolkitAgent();
   void syncClipboardService();
@@ -209,7 +216,9 @@ private:
   std::optional<std::string> m_prevPowerProfileActiveForEvents;
   std::unique_ptr<BrightnessService> m_brightnessService;
   std::unique_ptr<TrayService> m_trayService;
-  std::unique_ptr<NotificationService> m_notificationDbus;
+  std::unique_ptr<NotificationDBusHost> m_notificationDbus;
+  std::unique_ptr<sdbus::IProxy> m_notificationBusNameWatchProxy;
+  bool m_notificationBusNameWatchInstalled = false;
   std::unique_ptr<PipeWireService> m_pipewireService;
   std::unique_ptr<EasyEffectsService> m_easyEffectsService;
   std::unique_ptr<PipeWireSpectrum> m_pipewireSpectrum;

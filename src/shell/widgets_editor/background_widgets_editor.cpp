@@ -942,47 +942,45 @@ void BackgroundWidgetsEditor::rebuildScene(OverlaySurface& surface) {
     selectionBorderTransform->addChild(std::move(selectionBorder));
     root->addChild(std::move(selectionBorderTransform));
 
-    if (!selectedIsLoginBox) {
-      for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
-        const ScaleCorner corner = static_cast<ScaleCorner>(i);
+    for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
+      const ScaleCorner corner = static_cast<ScaleCorner>(i);
 
-        auto scaleHandleShadow = ui::box({
-            .fill = clearColorSpec(),
-            .radius = Style::scaledRadiusSm() + kShadowExpand,
-            .configure = [](Box& box) { box.setBorder(kShadowColor, kShadowExpand); },
-        });
-        scaleHandleShadow->setZIndex(103);
-        surface.scaleHandleShadows[i] = scaleHandleShadow.get();
-        root->addChild(std::move(scaleHandleShadow));
+      auto scaleHandleShadow = ui::box({
+          .fill = clearColorSpec(),
+          .radius = Style::scaledRadiusSm() + kShadowExpand,
+          .configure = [](Box& box) { box.setBorder(kShadowColor, kShadowExpand); },
+      });
+      scaleHandleShadow->setZIndex(103);
+      surface.scaleHandleShadows[i] = scaleHandleShadow.get();
+      root->addChild(std::move(scaleHandleShadow));
 
-        auto scaleHandle = ui::box({
-            .fill = colorSpecFromRole(ColorRole::Primary),
-            .radius = Style::scaledRadiusSm(),
-        });
-        scaleHandle->setZIndex(104);
-        surface.scaleHandles[i] = scaleHandle.get();
-        root->addChild(std::move(scaleHandle));
+      auto scaleHandle = ui::box({
+          .fill = colorSpecFromRole(ColorRole::Primary),
+          .radius = Style::scaledRadiusSm(),
+      });
+      scaleHandle->setZIndex(104);
+      surface.scaleHandles[i] = scaleHandle.get();
+      root->addChild(std::move(scaleHandle));
 
-        auto scaleArea = std::make_unique<InputArea>();
-        scaleArea->setZIndex(105);
-        scaleArea->setOnPress([this, id = m_selectedWidgetId, corner](const InputArea::PointerData& data) {
-          if (data.button != BTN_LEFT) {
-            return;
-          }
-          if (data.pressed) {
-            startDrag(DragMode::Scale, id, false, corner);
-          } else if (m_drag.mode == DragMode::Scale && m_drag.widgetId == id) {
-            finishDrag();
-          }
-        });
-        scaleArea->setOnMotion([this, id = m_selectedWidgetId](const InputArea::PointerData& /*data*/) {
-          if (m_drag.mode == DragMode::Scale && m_drag.widgetId == id) {
-            updateDrag();
-          }
-        });
-        surface.scaleAreas[i] = scaleArea.get();
-        root->addChild(std::move(scaleArea));
-      }
+      auto scaleArea = std::make_unique<InputArea>();
+      scaleArea->setZIndex(105);
+      scaleArea->setOnPress([this, id = m_selectedWidgetId, corner](const InputArea::PointerData& data) {
+        if (data.button != BTN_LEFT) {
+          return;
+        }
+        if (data.pressed) {
+          startDrag(DragMode::Scale, id, false, corner);
+        } else if (m_drag.mode == DragMode::Scale && m_drag.widgetId == id) {
+          finishDrag();
+        }
+      });
+      scaleArea->setOnMotion([this, id = m_selectedWidgetId](const InputArea::PointerData& /*data*/) {
+        if (m_drag.mode == DragMode::Scale && m_drag.widgetId == id) {
+          updateDrag();
+        }
+      });
+      surface.scaleAreas[i] = scaleArea.get();
+      root->addChild(std::move(scaleArea));
     }
 
     updateSelectionVisuals(surface);
@@ -1297,12 +1295,12 @@ void BackgroundWidgetsEditor::updateSelectionVisuals(OverlaySurface& surface) {
     return;
   }
   const bool selectedIsLoginBox = lockscreen_login_box::isLoginBoxWidget(*state);
-  if (!selectedIsLoginBox) {
-    for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
-      if (surface.scaleHandles[i] == nullptr || surface.scaleAreas[i] == nullptr) {
-        return;
-      }
+  for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
+    if (surface.scaleHandles[i] == nullptr || surface.scaleAreas[i] == nullptr) {
+      return;
     }
+  }
+  if (!selectedIsLoginBox) {
     if (surface.rotationRing == nullptr || surface.rotateArea == nullptr) {
       return;
     }
@@ -1343,24 +1341,22 @@ void BackgroundWidgetsEditor::updateSelectionVisuals(OverlaySurface& surface) {
   surface.selectionBorder->setPosition(0.0f, 0.0f);
   surface.selectionBorder->setFrameSize(width, height);
 
-  if (!selectedIsLoginBox) {
-    for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
-      const CornerSigns signs = cornerSigns(i);
-      const auto [cornerX, cornerY] =
-          rotatedCorner(state->cx, state->cy, width * 0.5f * signs.x, height * 0.5f * signs.y, state->rotationRad);
+  for (std::size_t i = 0; i < kScaleCornerCount; ++i) {
+    const CornerSigns signs = cornerSigns(i);
+    const auto [cornerX, cornerY] =
+        rotatedCorner(state->cx, state->cy, width * 0.5f * signs.x, height * 0.5f * signs.y, state->rotationRad);
 
-      const float shadowSize = kHandleSize + kShadowExpand * 2.0f;
-      if (surface.scaleHandleShadows[i] != nullptr) {
-        surface.scaleHandleShadows[i]->setPosition(cornerX - shadowSize * 0.5f, cornerY - shadowSize * 0.5f);
-        surface.scaleHandleShadows[i]->setFrameSize(shadowSize, shadowSize);
-      }
-
-      surface.scaleHandles[i]->setPosition(cornerX - kHandleSize * 0.5f, cornerY - kHandleSize * 0.5f);
-      surface.scaleHandles[i]->setFrameSize(kHandleSize, kHandleSize);
-
-      surface.scaleAreas[i]->setPosition(cornerX - kHandleSize, cornerY - kHandleSize);
-      surface.scaleAreas[i]->setFrameSize(kHandleSize * 1.5f, kHandleSize * 1.5f);
+    const float shadowSize = kHandleSize + kShadowExpand * 2.0f;
+    if (surface.scaleHandleShadows[i] != nullptr) {
+      surface.scaleHandleShadows[i]->setPosition(cornerX - shadowSize * 0.5f, cornerY - shadowSize * 0.5f);
+      surface.scaleHandleShadows[i]->setFrameSize(shadowSize, shadowSize);
     }
+
+    surface.scaleHandles[i]->setPosition(cornerX - kHandleSize * 0.5f, cornerY - kHandleSize * 0.5f);
+    surface.scaleHandles[i]->setFrameSize(kHandleSize, kHandleSize);
+
+    surface.scaleAreas[i]->setPosition(cornerX - kHandleSize, cornerY - kHandleSize);
+    surface.scaleAreas[i]->setFrameSize(kHandleSize * 1.5f, kHandleSize * 1.5f);
   }
 }
 
@@ -1755,7 +1751,7 @@ void BackgroundWidgetsEditor::startDrag(
   if (state == nullptr) {
     return;
   }
-  if (lockscreen_login_box::isLoginBoxWidget(*state) && mode != DragMode::Move) {
+  if (lockscreen_login_box::isLoginBoxWidget(*state) && mode != DragMode::Move && mode != DragMode::Scale) {
     return;
   }
 
@@ -1965,6 +1961,15 @@ void BackgroundWidgetsEditor::updateDrag() {
     if (shouldSnap()) {
       boxW = std::max(cell, std::round(boxW / cell) * cell);
       boxH = std::max(cell, std::round(boxH / cell) * cell);
+    }
+
+    if (lockscreen_login_box::isLoginBoxWidget(*state)) {
+      float screenWidth = 1920.0f;
+      if (OverlaySurface* surface = findSurfaceForWidget(m_drag.widgetId);
+          surface != nullptr && surface->surface != nullptr) {
+        screenWidth = static_cast<float>(surface->surface->width());
+      }
+      lockscreen_login_box::clampPanelSize(screenWidth, boxW, boxH);
     }
 
     if (!m_altHeld) {

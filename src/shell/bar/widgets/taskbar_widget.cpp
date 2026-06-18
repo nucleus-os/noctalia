@@ -142,6 +142,25 @@ namespace {
     return size;
   }
 
+  [[nodiscard]] std::uintptr_t taskHandleKey(const ToplevelInfo& window) {
+    if (window.handle != nullptr) {
+      return reinterpret_cast<std::uintptr_t>(window.handle);
+    }
+    if (window.extHandle != nullptr) {
+      return reinterpret_cast<std::uintptr_t>(window.extHandle);
+    }
+    if (!window.identifier.empty()) {
+      const std::uintptr_t key = static_cast<std::uintptr_t>(std::hash<std::string>{}(window.identifier));
+      return key == 0 ? 1 : key;
+    }
+    if (!window.appId.empty() || !window.title.empty()) {
+      const std::uintptr_t key =
+          static_cast<std::uintptr_t>(std::hash<std::string>{}(window.appId + "\n" + window.title));
+      return key == 0 ? 1 : key;
+    }
+    return 0;
+  }
+
 } // namespace
 
 TaskbarWidget::TaskbarWidget(
@@ -171,12 +190,22 @@ TaskbarWidget::TaskbarWidget(
 TaskbarWidget::~TaskbarWidget() = default;
 
 bool TaskbarWidget::taskInWorkspaceGroup(const TaskModel& task, const WorkspaceModel& ws) {
-  return !task.workspaceKey.empty() && task.workspaceKey == ws.key;
+  if (task.workspaceKey.empty()) {
+    return false;
+  }
+  if (task.workspaceKey == ws.key) {
+    return true;
+  }
+  return !ws.workspace.id.empty() && task.workspaceKey == ws.workspace.id;
 }
 
 void TaskbarWidget::activateTaskModel(const TaskModel& task) {
   if (task.firstHandle != nullptr) {
     m_platform.activateToplevel(task.firstHandle);
+    return;
+  }
+  if (compositors::isKde() && (!task.title.empty() || !task.appId.empty())) {
+    m_platform.activateKdeWindow(task.title, task.appId, task.workspaceWindowId);
     return;
   }
   if (!task.workspaceWindowId.empty()) {
@@ -370,6 +399,7 @@ void TaskbarWidget::buildTaskButtons(Renderer& renderer) {
 
     if (task.firstHandle != nullptr
         || !task.workspaceWindowId.empty()
+        || (compositors::isKde() && (!task.title.empty() || !task.appId.empty()))
         || clickWorkspace.has_value()
         || !cycleCandidates.empty()) {
       auto* areaPtr = area.get();
@@ -393,6 +423,10 @@ void TaskbarWidget::buildTaskButtons(Renderer& renderer) {
           }
           if (!windowId.empty()) {
             m_platform.focusCompositorWindow(windowId);
+            return;
+          }
+          if (compositors::isKde() && (!task.title.empty() || !task.appId.empty())) {
+            m_platform.activateKdeWindow(task.title, task.appId);
             return;
           }
           if (clickWorkspace.has_value()) {
@@ -970,18 +1004,22 @@ void TaskbarWidget::updateModels() {
         WorkspaceModel item{};
         item.workspace = workspaces[i];
         item.hostOutput = wo.output;
-        const std::string baseKey =
-            i < displayKeys.size() && !displayKeys[i].empty() ? displayKeys[i] : workspaceLabel(item.workspace, i);
+        const std::string label = compositors::isKde() && item.workspace.index > 0
+            ? std::to_string(item.workspace.index)
+            : workspaceLabel(item.workspace, i);
+        const std::string baseKey = compositors::isKde() && !item.workspace.id.empty()
+            ? item.workspace.id
+            : (i < displayKeys.size() && !displayKeys[i].empty() ? displayKeys[i] : label);
         item.key = keyPrefix + baseKey;
         if (useMultiOutputWorkspaceKeys()) {
           const auto ordIt = monitorOrdinal.find(wo.output);
           if (ordIt != monitorOrdinal.end()) {
-            item.label = baseKey + "\u00B7" + std::to_string(ordIt->second);
+            item.label = label + "\u00B7" + std::to_string(ordIt->second);
           } else {
-            item.label = baseKey;
+            item.label = label;
           }
         } else {
-          item.label = baseKey;
+          item.label = label;
         }
         nextWorkspaces.push_back(std::move(item));
       }
@@ -1034,7 +1072,7 @@ void TaskbarWidget::updateModels() {
   }
 
   std::vector<std::string> running = m_platform.runningAppIds(topFilter);
-  if (compositors::isHyprland()) {
+  if (compositors::isHyprland() || compositors::isKde()) {
     std::unordered_set<std::string> seenApps(running.begin(), running.end());
     for (const auto& row : workspaceAssignments) {
       if (!row.appId.empty() && seenApps.insert(row.appId).second) {
@@ -1054,8 +1092,7 @@ void TaskbarWidget::updateModels() {
 
     const auto windows = m_platform.windowsForApp(idLower, startupLower, topFilter);
     for (const auto& window : windows) {
-      const auto handleKey = window.handle != nullptr ? reinterpret_cast<std::uintptr_t>(window.handle)
-                                                      : reinterpret_cast<std::uintptr_t>(window.extHandle);
+      const auto handleKey = taskHandleKey(window);
       if (handleKey == 0 || !processedHandles.insert(handleKey).second) {
         continue;
       }
@@ -1071,8 +1108,51 @@ void TaskbarWidget::updateModels() {
       task.title = window.title;
       task.active = activeHandle != nullptr && activeHandle == window.handle;
       task.firstHandle = window.handle;
+      if (!window.identifier.empty()) {
+        task.workspaceWindowId = window.identifier;
+      }
       task.iconPath = resolveIconPath(run.runningAppId, run.entry.icon);
       task.workspaceKey = {};
+      nextTasks.push_back(std::move(task));
+    }
+  }
+
+  if (compositors::isKde() && nextTasks.empty()) {
+    for (const auto& assignment : workspaceAssignments) {
+      if (assignment.appId.empty()) {
+        continue;
+      }
+      const std::string idLower = toLower(assignment.appId);
+      std::uintptr_t handleKey = 0;
+      if (!assignment.windowId.empty()) {
+        handleKey = static_cast<std::uintptr_t>(std::hash<std::string>{}(assignment.windowId));
+        if (handleKey == 0) {
+          handleKey = 1;
+        }
+      }
+      if (handleKey == 0) {
+        handleKey = static_cast<std::uintptr_t>(
+            std::hash<std::string>{}(assignment.appId + "\n" + assignment.title + "\n" + assignment.workspaceKey)
+        );
+        if (handleKey == 0) {
+          handleKey = 1;
+        }
+      }
+      if (!processedHandles.insert(handleKey).second) {
+        continue;
+      }
+
+      TaskModel task{};
+      task.handleKey = handleKey;
+      task.appId = assignment.appId;
+      task.idLower = idLower;
+      task.startupWmClassLower = idLower;
+      task.nameLower = idLower;
+      task.appIdLower = idLower;
+      task.title = assignment.title;
+      task.workspaceWindowId = assignment.windowId;
+      task.workspaceKey = assignment.workspaceKey;
+      task.iconPath = resolveIconPath(assignment.appId, {});
       nextTasks.push_back(std::move(task));
     }
   }
@@ -1104,6 +1184,39 @@ void TaskbarWidget::updateModels() {
           && !task.workspaceWindowId.empty()
           && task.workspaceWindowId == *focusedCompositorWindowId) {
         task.active = true;
+      }
+    }
+  }
+
+  if (compositors::isKde()) {
+    const auto activeToplevel = m_platform.activeToplevel();
+    for (auto& task : nextTasks) {
+      if (!task.workspaceWindowId.empty()) {
+        for (const auto& row : workspaceAssignments) {
+          if (row.windowId == task.workspaceWindowId) {
+            task.workspaceKey = row.workspaceKey;
+            break;
+          }
+        }
+      }
+      if (task.workspaceWindowId.empty()) {
+        for (const auto& row : workspaceAssignments) {
+          if (row.title == task.title && toLower(row.appId) == toLower(task.appId)) {
+            task.workspaceWindowId = row.windowId;
+            task.workspaceKey = row.workspaceKey;
+            break;
+          }
+        }
+      }
+      if (!task.active && activeToplevel.has_value()) {
+        const bool titleMatch = !activeToplevel->title.empty() && task.title == activeToplevel->title;
+        const bool appMatch = !activeToplevel->appId.empty() && toLower(task.appId) == toLower(activeToplevel->appId);
+        const bool idMatch = !activeToplevel->identifier.empty()
+            && !task.workspaceWindowId.empty()
+            && task.workspaceWindowId == activeToplevel->identifier;
+        if (idMatch || (appMatch && titleMatch)) {
+          task.active = true;
+        }
       }
     }
   }

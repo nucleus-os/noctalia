@@ -78,6 +78,7 @@ private:
   std::uint64_t m_entriesVersion = 0;
   IconResolver m_iconResolver;
   std::unordered_map<std::string, zwlr_foreign_toplevel_handle_v1*> m_lastActiveHandleByAppIdLower;
+  std::unordered_map<std::string, std::string> m_lastActiveIdentifierByAppIdLower;
   std::vector<std::unique_ptr<shell::dock::DockInstance>> m_instances;
   std::unordered_map<wl_surface*, shell::dock::DockInstance*> m_surfaceMap;
   shell::dock::DockInstance* m_hoveredInstance = nullptr;

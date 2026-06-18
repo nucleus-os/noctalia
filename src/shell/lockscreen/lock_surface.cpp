@@ -474,8 +474,8 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   m_loginPanel->setVisible(true);
   m_passwordField->setVisible(true);
   m_loginButton->setVisible(true);
-  const float panelHeight = lockscreen_login_box::panelHeight();
-  float panelWidth = lockscreen_login_box::panelWidth(sw);
+  float panelHeight = lockscreen_login_box::defaultPanelHeight();
+  float panelWidth = lockscreen_login_box::defaultPanelWidth(sw);
   float panelX = std::round((sw - panelWidth) * 0.5f);
   float panelY = std::max(Style::spaceLg, sh - panelHeight - 84.0f);
   if (m_config != nullptr) {
@@ -500,7 +500,9 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
           cy = cy * (curH / refH);
         }
       }
-      lockscreen_login_box::panelOriginFromCenter(cx, cy, sw, panelX, panelY, panelWidth);
+      lockscreen_login_box::panelOriginFromCenter(
+          cx, cy, sw, loginBox->boxWidth, loginBox->boxHeight, panelX, panelY, panelWidth, panelHeight
+      );
     }
   }
 
@@ -569,13 +571,11 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   );
 
   const float contentLeft = panelX + Style::spaceLg;
-  const float contentTop = panelY + 22.0f;
-  const float rightInset = Style::spaceLg + Style::spaceSm;
-  const float contentWidth = panelWidth - Style::spaceLg - rightInset;
-  const float buttonWidth = Style::controlHeight;
-  const float gap = Style::spaceSm;
-  const float inputWidth =
-      loginStyle.showLoginButton ? std::max(120.0f, contentWidth - buttonWidth - gap) : std::max(120.0f, contentWidth);
+  const lockscreen_login_box::PanelContentLayout contentLayout =
+      lockscreen_login_box::panelContentLayout(panelWidth, panelHeight, loginStyle.showLoginButton);
+  const float contentTop = panelY + contentLayout.contentTop;
+  const float inputWidth = contentLayout.inputWidth;
+  const float buttonWidth = contentLayout.controlHeight;
 
   m_passwordField->setSurfaceOpacity(loginStyle.inputOpacity);
   m_passwordField->setFrameRadius(loginStyle.inputRadius);
@@ -586,13 +586,14 @@ void LockSurface::layoutScene(std::uint32_t width, std::uint32_t height) {
   m_loginButton->setVisible(loginStyle.showLoginButton);
   if (loginStyle.showLoginButton) {
     m_loginButton->setRadius(Style::scaledRadius(loginStyle.inputRadius));
-    m_loginButton->setSize(buttonWidth, Style::controlHeight);
-    m_loginButton->setPosition(contentLeft + inputWidth + gap, contentTop);
+    m_loginButton->setSize(buttonWidth, buttonWidth);
+    m_loginButton->setPosition(panelX + contentLayout.buttonX, contentTop);
     m_loginButton->layout(*renderer);
   }
 
   // Status line, centered above the login panel.
   if (m_statusLabel != nullptr && m_locked && !m_status.empty()) {
+    const float contentWidth = panelWidth - Style::spaceLg - (Style::spaceLg + Style::spaceSm);
     m_statusLabel->setMaxWidth(contentWidth);
     m_statusLabel->layout(*renderer);
     const float labelX = panelX + std::round((panelWidth - m_statusLabel->width()) * 0.5f);

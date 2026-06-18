@@ -324,6 +324,7 @@ std::vector<ToplevelInfo> WaylandToplevels::windowsForApp(
               .info = ToplevelInfo{
                   .title = state.title,
                   .appId = appId,
+                  .identifier = appId + ":" + state.title,
                   .order = state.order,
                   .handle = handle,
               },
