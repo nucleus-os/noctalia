@@ -649,7 +649,9 @@ void OsdOverlay::updateInstanceContent(Instance& inst) {
   const float ch = cardHeight(s, m_lastOrientation, m_lastShowProgress);
   inst.background->setFill(colorSpecFromRole(ColorRole::Surface, osdBackgroundOpacity(m_config)));
 
-  const auto accentRole = m_content.overLimit ? ColorRole::Error : ColorRole::Primary;
+  const ColorRole accentRole = m_content.overLimit ? ColorRole::Error
+      : m_content.muted                            ? ColorRole::OnSurfaceVariant
+                                                   : ColorRole::Primary;
   inst.glyph->setGlyph(m_content.icon);
   inst.glyph->setColor(colorSpecFromRole(accentRole));
   inst.progress->setVisible(m_content.showProgress);
@@ -657,7 +659,10 @@ void OsdOverlay::updateInstanceContent(Instance& inst) {
   inst.progress->setOrientation(vertical ? ProgressBarOrientation::Vertical : ProgressBarOrientation::Horizontal);
   inst.row->setJustify((vertical || !m_content.showProgress) ? FlexJustify::Center : FlexJustify::Start);
   inst.value->setFontSize(valueFontSize(s));
-  inst.value->setColor(colorSpecFromRole(m_content.overLimit ? ColorRole::Error : ColorRole::OnSurface));
+  const ColorRole valueRole = m_content.overLimit ? ColorRole::Error
+      : m_content.muted                           ? ColorRole::OnSurfaceVariant
+                                                  : ColorRole::OnSurface;
+  inst.value->setColor(colorSpecFromRole(valueRole));
   inst.value->setTextAlign((vertical || !m_content.showProgress) ? TextAlign::Center : TextAlign::End);
   // Media titles are arbitrary length; cap them to the card so they ellipsize instead of overflowing.
   const float horizontalValueMax = cw - cardPadding(s) * 2.0f - glyphSize(s) - innerGap(s);
