@@ -324,6 +324,7 @@ std::unique_ptr<Flex> WeatherTab::create() {
             .text = i18n::tr("control-center.weather.forecast-placeholder.day"),
             .fontSize = Style::fontSizeBody * scale,
             .color = colorSpecFromRole(ColorRole::OnSurface),
+            .maxLines = 1,
             .fontWeight = FontWeight::Bold,
         })
     );
