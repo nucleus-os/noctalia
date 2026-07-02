@@ -1736,6 +1736,15 @@
           "description": "Space between dock items",
           "label": "Item Spacing"
         },
+        "launcher-custom-image": {
+          "description": "Use an image on the dock launcher button instead of an icon",
+          "label": "Launcher Custom Image",
+          "placeholder": "Path to an image"
+        },
+        "launcher-custom-image-colorize": {
+          "description": "Tint the custom image with the icon color",
+          "label": "Colorize Custom Image"
+        },
         "launcher-icon": {
           "description": "Tabler icon shown on the dock launcher button",
           "label": "Launcher Icon"

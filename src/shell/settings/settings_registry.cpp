@@ -3,6 +3,7 @@
 #include "config/config_types.h"
 #include "config/schema/config_schema.h"
 #include "config/schema/ranges.h"
+#include "core/files/resource_paths.h"
 #include "core/log.h"
 #include "core/process/process.h"
 #include "i18n/i18n.h"
@@ -818,12 +819,43 @@ namespace settings {
         tr("settings.schema.dock.launcher-position.description"), {"dock", "launcher_position"},
         asSegmented(enumSelect(kDockLauncherPositions, cfg.dock.launcherPosition)), "launcher apps grid"
     ));
-    entries.push_back(makeEntry(
-        SettingsSection::Dock, "behavior", tr("settings.schema.dock.launcher-icon.label"),
-        tr("settings.schema.dock.launcher-icon.description"), {"dock", "launcher_icon"},
-        TextSetting{.value = cfg.dock.launcherIcon, .placeholder = "grid-dots", .browseFileExtensions = {}},
-        "launcher apps icon glyph"
-    ));
+    const SettingVisibility dockLauncherEnabled{{"dock", "launcher_position"}, {"start", "end"}};
+    {
+      auto e = makeEntry(
+          SettingsSection::Dock, "behavior", tr("settings.schema.dock.launcher-icon.label"),
+          tr("settings.schema.dock.launcher-icon.description"), {"dock", "launcher_icon"},
+          TextSetting{.value = cfg.dock.launcherIcon, .placeholder = "grid-dots", .browseFileExtensions = {}},
+          "launcher apps icon glyph"
+      );
+      e.visibleWhen = dockLauncherEnabled;
+      entries.push_back(std::move(e));
+    }
+    {
+      auto e = makeEntry(
+          SettingsSection::Dock, "behavior", tr("settings.schema.dock.launcher-custom-image.label"),
+          tr("settings.schema.dock.launcher-custom-image.description"), {"dock", "launcher_custom_image"},
+          TextSetting{
+              .value = cfg.dock.launcherCustomImage,
+              .placeholder = tr("settings.schema.dock.launcher-custom-image.placeholder"),
+              .browseMode = TextSettingBrowseMode::OpenFile,
+              .browseFileExtensions = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp", ".gif"},
+              .browseFallbackDirectory = paths::assetPath("images").string(),
+          },
+          "launcher apps image picture logo"
+      );
+      e.visibleWhen = dockLauncherEnabled;
+      entries.push_back(std::move(e));
+    }
+    {
+      auto e = makeEntry(
+          SettingsSection::Dock, "behavior", tr("settings.schema.dock.launcher-custom-image-colorize.label"),
+          tr("settings.schema.dock.launcher-custom-image-colorize.description"),
+          {"dock", "launcher_custom_image_colorize"}, ToggleSetting{cfg.dock.launcherCustomImageColorize},
+          "launcher apps image tint color"
+      );
+      e.visibleWhen = dockLauncherEnabled;
+      entries.push_back(std::move(e));
+    }
     entries.push_back(makeEntry(
         SettingsSection::Dock, "layout", tr("settings.schema.shared.position.label"),
         tr("settings.schema.dock.position.description"), {"dock", "position"},
@@ -894,17 +926,7 @@ namespace settings {
         tr("settings.schema.dock.shadow.description"), {"dock", "shadow"}, ToggleSetting{cfg.dock.shadow}, "shadow"
     ));
     entries.push_back(makeEntry(
-        SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.active-icon-scale.label"),
-        tr("settings.schema.dock.active-icon-scale.description"), {"dock", "active_scale"},
-        sliderFor(cfg.dock.activeScale, noctalia::config::schema::kDockActiveScaleRange, false), "focused", true
-    ));
-    entries.push_back(makeEntry(
-        SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.inactive-icon-scale.label"),
-        tr("settings.schema.dock.inactive-icon-scale.description"), {"dock", "inactive_scale"},
-        sliderFor(cfg.dock.inactiveScale, noctalia::config::schema::kDockInactiveScaleRange, false), "unfocused", true
-    ));
-    entries.push_back(makeEntry(
-        SettingsSection::Dock, "behavior", tr("settings.schema.dock.magnification.label"),
+        SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.magnification.label"),
         tr("settings.schema.dock.magnification.description"), {"dock", "magnification"},
         ToggleSetting{cfg.dock.magnification}, "magnify zoom mac"
     ));
@@ -913,6 +935,16 @@ namespace settings {
         tr("settings.schema.dock.magnification-scale.description"), {"dock", "magnification_scale"},
         sliderFor(cfg.dock.magnificationScale, noctalia::config::schema::kDockMagnificationScaleRange, false),
         "magnify zoom"
+    ));
+    entries.push_back(makeEntry(
+        SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.active-icon-scale.label"),
+        tr("settings.schema.dock.active-icon-scale.description"), {"dock", "active_scale"},
+        sliderFor(cfg.dock.activeScale, noctalia::config::schema::kDockActiveScaleRange, false), "focused", true
+    ));
+    entries.push_back(makeEntry(
+        SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.inactive-icon-scale.label"),
+        tr("settings.schema.dock.inactive-icon-scale.description"), {"dock", "inactive_scale"},
+        sliderFor(cfg.dock.inactiveScale, noctalia::config::schema::kDockInactiveScaleRange, false), "unfocused", true
     ));
     entries.push_back(makeEntry(
         SettingsSection::Dock, "focus-styling", tr("settings.schema.dock.active-icon-opacity.label"),

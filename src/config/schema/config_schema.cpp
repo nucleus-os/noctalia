@@ -393,6 +393,8 @@ namespace noctalia::config::schema {
         field(&DockConfig::showInstanceCount, "show_instance_count"),
         enumField(&DockConfig::launcherPosition, "launcher_position", kDockLauncherPositions),
         field(&DockConfig::launcherIcon, "launcher_icon"),
+        field(&DockConfig::launcherCustomImage, "launcher_custom_image"),
+        field(&DockConfig::launcherCustomImageColorize, "launcher_custom_image_colorize"),
         field(&DockConfig::pinned, "pinned"),
         field(&DockConfig::monitors, "monitors"),
     };

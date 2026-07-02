@@ -363,7 +363,8 @@ namespace shell::dock {
   void handleItemClick(DockInstance& instance, const DockItemAction& action, DockItemClickContext& context);
 
   std::unique_ptr<InputArea> createLauncherButton(
-      DockInstance& instance, const DockConfig& cfg, const std::shared_ptr<DockItemClickContext>& clickContext
+      DockInstance& instance, const DockConfig& cfg, RenderContext& renderContext,
+      const std::shared_ptr<DockItemClickContext>& clickContext
   ) {
     const DockEdge edge = cfg.position;
     const bool vert = shell::dock::isVerticalEdge(edge);
@@ -380,24 +381,42 @@ namespace shell::dock {
       areaNode->setSize(cellCross, cellMain);
     }
 
-    auto launcherGlyph = ui::glyph({
-        .glyphSize = glyphSize,
-        .color = colorSpecFromRole(ColorRole::OnSurface),
-        .width = iSize,
-        .height = iSize,
-        .configure = [&cfg, glyphOffsetY](Glyph& glyph) {
-          if (!glyph.setGlyph(dockLauncherIconGlyph(cfg))) {
-            glyph.setGlyph("grid-dots");
-          }
-          glyph.setPosition(kCellPad, glyphOffsetY);
-        },
-    });
-    auto* glyphPtr = static_cast<Glyph*>(launcherGlyph.get());
-    areaNode->addChild(std::move(launcherGlyph));
+    if (!cfg.launcherCustomImage.empty()) {
+      RenderContext* renderContextPtr = &renderContext;
+      auto launcherImage = ui::image({
+          .fit = ImageFit::Contain,
+          .width = glyphSize,
+          .height = glyphSize,
+          .configure = [&cfg, glyphOffsetY, renderContextPtr](Image& image) {
+            image.setSourceFile(*renderContextPtr, cfg.launcherCustomImage, cfg.iconSize, true);
+            image.setForegroundTint(
+                cfg.launcherCustomImageColorize ? std::optional<ColorSpec>{colorSpecFromRole(ColorRole::OnSurface)}
+                                                : std::nullopt
+            );
+            image.setPosition(kCellPad, glyphOffsetY);
+          },
+      });
+      instance.launcherIconNode = static_cast<Image*>(launcherImage.get());
+      areaNode->addChild(std::move(launcherImage));
+    } else {
+      auto launcherGlyph = ui::glyph({
+          .glyphSize = glyphSize,
+          .color = colorSpecFromRole(ColorRole::OnSurface),
+          .width = iSize,
+          .height = iSize,
+          .configure = [&cfg, glyphOffsetY](Glyph& glyph) {
+            if (!glyph.setGlyph(dockLauncherIconGlyph(cfg))) {
+              glyph.setGlyph("grid-dots");
+            }
+            glyph.setPosition(kCellPad, glyphOffsetY);
+          },
+      });
+      instance.launcherIconNode = static_cast<Glyph*>(launcherGlyph.get());
+      areaNode->addChild(std::move(launcherGlyph));
+    }
     instance.launcherArea = areaNode.get();
-    instance.launcherIconNode = glyphPtr;
     instance.launcherVisualScale = cfg.inactiveScale;
-    glyphPtr->setScale(cfg.inactiveScale);
+    instance.launcherIconNode->setScale(cfg.inactiveScale);
     if (instance.launcherScaleAnimId != 0) {
       instance.animations.cancel(instance.launcherScaleAnimId);
       instance.launcherScaleAnimId = 0;
@@ -466,7 +485,7 @@ namespace shell::dock {
     const auto& itemModels = snapshot.items;
 
     if (launcherPosition == DockLauncherPosition::Start) {
-      instance.row->addChild(createLauncherButton(instance, cfg, clickContext));
+      instance.row->addChild(createLauncherButton(instance, cfg, deps.renderContext, clickContext));
     }
 
     // Reserve up-front so emplace_back never reallocates while lambdas hold raw pointers.
@@ -611,7 +630,7 @@ namespace shell::dock {
     }
 
     if (launcherPosition == DockLauncherPosition::End) {
-      instance.row->addChild(createLauncherButton(instance, cfg, clickContext));
+      instance.row->addChild(createLauncherButton(instance, cfg, deps.renderContext, clickContext));
     }
 
     if (cfg.magnification && instance.launcherIconNode != nullptr) {

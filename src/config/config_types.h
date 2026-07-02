@@ -555,9 +555,11 @@ struct DockConfig {
   bool showDots = false;               // show optional running window dots beside app icons
   bool showInstanceCount = true;       // show a badge with count when app has >1 window
   DockLauncherPosition launcherPosition = DockLauncherPosition::None;
-  std::string launcherIcon = "grid-dots"; // Tabler glyph name
-  std::vector<std::string> pinned;        // desktop entry IDs to always show
-  std::vector<std::string> monitors;      // connector names to show on; empty = all outputs
+  std::string launcherIcon = "grid-dots";   // Tabler glyph name
+  std::string launcherCustomImage = "";     // image path; overrides launcherIcon glyph when set
+  bool launcherCustomImageColorize = false; // tint the custom image with the icon color role
+  std::vector<std::string> pinned;          // desktop entry IDs to always show
+  std::vector<std::string> monitors;        // connector names to show on; empty = all outputs
   bool operator==(const DockConfig&) const = default;
 };
 
