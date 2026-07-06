@@ -28,6 +28,7 @@ namespace lockscreen_login_box {
 
   struct LoginBoxStyle {
     ColorSpec panelFill = colorSpecFromRole(ColorRole::SurfaceVariant, 0.88f);
+    float panelOpacity = 0.88f;
     float panelRadius = 12.0f;
     float inputOpacity = 1.0f;
     float inputRadius = 6.0f;

@@ -188,9 +188,10 @@ namespace lockscreen_login_box {
 
   LoginBoxStyle resolveStyle(const std::unordered_map<std::string, WidgetSettingValue>& settings) {
     LoginBoxStyle style;
+    style.panelOpacity = std::clamp(readFloat(settings, "background_opacity", style.panelOpacity), 0.0f, 1.0f);
     ColorSpec panelFill =
         colorSpecFromConfigString(readString(settings, "background_color", "surface_variant"), "background_color");
-    panelFill.alpha *= std::clamp(readFloat(settings, "background_opacity", 0.88f), 0.0f, 1.0f);
+    panelFill.alpha *= style.panelOpacity;
     style.panelFill = panelFill;
     style.panelRadius = std::clamp(readFloat(settings, "background_radius", style.panelRadius), 0.0f, 32.0f);
     style.inputOpacity = std::clamp(readFloat(settings, kInputOpacityKey, style.inputOpacity), 0.0f, 1.0f);
