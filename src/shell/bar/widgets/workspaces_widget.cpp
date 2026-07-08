@@ -404,6 +404,17 @@ void WorkspacesWidget::updateContainerSize() {
       total = std::max(total, item.currentX + item.currentWidth);
     }
   }
+
+  if (m_animId != 0) {
+    float targetTotal = 0.0f;
+    for (const auto& item : m_items) {
+      if (item.targetWidth > 0.0f) {
+        targetTotal = std::max(targetTotal, item.targetX + item.targetWidth);
+      }
+    }
+    total = std::max(total, targetTotal);
+  }
+
   if (total <= 0.0f) {
     if (m_isVertical) {
       m_container->setFrameSize(m_indicatorHeight, 0.0f);
@@ -589,6 +600,10 @@ void WorkspacesWidget::startAnimation() {
       },
       [this]() { m_animId = 0; }, this
   );
+
+  // Reserve final bounds before the first animated frame to avoid one-frame overflow.
+  updateContainerSize();
+
   if (root() != nullptr) {
     root()->markPaintDirty();
   }
