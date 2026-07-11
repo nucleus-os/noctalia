@@ -87,7 +87,9 @@ float SessionPanel::preferredWidth() const {
   const float w = kButtonMinWidth * static_cast<float>(n)
       + gap * static_cast<float>(n > 1 ? n - 1 : 0)
       + Style::panelPadding * 2.0f;
-  return scaled(std::max(kPanelMinWidth, w));
+  // The min-width floor keeps the default single-row panel comfortably wide; an explicit
+  // grid sizes to its own columns instead of being stretched back out to it.
+  return scaled(gridEnabled() ? w : std::max(kPanelMinWidth, w));
 }
 
 float SessionPanel::preferredHeight() const {
@@ -106,8 +108,14 @@ std::size_t SessionPanel::entryCountForLayout() const {
   return effectiveActions().size();
 }
 
+bool SessionPanel::gridEnabled() const { return m_config != nullptr && m_config->config().shell.session.grid; }
+
 std::size_t SessionPanel::visibleColumnCount() const {
   const std::size_t n = std::max<std::size_t>(1, entryCountForLayout());
+  if (gridEnabled()) {
+    const auto columns = static_cast<std::size_t>(std::max(1, m_config->config().shell.session.gridColumns));
+    return std::min(columns, n);
+  }
   if (n <= kMaxColumns) {
     return n;
   }

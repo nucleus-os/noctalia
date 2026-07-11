@@ -107,6 +107,7 @@ namespace settings {
     bool literalLabels = false;     // when true, option.labelKey holds a literal label (not an i18n key)
     WidgetSettingGroup group = WidgetSettingGroup::Widget;
     std::vector<WidgetSettingSelectOption> options; // value+label; values mirror schema.enumValues
+    bool visibleInInspector = true;
     bool advanced = false;
     bool segmented = false;              // applies when control == Select
     bool integerValue = false;           // applies when control == Select

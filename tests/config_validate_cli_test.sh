@@ -15,6 +15,9 @@ case "$valid_output" in
   *"Config is valid"*) ;;
   *) fail "generated single-file config did not print success" ;;
 esac
+case "$valid_output" in
+  *"WARN"*) fail "generated single-file config reported a warning" ;;
+esac
 
 warn_output=$("$noctalia_bin" config validate tests/config_validate/warn-only.toml 2>&1) \
   || fail "warning-only config should validate"

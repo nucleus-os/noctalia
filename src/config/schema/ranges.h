@@ -24,6 +24,7 @@ namespace noctalia::config::schema {
       noctalia::config::kClipboardHistoryMaxEntries,
       noctalia::config::kClipboardHistoryStepEntries,
   };
+  inline constexpr Range<std::int64_t> kSessionGridColumnsRange{1, 5, 1};
 
   // Battery / wallpaper.
   inline constexpr Range<std::int64_t> kBatteryWarningThresholdRange{0, 100, 1};

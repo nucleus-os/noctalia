@@ -455,6 +455,63 @@ namespace settings {
           && ctx.configService->hasOverride({"widget", std::string(widgetName)});
     }
 
+    bool widgetHasPlacementAfterLaneEdit(
+        const Config& cfg, const std::vector<std::string>& editedLanePath,
+        const std::vector<std::string>& editedLaneItems, std::string_view widgetName
+    ) {
+      const auto editedItems = [&](const std::vector<std::string>& path,
+                                   const std::vector<std::string>& items) -> const std::vector<std::string>& {
+        return path == editedLanePath ? editedLaneItems : items;
+      };
+      const auto scopeContains = [&](const std::vector<std::string>& start, const std::vector<std::string>& center,
+                                     const std::vector<std::string>& end,
+                                     const std::vector<BarCapsuleGroupStyle>& groups) {
+        if (std::ranges::contains(start, widgetName)
+            || std::ranges::contains(center, widgetName)
+            || std::ranges::contains(end, widgetName)) {
+          return true;
+        }
+        for (const auto& group : groups) {
+          if (!std::ranges::contains(group.members, widgetName)) {
+            continue;
+          }
+          const std::string token = makeCapsuleGroupToken(group.id);
+          if (std::ranges::contains(start, token)
+              || std::ranges::contains(center, token)
+              || std::ranges::contains(end, token)) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      for (const auto& bar : cfg.bars) {
+        const std::vector<std::string>& baseStart = editedItems({"bar", bar.name, "start"}, bar.startWidgets);
+        const std::vector<std::string>& baseCenter = editedItems({"bar", bar.name, "center"}, bar.centerWidgets);
+        const std::vector<std::string>& baseEnd = editedItems({"bar", bar.name, "end"}, bar.endWidgets);
+        if (scopeContains(baseStart, baseCenter, baseEnd, bar.widgetCapsuleGroups)) {
+          return true;
+        }
+
+        for (const auto& ovr : bar.monitorOverrides) {
+          const std::vector<std::string>& monitorStart = ovr.startWidgets.has_value()
+              ? editedItems({"bar", bar.name, "monitor", ovr.match, "start"}, *ovr.startWidgets)
+              : baseStart;
+          const std::vector<std::string>& monitorCenter = ovr.centerWidgets.has_value()
+              ? editedItems({"bar", bar.name, "monitor", ovr.match, "center"}, *ovr.centerWidgets)
+              : baseCenter;
+          const std::vector<std::string>& monitorEnd = ovr.endWidgets.has_value()
+              ? editedItems({"bar", bar.name, "monitor", ovr.match, "end"}, *ovr.endWidgets)
+              : baseEnd;
+          const auto& groups = ovr.widgetCapsuleGroups.has_value() ? *ovr.widgetCapsuleGroups : bar.widgetCapsuleGroups;
+          if (scopeContains(monitorStart, monitorCenter, monitorEnd, groups)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
     bool isValidWidgetInstanceId(std::string_view id) {
       if (id.empty()) {
         return false;
@@ -1340,6 +1397,9 @@ namespace settings {
           lanePath.size() >= 2 && lanePath[0] == "bar" ? isBarHorizontal(ctx.config, lanePath[1]) : true;
       for (const std::size_t specIndex : specOrder) {
         const auto& spec = specs[specIndex];
+        if (!spec.visibleInInspector) {
+          continue;
+        }
         if (spec.horizontalBarOnly && !barHorizontal) {
           continue;
         }
@@ -3111,9 +3171,16 @@ namespace settings {
         const bool isSelected = std::ranges::contains(ctx.selectedLaneWidgets, selectionToken);
         std::function<void()> removeClose;
         if (!inherited) {
-          removeClose = [setOverride = ctx.setOverride, items = laneItems, lanePath, i]() mutable {
-            items.erase(items.begin() + static_cast<std::ptrdiff_t>(i));
+          auto items = laneItems;
+          items.erase(items.begin() + static_cast<std::ptrdiff_t>(i));
+          const bool removeInstance = isGuiManagedNamedWidgetInstance(ctx, entryName)
+              && !widgetHasPlacementAfterLaneEdit(ctx.config, lanePath, items, entryName);
+          removeClose = [setOverride = ctx.setOverride, clearOverride = ctx.clearOverride, items = std::move(items),
+                         lanePath, entryName, removeInstance]() {
             setOverride(lanePath, items);
+            if (removeInstance) {
+              clearOverride({"widget", entryName});
+            }
           };
         }
         std::function<void()> toggleSelect;

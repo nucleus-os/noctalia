@@ -74,6 +74,7 @@ private:
   [[nodiscard]] std::vector<SessionPanelActionConfig> effectiveActions() const;
   [[nodiscard]] Button* createActionButton(const SessionPanelActionConfig& cfg, std::size_t index, float scale);
   [[nodiscard]] std::size_t entryCountForLayout() const;
+  [[nodiscard]] bool gridEnabled() const;
   [[nodiscard]] std::size_t visibleColumnCount() const;
   [[nodiscard]] std::size_t visibleRowCount() const;
 

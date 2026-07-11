@@ -1358,6 +1358,8 @@ namespace noctalia::config::schema {
               &ShellSessionConfig::actions, "actions", sessionActionSchema(),
               [](const SessionPanelActionConfig& a) { return !a.action.empty(); }
           ),
+          field(&ShellSessionConfig::grid, "grid"),
+          field(&ShellSessionConfig::gridColumns, "grid_columns", kSessionGridColumnsRange),
           subTable(&ShellSessionConfig::power, "power", shellSessionPowerSchema()),
       };
       return s;
