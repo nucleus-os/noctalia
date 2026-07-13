@@ -380,70 +380,46 @@ std::string WeatherService::glyphForCode(std::int32_t code, bool isDay) {
   return "weather-cloud";
 }
 
-std::string WeatherService::shortDescriptionForCode(std::int32_t code) {
-  if (code == 0) {
-    return i18n::tr("weather.conditions.short.clear");
-  }
-  if (code == 1) {
-    return i18n::tr("weather.conditions.short.mostly-clear");
-  }
-  if (code == 2) {
-    return i18n::tr("weather.conditions.short.cloudy");
-  }
-  if (code == 3) {
-    return i18n::tr("weather.conditions.short.overcast");
-  }
-  if (code == 45 || code == 48) {
-    return i18n::tr("weather.conditions.short.fog");
-  }
-  if (code >= 51 && code <= 67) {
-    return i18n::tr("weather.conditions.short.drizzle");
-  }
-  if (code >= 71 && code <= 77) {
-    return i18n::tr("weather.conditions.short.snow");
-  }
-  if (code >= 80 && code <= 82) {
-    return i18n::tr("weather.conditions.short.showers");
-  }
-  if (code >= 85 && code <= 86) {
-    return i18n::tr("weather.conditions.short.snow-showers");
-  }
-  if (code >= 95 && code <= 99) {
-    return i18n::tr("weather.conditions.short.storm");
-  }
-  return i18n::tr("weather.conditions.short.weather");
+std::string WeatherService::shortDescriptionForCode(std::int32_t code, bool isDay) {
+  // Apple's short and full condition wording is identical, so reuse the full mapping.
+  return descriptionForCode(code, isDay);
 }
 
-std::string WeatherService::descriptionForCode(std::int32_t code) {
+std::string WeatherService::descriptionForCode(std::int32_t code, bool isDay) {
+  // Apple Weather vocabulary. Only clear/mostly-clear vary by day vs night ("Sunny"
+  // vs "Clear"); intensity within rain/snow is conveyed by the effect, not the label.
   if (code == 0) {
-    return i18n::tr("weather.conditions.full.clear-sky");
+    return i18n::tr(isDay ? "weather.conditions.full.sunny" : "weather.conditions.full.clear");
   }
   if (code == 1) {
-    return i18n::tr("weather.conditions.full.mainly-clear");
+    return i18n::tr(isDay ? "weather.conditions.full.mostly-sunny" : "weather.conditions.full.mostly-clear");
   }
   if (code == 2) {
     return i18n::tr("weather.conditions.full.partly-cloudy");
   }
   if (code == 3) {
-    return i18n::tr("weather.conditions.full.overcast");
+    return i18n::tr("weather.conditions.full.cloudy");
   }
   if (code == 45 || code == 48) {
-    return i18n::tr("weather.conditions.full.fog");
+    return i18n::tr("weather.conditions.full.foggy");
   }
-  if (code >= 51 && code <= 67) {
+  if (code >= 51 && code <= 57) {
     return i18n::tr("weather.conditions.full.drizzle");
+  }
+  if (code >= 61 && code <= 67) {
+    return i18n::tr("weather.conditions.full.rain");
   }
   if (code >= 71 && code <= 77) {
     return i18n::tr("weather.conditions.full.snow");
   }
   if (code >= 80 && code <= 82) {
-    return i18n::tr("weather.conditions.full.rain-showers");
+    return i18n::tr("weather.conditions.full.showers");
   }
   if (code >= 85 && code <= 86) {
-    return i18n::tr("weather.conditions.full.snow-showers");
+    return i18n::tr("weather.conditions.full.flurries");
   }
   if (code >= 95 && code <= 99) {
-    return i18n::tr("weather.conditions.full.thunderstorm");
+    return i18n::tr("weather.conditions.full.thunderstorms");
   }
   return i18n::tr("weather.conditions.full.unknown");
 }

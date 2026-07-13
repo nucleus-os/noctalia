@@ -47,7 +47,18 @@ private:
   [[nodiscard]] static std::string todayIso(std::int32_t utcOffsetSeconds);
   [[nodiscard]] static std::string hourLabel(const std::string& isoTime, const std::string& timeFormat);
   [[nodiscard]] static std::string weekdayLabel(const std::string& isoDate);
-  [[nodiscard]] static EffectType effectForWeatherCode(std::int32_t code, bool isDay);
+
+  // Full description of the weather background effect for a WMO code + time of day:
+  // which shader, its params, and the literal Option-A sky gradient.
+  struct WeatherEffect {
+    EffectType type = EffectType::None;
+    bool night = false;
+    float cloudAmount = 0.0f;
+    float intensity = 1.0f;
+    Color skyTop{};
+    Color skyBottom{};
+  };
+  [[nodiscard]] static WeatherEffect weatherEffectForCode(std::int32_t code, bool isDay);
 
   static constexpr std::size_t kForecastRowCount = 7;
   static constexpr std::size_t kDetailRowCount = 7;

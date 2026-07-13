@@ -127,8 +127,8 @@ public:
   [[nodiscard]] const char* displayTemperatureUnit() const noexcept;
 
   [[nodiscard]] static std::string glyphForCode(std::int32_t code, bool isDay);
-  [[nodiscard]] static std::string shortDescriptionForCode(std::int32_t code);
-  [[nodiscard]] static std::string descriptionForCode(std::int32_t code);
+  [[nodiscard]] static std::string shortDescriptionForCode(std::int32_t code, bool isDay);
+  [[nodiscard]] static std::string descriptionForCode(std::int32_t code, bool isDay);
 
 private:
   enum class RequestKind : std::uint8_t {

@@ -379,7 +379,7 @@ bool DesktopWeatherWidget::sync() {
     glyphName = WeatherService::glyphForCode(snapshot.current.weatherCode, snapshot.current.isDay);
     const int temp = static_cast<int>(std::lround(m_weather->displayTemperature(snapshot.current.temperatureC)));
     temperatureText = std::format("{}{}", temp, m_weather->displayTemperatureUnit());
-    conditionText = WeatherService::shortDescriptionForCode(snapshot.current.weatherCode);
+    conditionText = WeatherService::shortDescriptionForCode(snapshot.current.weatherCode, snapshot.current.isDay);
   } else if (m_weather->loading()) {
     temperatureText = i18n::tr("desktop-widgets.weather.loading");
   } else if (!m_weather->error().empty()) {

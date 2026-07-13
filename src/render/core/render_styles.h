@@ -214,13 +214,22 @@ constexpr bool operator==(const FancyAudioVisualizerStyle& lhs, const FancyAudio
       && lhs.cornerRadius == rhs.cornerRadius;
 }
 
-enum class EffectType : std::uint8_t { None, Sun, Snow, Rain, Cloud, Fog, Stars };
+// Weather background effects. Sky renders sun (day) or stars (night) plus an optional
+// cloud layer (cloudAmount) — it covers Clear / Mostly Sunny / Partly Cloudy. Cloud and
+// Fog share the cloud shader (Fog = alternative mode). Rain/Snow/Thunder are precipitation,
+// with density driven by `intensity`.
+enum class EffectType : std::uint8_t { None, Sky, Cloud, Fog, Rain, Snow, Thunder };
 
 struct EffectStyle {
   EffectType type = EffectType::None;
   float time = 0.0f;
   float radius = 0.0f;
-  Color bgColor{};
+  Color bgColor{};      // only .a is used, as the card's overall opacity
+  Color skyTop{};       // literal condition-sky gradient (top)
+  Color skyBottom{};    // literal condition-sky gradient (bottom)
+  bool night = false;   // Sky: draw stars + a dark sky instead of sun
+  float cloudAmount = 0.0f; // Sky: 0 clear, ~0.26 mostly sunny, ~0.55 partly cloudy
+  float intensity = 1.0f;   // Rain/Snow: particle density by WMO severity
 };
 
 struct GraphStyle {

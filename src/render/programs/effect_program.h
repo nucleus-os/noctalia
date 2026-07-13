@@ -42,6 +42,11 @@ private:
     GLint bgColorLoc = -1;
     GLint radiusLoc = -1;
     GLint alternativeLoc = -1;
+    GLint nightLoc = -1;
+    GLint cloudAmountLoc = -1;
+    GLint intensityLoc = -1;
+    GLint skyTopLoc = -1;
+    GLint skyBottomLoc = -1;
   };
 
   void initProgram(std::size_t index, const char* fragSource);

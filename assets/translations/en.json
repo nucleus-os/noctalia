@@ -3666,30 +3666,20 @@
   "weather": {
     "conditions": {
       "full": {
-        "clear-sky": "Clear sky",
-        "drizzle": "Drizzle",
-        "fog": "Fog",
-        "mainly-clear": "Mainly clear",
-        "overcast": "Overcast",
-        "partly-cloudy": "Partly cloudy",
-        "rain-showers": "Rain showers",
-        "snow": "Snow",
-        "snow-showers": "Snow showers",
-        "thunderstorm": "Thunderstorm",
-        "unknown": "Unknown"
-      },
-      "short": {
-        "clear": "Clear",
         "cloudy": "Cloudy",
+        "clear": "Clear",
         "drizzle": "Drizzle",
-        "fog": "Fog",
-        "mostly-clear": "Mostly clear",
-        "overcast": "Overcast",
+        "flurries": "Flurries",
+        "foggy": "Foggy",
+        "mostly-clear": "Mostly Clear",
+        "mostly-sunny": "Mostly Sunny",
+        "partly-cloudy": "Partly Cloudy",
+        "rain": "Rain",
         "showers": "Showers",
         "snow": "Snow",
-        "snow-showers": "Snow showers",
-        "storm": "Storm",
-        "weather": "Weather"
+        "sunny": "Sunny",
+        "thunderstorms": "Thunderstorms",
+        "unknown": "Unknown"
       }
     },
     "errors": {

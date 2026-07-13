@@ -28,6 +28,31 @@ namespace {
 
   constexpr float kCurrentGlyphSize = Style::controlHeightLg * 2.2f;
 
+  // Precipitation density from the WMO code's severity digit (NOT from the base label):
+  // drizzle 51/53/55 · rain 61/63/65 · showers 80/81/82 · snow 71/73/75 · snow showers 85/86.
+  // Rain uses this as opacity/coverage; snow uses it as flake count.
+  float precipIntensity(std::int32_t code) {
+    if (code >= 51 && code <= 57) {
+      return code <= 51 ? 0.38f : (code <= 53 ? 0.52f : 0.66f);
+    }
+    if (code >= 61 && code <= 67) {
+      return code <= 61 ? 0.85f : (code <= 63 ? 1.15f : 1.7f);
+    }
+    if (code >= 80 && code <= 82) {
+      return code <= 80 ? 0.85f : (code <= 81 ? 1.15f : 1.75f);
+    }
+    if (code == 77) {
+      return 0.5f; // snow grains (light)
+    }
+    if (code >= 71 && code <= 75) {
+      return code <= 71 ? 0.55f : (code <= 73 ? 0.95f : 1.45f);
+    }
+    if (code >= 85 && code <= 86) {
+      return code <= 85 ? 0.62f : 1.3f;
+    }
+    return 1.0f;
+  }
+
   std::string windDirectionLabel(int degrees) {
     static constexpr std::array<const char*, 8> kDirs = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
     const int normalized = ((degrees % 360) + 360) % 360;
@@ -908,7 +933,7 @@ void WeatherTab::sync(Renderer& renderer) {
       m_currentHiLoLabel->setText("-- / --");
     }
   }
-  m_currentDescLabel->setText(WeatherService::descriptionForCode(snapshot.current.weatherCode));
+  m_currentDescLabel->setText(WeatherService::descriptionForCode(snapshot.current.weatherCode, snapshot.current.isDay));
   m_updatedLabel->setText(
       snapshot.locationName.empty() ? i18n::tr("location.locations.current") : snapshot.locationName
   );
@@ -996,18 +1021,24 @@ void WeatherTab::sync(Renderer& renderer) {
   }
 
   if (m_effectNode != nullptr) {
-    const EffectType newEffect = kTestEffect != EffectType::None
-        ? kTestEffect
-        : (m_weather->effectsEnabled() ? effectForWeatherCode(snapshot.current.weatherCode, snapshot.current.isDay)
-                                       : EffectType::None);
-    if (newEffect != m_activeEffect) {
-      m_activeEffect = newEffect;
+    WeatherEffect fx;
+    if (kTestEffect != EffectType::None) {
+      fx.type = kTestEffect;
+    } else if (m_weather->effectsEnabled()) {
+      fx = weatherEffectForCode(snapshot.current.weatherCode, snapshot.current.isDay);
+    }
+    if (fx.type != m_activeEffect) {
+      m_activeEffect = fx.type;
       m_shaderTime = 0.0f;
     }
-    m_effectNode->setEffectType(m_activeEffect);
-    m_effectNode->setBgColor(colorForRole(ColorRole::Surface));
+    m_effectNode->setEffectType(fx.type);
+    m_effectNode->setNight(fx.night);
+    m_effectNode->setCloudAmount(fx.cloudAmount);
+    m_effectNode->setIntensity(fx.intensity);
+    m_effectNode->setSky(fx.skyTop, fx.skyBottom);
+    m_effectNode->setBgColor(colorForRole(ColorRole::Surface)); // only .a (card opacity) is used now
     m_effectNode->setRadius(Style::scaledRadiusXl(contentScale()));
-    m_effectNode->setVisible(m_activeEffect != EffectType::None);
+    m_effectNode->setVisible(fx.type != EffectType::None);
   }
 }
 
@@ -1029,7 +1060,7 @@ void WeatherTab::syncDailyForecast(Renderer& renderer, const WeatherSnapshot& sn
     }
 
     const auto& day = snapshot.forecastDays[i + forecastStart];
-    const std::string condition = WeatherService::shortDescriptionForCode(day.weatherCode);
+    const std::string condition = WeatherService::shortDescriptionForCode(day.weatherCode, true);
     const std::string tempHigh = std::format(
         "{}{}", static_cast<int>(std::lround(m_weather->displayTemperature(day.temperatureMaxC))),
         m_weather->displayTemperatureUnit()
@@ -1094,7 +1125,7 @@ void WeatherTab::syncHourlyForecast(Renderer& renderer, const WeatherSnapshot& s
     const int displayTemp = static_cast<int>(std::lround(m_weather->displayTemperature(hour.temperatureC)));
     const double displayWind = imperial ? hour.windSpeedKmh * 0.621371 : hour.windSpeedKmh;
     const std::string displayWindText = std::format("{} {}", static_cast<int>(std::lround(displayWind)), windUnit);
-    const std::string condition = WeatherService::shortDescriptionForCode(hour.weatherCode);
+    const std::string condition = WeatherService::shortDescriptionForCode(hour.weatherCode, hour.isDay);
     const std::vector<TooltipRow> tooltipRows{
         {i18n::tr("control-center.weather.hourly.tooltip.condition"), condition},
         {i18n::tr("control-center.weather.hourly.tooltip.rain"),
@@ -1187,24 +1218,75 @@ void WeatherTab::onFrameTick(float deltaMs) {
   m_effectNode->setTime(m_shaderTime);
 }
 
-EffectType WeatherTab::effectForWeatherCode(std::int32_t code, bool isDay) {
-  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
-    return EffectType::Rain;
+WeatherTab::WeatherEffect WeatherTab::weatherEffectForCode(std::int32_t code, bool isDay) {
+  const bool night = !isDay;
+  auto c = [](float r, float g, float b) { return Color{r, g, b, 1.0f}; };
+  auto mk = [&](EffectType type, float cloud, float intensity, Color dTop, Color dBot, Color nTop, Color nBot) {
+    WeatherEffect e;
+    e.type = type;
+    e.night = night;
+    e.cloudAmount = cloud;
+    e.intensity = intensity;
+    e.skyTop = night ? nTop : dTop;
+    e.skyBottom = night ? nBot : dBot;
+    return e;
+  };
+
+  // Clear / Mostly Sunny / Partly Cloudy -> Sky effect (sun by day, stars by night)
+  // with an increasing cloud layer. isDay drives the night flag for every branch below.
+  if (code == 0) {
+    return mk(EffectType::Sky, 0.0f, 1.0f, c(.36f, .62f, .93f), c(.12f, .30f, .64f), c(.09f, .11f, .26f), c(.02f, .02f, .07f));
   }
-  if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) {
-    return EffectType::Snow;
+  if (code == 1) {
+    return mk(EffectType::Sky, 0.26f, 1.0f, c(.40f, .64f, .92f), c(.16f, .34f, .66f), c(.10f, .12f, .27f), c(.02f, .03f, .08f));
+  }
+  if (code == 2) {
+    return mk(EffectType::Sky, 0.55f, 1.0f, c(.46f, .66f, .90f), c(.22f, .40f, .66f), c(.12f, .14f, .28f), c(.03f, .04f, .10f));
   }
   if (code == 3) {
-    return EffectType::Cloud;
+    return mk(EffectType::Cloud, 0.0f, 1.0f, c(.56f, .59f, .64f), c(.33f, .35f, .39f), c(.18f, .20f, .26f), c(.08f, .09f, .12f));
   }
-  if (code >= 40 && code <= 49) {
-    return EffectType::Fog;
+  if (code == 45 || code == 48) {
+    return mk(EffectType::Fog, 0.0f, 1.0f, c(.74f, .76f, .79f), c(.52f, .54f, .58f), c(.24f, .26f, .30f), c(.14f, .15f, .18f));
   }
-  if (code == 0 && isDay) {
-    return EffectType::Sun;
+  // Drizzle 51-57
+  if (code >= 51 && code <= 57) {
+    return mk(EffectType::Rain, 0.0f, precipIntensity(code), c(.40f, .46f, .56f), c(.20f, .25f, .34f), c(.12f, .15f, .22f), c(.05f, .06f, .10f));
   }
-  if (code == 0 && !isDay) {
-    return EffectType::Stars;
+  // Rain 61-67 (heavier/darker sky from 65)
+  if (code >= 61 && code <= 67) {
+    if (code >= 65) {
+      return mk(EffectType::Rain, 0.0f, precipIntensity(code), c(.28f, .34f, .45f), c(.11f, .15f, .23f), c(.08f, .11f, .17f), c(.03f, .04f, .08f));
+    }
+    return mk(EffectType::Rain, 0.0f, precipIntensity(code), c(.34f, .41f, .52f), c(.15f, .19f, .27f), c(.10f, .13f, .19f), c(.04f, .05f, .09f));
   }
-  return EffectType::None;
+  // Snow 71-77 (heavier from 75; 71 slightly lighter sky)
+  if (code >= 71 && code <= 77) {
+    if (code >= 75) {
+      return mk(EffectType::Snow, 0.0f, precipIntensity(code), c(.70f, .74f, .82f), c(.46f, .51f, .60f), c(.15f, .18f, .25f), c(.06f, .08f, .13f));
+    }
+    if (code == 71) {
+      return mk(EffectType::Snow, 0.0f, precipIntensity(code), c(.74f, .78f, .85f), c(.50f, .55f, .63f), c(.17f, .20f, .27f), c(.07f, .09f, .14f));
+    }
+    return mk(EffectType::Snow, 0.0f, precipIntensity(code), c(.76f, .80f, .86f), c(.52f, .57f, .65f), c(.16f, .19f, .26f), c(.07f, .09f, .14f));
+  }
+  // Rain showers 80-82 (violent/darker from 82)
+  if (code >= 80 && code <= 82) {
+    if (code >= 82) {
+      return mk(EffectType::Rain, 0.0f, precipIntensity(code), c(.24f, .30f, .42f), c(.10f, .13f, .20f), c(.07f, .10f, .16f), c(.03f, .04f, .07f));
+    }
+    return mk(EffectType::Rain, 0.0f, precipIntensity(code), c(.36f, .43f, .54f), c(.17f, .22f, .31f), c(.11f, .14f, .20f), c(.04f, .06f, .10f));
+  }
+  // Snow showers 85-86 (heavier from 86)
+  if (code >= 85 && code <= 86) {
+    if (code >= 86) {
+      return mk(EffectType::Snow, 0.0f, precipIntensity(code), c(.68f, .73f, .81f), c(.45f, .50f, .59f), c(.15f, .18f, .25f), c(.06f, .08f, .13f));
+    }
+    return mk(EffectType::Snow, 0.0f, precipIntensity(code), c(.72f, .76f, .83f), c(.48f, .53f, .61f), c(.16f, .19f, .26f), c(.07f, .09f, .14f));
+  }
+  // Thunderstorm 95-99
+  if (code >= 95 && code <= 99) {
+    return mk(EffectType::Thunder, 0.0f, 1.0f, c(.22f, .25f, .33f), c(.10f, .12f, .18f), c(.07f, .08f, .13f), c(.02f, .02f, .05f));
+  }
+  return WeatherEffect{};
 }

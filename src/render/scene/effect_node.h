@@ -39,6 +39,39 @@ public:
     markPaintDirty();
   }
 
+  void setSky(const Color& top, const Color& bottom) {
+    if (m_style.skyTop == top && m_style.skyBottom == bottom) {
+      return;
+    }
+    m_style.skyTop = top;
+    m_style.skyBottom = bottom;
+    markPaintDirty();
+  }
+
+  void setNight(bool night) {
+    if (m_style.night == night) {
+      return;
+    }
+    m_style.night = night;
+    markPaintDirty();
+  }
+
+  void setCloudAmount(float amount) {
+    if (m_style.cloudAmount == amount) {
+      return;
+    }
+    m_style.cloudAmount = amount;
+    markPaintDirty();
+  }
+
+  void setIntensity(float intensity) {
+    if (m_style.intensity == intensity) {
+      return;
+    }
+    m_style.intensity = intensity;
+    markPaintDirty();
+  }
+
 private:
   EffectStyle m_style;
 };

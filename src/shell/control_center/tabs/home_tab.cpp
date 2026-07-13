@@ -1328,7 +1328,7 @@ void HomeTab::sync(Renderer& renderer) {
         m_weatherLine->setText(
             std::format(
                 "{}{} · {}", t, m_weather->displayTemperatureUnit(),
-                WeatherService::descriptionForCode(snapshot.current.weatherCode)
+                WeatherService::descriptionForCode(snapshot.current.weatherCode, snapshot.current.isDay)
             )
         );
       }
