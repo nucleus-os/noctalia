@@ -51,6 +51,7 @@ private:
     None = 0,
     Geolocate = 1,
     GeocodeAddress = 2,
+    ReverseGeocode = 3,
   };
 
   void onConfigReload();
@@ -59,6 +60,17 @@ private:
   void startGeolocate();
   void startAddressGeocode();
   void handleResponse(const std::filesystem::path& path, bool autoLocated, bool success, std::uint64_t serial);
+  // Enrich a resolved coordinate with its administrative region (US state) so the label
+  // reads "City, ST" instead of "City, Country". Falls back to `country` if unavailable.
+  void startReverseGeocode(
+      double latitude, double longitude, std::string name, std::string country, bool autoLocated,
+      std::uint64_t serial
+  );
+  void handleReverseResponse(
+      const std::filesystem::path& path, bool success, std::uint64_t serial, double latitude, double longitude,
+      std::string name, std::string country, bool autoLocated
+  );
+  void finalizeResolved(double latitude, double longitude, std::string label, bool autoLocated);
   void clearResolved();
   void scheduleRetryAfterFailure();
   void loadCache();
@@ -67,7 +79,8 @@ private:
 
   [[nodiscard]] static std::filesystem::path transportCacheDir();
   [[nodiscard]] static std::filesystem::path stateCacheFilePath();
-  [[nodiscard]] static std::string compactLocationLabel(const std::string& name, const std::string& country);
+  // Joins "<name>, <region>" where region is a US state code or a country.
+  [[nodiscard]] static std::string compactLocationLabel(const std::string& name, const std::string& region);
 
   ConfigService& m_configService;
   HttpClient& m_httpClient;

@@ -203,21 +203,10 @@ void LocationService::handleResponse(
     const std::string name = autoLocated ? readString(json, "city") : readString(json, "name");
     const std::string country = readString(json, "country");
 
-    m_latitude = latitude;
-    m_longitude = longitude;
-    m_resolved = true;
-    m_resolvedAutoLocate = autoLocated;
-    m_resolvedAddress = m_config.address;
-    m_sourceLabel = autoLocated ? i18n::tr("location.source.auto") : i18n::tr("location.source.address");
-    m_name = compactLocationLabel(name, country);
-    if (m_name.empty()) {
-      m_name = autoLocated ? i18n::tr("location.locations.current") : m_config.address;
-    }
-    m_error.clear();
-    m_nextRefreshAt = Clock::now() + kRefreshInterval;
-    kLog.info("location resolved");
-    saveCache();
-    notifyChanged();
+    // Coordinates are resolved; enrich the label with the administrative region
+    // (US state) via reverse geocoding before publishing. Carries the resolved
+    // serial so a newer resolution supersedes this in-flight enrichment.
+    startReverseGeocode(latitude, longitude, name, country, autoLocated, serial);
   } catch (const std::exception& e) {
     m_error =
         autoLocated ? i18n::tr("location.errors.parse-ip-geolocation") : i18n::tr("location.errors.parse-geocode");
@@ -225,6 +214,78 @@ void LocationService::handleResponse(
     scheduleRetryAfterFailure();
     notifyChanged();
   }
+}
+
+void LocationService::startReverseGeocode(
+    double latitude, double longitude, std::string name, std::string country, bool autoLocated, std::uint64_t serial
+) {
+  std::error_code ec;
+  std::filesystem::create_directories(transportCacheDir(), ec);
+  const auto path = transportCacheDir() / "reverse.json";
+  const std::string url = std::format(
+      "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={:.6f}&longitude={:.6f}&localityLanguage=en",
+      latitude, longitude
+  );
+  m_requestKind = RequestKind::ReverseGeocode;
+  m_httpClient.download(
+      url, path,
+      [this, path, serial, latitude, longitude, name = std::move(name), country = std::move(country),
+       autoLocated](bool success) {
+        handleReverseResponse(path, success, serial, latitude, longitude, name, country, autoLocated);
+      }
+  );
+}
+
+void LocationService::handleReverseResponse(
+    const std::filesystem::path& path, bool success, std::uint64_t serial, double latitude, double longitude,
+    std::string name, std::string country, bool autoLocated
+) {
+  if (serial != m_requestSerial) {
+    return;
+  }
+  m_requestKind = RequestKind::None;
+
+  // The region shown after the city. Defaults to the country from the primary
+  // resolution ("City, Country") and is upgraded to a US state code when available.
+  std::string region = country;
+  if (success) {
+    try {
+      std::ifstream file(path);
+      const auto json = nlohmann::json::parse(file);
+      const std::string countryCode = readString(json, "countryCode");
+      // e.g. "US-CO"; ISO 3166-2 subdivision code, prefixed with the country code.
+      const std::string subdivisionCode = readString(json, "principalSubdivisionCode");
+      if (countryCode == "US" && subdivisionCode.rfind("US-", 0) == 0) {
+        const std::string state = subdivisionCode.substr(3);
+        if (!state.empty()) {
+          region = state;
+        }
+      }
+    } catch (const std::exception& e) {
+      // Reverse geocoding only refines the label; keep the "City, Country" form on failure.
+      kLog.warn("reverse geocode parse failed: {}", e.what());
+    }
+  }
+
+  finalizeResolved(latitude, longitude, compactLocationLabel(name, region), autoLocated);
+}
+
+void LocationService::finalizeResolved(double latitude, double longitude, std::string label, bool autoLocated) {
+  m_latitude = latitude;
+  m_longitude = longitude;
+  m_resolved = true;
+  m_resolvedAutoLocate = autoLocated;
+  m_resolvedAddress = m_config.address;
+  m_sourceLabel = autoLocated ? i18n::tr("location.source.auto") : i18n::tr("location.source.address");
+  m_name = std::move(label);
+  if (m_name.empty()) {
+    m_name = autoLocated ? i18n::tr("location.locations.current") : m_config.address;
+  }
+  m_error.clear();
+  m_nextRefreshAt = Clock::now() + kRefreshInterval;
+  kLog.info("location resolved");
+  saveCache();
+  notifyChanged();
 }
 
 void LocationService::scheduleRetryAfterFailure() {
@@ -268,14 +329,14 @@ std::filesystem::path LocationService::stateCacheFilePath() {
   return std::filesystem::path("/tmp") / "noctalia-location-cache.json";
 }
 
-std::string LocationService::compactLocationLabel(const std::string& name, const std::string& country) {
-  if (!name.empty() && !country.empty()) {
-    return std::format("{}, {}", name, country);
+std::string LocationService::compactLocationLabel(const std::string& name, const std::string& region) {
+  if (!name.empty() && !region.empty()) {
+    return std::format("{}, {}", name, region);
   }
   if (!name.empty()) {
     return name;
   }
-  return country;
+  return region;
 }
 
 void LocationService::loadCache() {

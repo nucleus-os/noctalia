@@ -2365,7 +2365,7 @@
         "location-address": {
           "description": "City or address to locate, used when auto-locate is off",
           "label": "Address",
-          "placeholder": "City, Country"
+          "placeholder": "City, State"
         },
         "location-auto-locate": {
           "description": "Detect your location automatically from your IP address via noctalia.dev",
