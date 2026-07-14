@@ -247,6 +247,10 @@ void GlesRenderBackend::initialize(GlSharedContext& shared) {
   }
 
   resolveGraphicsResetStatusProc();
+  m_viewportValid = false;
+  m_blendMode.reset();
+  m_scissorEnabled = false;
+  m_scissorValid = false;
 }
 
 bool GlesRenderBackend::makeCurrentNoSurface() {
@@ -272,6 +276,13 @@ bool GlesRenderBackend::makeCurrentNoSurface() {
 
 bool GlesRenderBackend::makeCurrent(RenderTarget& target) {
   auto& surface = glesSurfaceTarget(target);
+  if (eglGetCurrentDisplay() == m_display
+      && eglGetCurrentContext() == m_context
+      && eglGetCurrentSurface(EGL_DRAW) == surface.eglSurface()
+      && eglGetCurrentSurface(EGL_READ) == surface.eglSurface()) {
+    return true;
+  }
+
   const auto start = std::chrono::steady_clock::now();
   if (eglMakeCurrent(m_display, surface.eglSurface(), surface.eglSurface(), m_context) != EGL_TRUE) {
     // Same teardown hazard as endFrame's swap: the surface can be invalidated by
@@ -403,7 +414,13 @@ void GlesRenderBackend::bindFramebuffer(const RenderFramebuffer& framebuffer) {
 void GlesRenderBackend::bindDefaultFramebuffer() { GlesFramebuffer::bindDefault(); }
 
 void GlesRenderBackend::setViewport(std::uint32_t width, std::uint32_t height) {
+  if (m_viewportValid && m_viewportWidth == width && m_viewportHeight == height) {
+    return;
+  }
   glViewport(0, 0, static_cast<GLint>(width), static_cast<GLint>(height));
+  m_viewportWidth = width;
+  m_viewportHeight = height;
+  m_viewportValid = true;
 }
 
 void GlesRenderBackend::clear(Color color) {
@@ -412,6 +429,9 @@ void GlesRenderBackend::clear(Color color) {
 }
 
 void GlesRenderBackend::setBlendMode(RenderBlendMode mode) {
+  if (m_blendMode == mode) {
+    return;
+  }
   switch (mode) {
   case RenderBlendMode::Disabled:
     glDisable(GL_BLEND);
@@ -425,6 +445,7 @@ void GlesRenderBackend::setBlendMode(RenderBlendMode mode) {
     glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     break;
   }
+  m_blendMode = mode;
 }
 
 int GlesRenderBackend::maxTextureSize() {
@@ -453,14 +474,31 @@ void GlesRenderBackend::drawFullscreenQuad(const ShaderProgram& program) {
 }
 
 void GlesRenderBackend::setScissor(RenderScissor scissor) {
-  glEnable(GL_SCISSOR_TEST);
-  glScissor(
-      static_cast<GLint>(scissor.x), static_cast<GLint>(scissor.y), static_cast<GLsizei>(scissor.width),
-      static_cast<GLsizei>(scissor.height)
-  );
+  if (!m_scissorEnabled) {
+    glEnable(GL_SCISSOR_TEST);
+    m_scissorEnabled = true;
+  }
+  if (!m_scissorValid
+      || m_scissor.x != scissor.x
+      || m_scissor.y != scissor.y
+      || m_scissor.width != scissor.width
+      || m_scissor.height != scissor.height) {
+    glScissor(
+        static_cast<GLint>(scissor.x), static_cast<GLint>(scissor.y), static_cast<GLsizei>(scissor.width),
+        static_cast<GLsizei>(scissor.height)
+    );
+    m_scissor = scissor;
+    m_scissorValid = true;
+  }
 }
 
-void GlesRenderBackend::disableScissor() { glDisable(GL_SCISSOR_TEST); }
+void GlesRenderBackend::disableScissor() {
+  if (!m_scissorEnabled) {
+    return;
+  }
+  glDisable(GL_SCISSOR_TEST);
+  m_scissorEnabled = false;
+}
 
 void GlesRenderBackend::drawRect(
     float surfaceWidth, float surfaceHeight, float width, float height, const RoundedRectStyle& style,

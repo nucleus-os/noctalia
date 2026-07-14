@@ -18,6 +18,7 @@
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+#include <optional>
 
 class GlesRenderBackend final : public RenderBackend {
 public:
@@ -109,6 +110,13 @@ private:
   GraphicsResetStatusProc m_graphicsResetStatus = nullptr;
   bool m_resetStatusLogged = false;
   int m_maxTextureSize = 0;
+  bool m_viewportValid = false;
+  std::uint32_t m_viewportWidth = 0;
+  std::uint32_t m_viewportHeight = 0;
+  std::optional<RenderBlendMode> m_blendMode;
+  bool m_scissorEnabled = false;
+  bool m_scissorValid = false;
+  RenderScissor m_scissor;
   GlesTextureManager m_textureManager;
   RectProgram m_rectProgram;
   ImageProgram m_imageProgram;
