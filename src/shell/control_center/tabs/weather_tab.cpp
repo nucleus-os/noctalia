@@ -4,6 +4,8 @@
 #include "i18n/i18n.h"
 #include "render/animation/animation.h"
 #include "render/animation/animation_manager.h"
+#include "cursor-shape-v1-client-protocol.h"
+#include "net/url_open.h"
 #include "render/scene/effect_node.h"
 #include "render/scene/input_area.h"
 #include "shell/panel/panel_manager.h"
@@ -17,6 +19,7 @@
 #include <cmath>
 #include <ctime>
 #include <format>
+#include <linux/input-event-codes.h>
 #include <memory>
 
 using namespace control_center;
@@ -220,6 +223,16 @@ std::unique_ptr<Flex> WeatherTab::create() {
       )
   );
   currentCard->addChild(std::move(locationPrompt));
+
+  // Clickable overlay covering the whole current-weather card: opens weather.com
+  // for the location. Invisible hit target on top of the card content.
+  auto cardHit = std::make_unique<InputArea>();
+  cardHit->setParticipatesInLayout(false);
+  cardHit->setZIndex(3);
+  cardHit->setAcceptedButtons(InputArea::buttonMask(BTN_LEFT));
+  cardHit->setCursorShape(WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER);
+  cardHit->setOnClick([this](const InputArea::PointerData& /*data*/) { openWeatherLocation(); });
+  m_currentCardHit = static_cast<InputArea*>(currentCard->addChild(std::move(cardHit)));
 
   leftColumn->addChild(std::move(currentCard));
 
@@ -674,6 +687,13 @@ void WeatherTab::doLayout(Renderer& renderer, float contentWidth, float bodyHeig
 
   if (m_effectNode != nullptr && m_currentCard != nullptr) {
     m_effectNode->setFrameSize(m_currentCard->width(), m_currentCard->height());
+  }
+
+  if (m_currentCardHit != nullptr && m_currentCard != nullptr) {
+    m_currentCardHit->setPosition(0.0f, 0.0f);
+    m_currentCardHit->setSize(m_currentCard->width(), m_currentCard->height());
+    // Only clickable when there's a resolved location to open.
+    m_currentCardHit->setVisible(m_weather != nullptr && m_weather->hasData());
   }
 
   for (std::size_t i = 0; i < kForecastRowCount; ++i) {
@@ -1208,6 +1228,21 @@ void WeatherTab::hideEffect() {
     m_effectNode->setEffectType(EffectType::None);
     m_effectNode->setVisible(false);
   }
+}
+
+void WeatherTab::openWeatherLocation() {
+  if (m_weather == nullptr) {
+    return;
+  }
+  const auto& snapshot = m_weather->snapshot();
+  if (!snapshot.valid) {
+    return;
+  }
+  // weather.com resolves a "lat,lon" id in its /l/ path to the nearest place.
+  const std::string url =
+      std::format("https://weather.com/weather/today/l/{:.4f},{:.4f}", snapshot.latitude, snapshot.longitude);
+  net::openInBrowser(url);
+  PanelManager::instance().close(); // dismiss the panel when handing off to the browser
 }
 
 void WeatherTab::onFrameTick(float deltaMs) {
