@@ -1,10 +1,15 @@
 #include "cef/cef_service.h"
 
 #include "cef/noctalia_cef_app.h"
+#include "cef/cef_gpu_frame_bridge.h"
 #include "core/deferred_call.h"
 #include "core/input/key_modifiers.h"
 #include "core/log.h"
+#include "core/timer_manager.h"
+#include "core/tracy.h"
+#include "core/tracy_latency.h"
 #include "render/core/texture_manager.h"
+#include "render/graphics_device.h"
 
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
@@ -14,19 +19,39 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <limits.h>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <unistd.h>
+#include <utility>
 
 #include "cursor-shape-v1-client-protocol.h"
 
 namespace {
 
 constexpr Logger kLog("cef");
+constexpr int kCefWindowlessFrameRate = 120;
+constexpr std::int64_t kDefaultPresentationRefreshNs = 8'333'333;
+constexpr std::int64_t kInitialCefPaintEstimateNs = 2'000'000;
+constexpr std::int64_t kPresentationSafetyMarginNs = 750'000;
+constexpr std::int64_t kMinimumSchedulerDelayNs = 1'000'000;
+
+bool presentationAwareBeginFramesRequested() {
+  if (const char* internal = std::getenv("NOCTALIA_CEF_INTERNAL_BEGIN_FRAME");
+      internal != nullptr && internal[0] != '\0' && std::string_view(internal) != "0") {
+    return false;
+  }
+  // Preserve the old diagnostic's explicit zero as an A/B opt-out while
+  // making presentation-aware external scheduling the production default.
+  const char* value = std::getenv("NOCTALIA_CEF_EXTERNAL_BEGIN_FRAME");
+  return value == nullptr || value[0] == '\0' || std::string_view(value) != "0";
+}
 
 // Resolve the CEF subprocess helper binary next to the running executable.
 std::string helperNextToSelf() {
@@ -158,39 +183,206 @@ struct CefService::Impl {
 
   bool initialized = false;
   bool attached = false;
-  bool acceleratedEnabled = false;
+  bool externalBeginFramesEnabled = false;
+  bool beginFrameOutstanding = false;
+  bool pendingUrgentBeginFrame = false;
+  bool scheduledBeginFrameUrgent = false;
+  bool lastBeginFrameUrgent = false;
+  std::uint32_t presentationRefreshNs = static_cast<std::uint32_t>(kDefaultPresentationRefreshNs);
+  std::uint32_t noDamageStreak = 0;
+  std::int64_t lastExternalBeginFrameNs = 0;
+  std::int64_t lastPresentedNs = 0;
+  std::int64_t cefPaintEstimateNs = kInitialCefPaintEstimateNs;
+  Timer externalSchedulerTimer;
   std::string pendingUrl;
   int logicalWidth = 1280;
   int logicalHeight = 720;
   float deviceScale = 1.0f;
 
-  std::mutex frameMutex;
-  // Pending zero-copy frame: a dmabuf whose plane fds we duplicated in
-  // OnAcceleratedPaint (valid until we import + close them). Guarded by frameMutex.
-  bool havePendingDmabuf = false;
-  TextureManager::DmabufImage pendingDmabuf;
-
+  std::unique_ptr<CefGpuFrameBridge> gpuBridge;
+  std::atomic<bool> loggedCpuPaint = false;
+  std::atomic<bool> loggedAcceleratedPaint = false;
   TextureHandle texture;
-
-  void closePendingDmabufLocked() {
-    if (!havePendingDmabuf) {
-      return;
-    }
-    for (int i = 0; i < pendingDmabuf.planeCount && i < 4; ++i) {
-      if (pendingDmabuf.planes[i].fd >= 0) {
-        ::close(pendingDmabuf.planes[i].fd);
-        pendingDmabuf.planes[i].fd = -1;
-      }
-    }
-    havePendingDmabuf = false;
-  }
+  bool textureChanged = false;
+  std::uint64_t supersededReadyFrames = 0;
 
   std::function<void(std::int64_t)> scheduleWork;
   std::function<void()> frameReady;
   std::function<void(std::uint32_t)> cursorCb;
+  int lastCursorType = -1;
+  std::uint32_t lastCursorShape = 0;
 
   // Guards deferred main-thread callbacks against use-after-free during shutdown.
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
+
+  static std::int64_t nowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+  }
+
+  void armExternalScheduler(std::int64_t delayNs, bool urgent) {
+    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+      externalSchedulerTimer.stop();
+      return;
+    }
+    scheduledBeginFrameUrgent = scheduledBeginFrameUrgent || urgent;
+    const std::int64_t clampedNs = std::max(kMinimumSchedulerDelayNs, delayNs);
+    const auto delayMs = std::chrono::milliseconds((clampedNs + 999'999) / 1'000'000);
+    auto token = alive;
+    externalSchedulerTimer.start(delayMs, [this, token]() {
+      if (!token->load()) {
+        return;
+      }
+      const bool urgentRequest = std::exchange(scheduledBeginFrameUrgent, false);
+      issueExternalBeginFrame(urgentRequest);
+    });
+    NOCTALIA_TRACE_PLOT("CEF presentation scheduler delay ms", static_cast<double>(clampedNs) / 1'000'000.0);
+  }
+
+  void issueExternalBeginFrame(bool urgent) {
+    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+      return;
+    }
+    if (beginFrameOutstanding) {
+      pendingUrgentBeginFrame = pendingUrgentBeginFrame || urgent;
+      tracy_latency::externalBeginFrameCoalesced();
+      NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(1));
+      return;
+    }
+    externalSchedulerTimer.stop();
+    scheduledBeginFrameUrgent = false;
+    browser->GetHost()->SendExternalBeginFrame();
+    lastExternalBeginFrameNs = nowNs();
+    lastBeginFrameUrgent = urgent;
+    beginFrameOutstanding = true;
+    tracy_latency::externalBeginFrameIssued(urgent);
+    NOCTALIA_TRACE_PLOT("CEF external begin frames", static_cast<std::int64_t>(1));
+    NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(1));
+
+    // External begin frames have no acknowledgement when they cause no paint,
+    // and CEF exposes no reliable signal that future animation work became
+    // pending. Expire the outstanding marker before the next predicted phase
+    // and keep ticking for as long as the browser is visible. WasHidden(true)
+    // remains the only safe condition for stopping the external clock.
+    const std::int64_t timeoutNs = std::max<std::int64_t>(
+        cefPaintEstimateNs + kPresentationSafetyMarginNs,
+        static_cast<std::int64_t>(presentationRefreshNs) - kMinimumSchedulerDelayNs
+    );
+    auto token = alive;
+    externalSchedulerTimer.start(
+        std::chrono::milliseconds((timeoutNs + 999'999) / 1'000'000),
+        [this, token]() {
+          if (!token->load() || !beginFrameOutstanding) {
+            return;
+          }
+          beginFrameOutstanding = false;
+          ++noDamageStreak;
+          NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(0));
+          NOCTALIA_TRACE_PLOT("CEF no-damage begin frames", static_cast<std::int64_t>(noDamageStreak));
+          if (pendingUrgentBeginFrame) {
+            pendingUrgentBeginFrame = false;
+            issueExternalBeginFrame(true);
+            return;
+          }
+          scheduleForNextPresentation(false);
+        }
+    );
+  }
+
+  void onAcceleratedFrameArrived() {
+    if (!externalBeginFramesEnabled) {
+      return;
+    }
+    const std::int64_t now = nowNs();
+    if (beginFrameOutstanding && lastExternalBeginFrameNs > 0) {
+      const std::int64_t sampleNs = now - lastExternalBeginFrameNs;
+      if (!lastBeginFrameUrgent && sampleNs > 0 && sampleNs < 250'000'000) {
+        cefPaintEstimateNs = (cefPaintEstimateNs * 7 + sampleNs) / 8;
+        const std::int64_t maxEstimate = std::max<std::int64_t>(
+            2'000'000, static_cast<std::int64_t>(presentationRefreshNs) * 2
+        );
+        cefPaintEstimateNs = std::clamp<std::int64_t>(cefPaintEstimateNs, 1'000'000, maxEstimate);
+      }
+    }
+    beginFrameOutstanding = false;
+    noDamageStreak = 0;
+    externalSchedulerTimer.stop();
+    NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(0));
+    NOCTALIA_TRACE_PLOT("CEF paint estimate ms", static_cast<double>(cefPaintEstimateNs) / 1'000'000.0);
+    if (pendingUrgentBeginFrame) {
+      pendingUrgentBeginFrame = false;
+      armExternalScheduler(kMinimumSchedulerDelayNs, true);
+    } else {
+      // A frame-ready callback can be coalesced, discarded, or fail to reach a
+      // surface commit. Presentation feedback refines the phase when it arrives
+      // but must never be the only continuation path for Chromium's clock.
+      scheduleForNextPresentation(false);
+    }
+  }
+
+  void scheduleForNextPresentation(bool urgent) {
+    const std::int64_t now = nowNs();
+    const std::int64_t refreshNs = presentationRefreshNs;
+    if (lastPresentedNs <= 0) {
+      const std::int64_t nextBeginNs = lastExternalBeginFrameNs > 0
+          ? lastExternalBeginFrameNs + refreshNs
+          : now + refreshNs;
+      armExternalScheduler(nextBeginNs - now, urgent);
+      return;
+    }
+    const std::int64_t leadNs = std::clamp<std::int64_t>(
+        cefPaintEstimateNs + kPresentationSafetyMarginNs, 1'000'000, refreshNs * 2
+    );
+    std::int64_t targetNs = lastPresentedNs + refreshNs;
+    while (targetNs - leadNs <= now + kMinimumSchedulerDelayNs) {
+      targetNs += refreshNs;
+    }
+    NOCTALIA_TRACE_PLOT(
+        "CEF predicted presentation lead ms", static_cast<double>(leadNs) / 1'000'000.0
+    );
+    armExternalScheduler(targetNs - leadNs - now, urgent);
+  }
+
+  void onPresentation(const SurfacePresentationFeedback& feedback) {
+    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+      return;
+    }
+    if (!feedback.presented) {
+      if (!beginFrameOutstanding && !scheduledBeginFrameUrgent) {
+        armExternalScheduler(kMinimumSchedulerDelayNs, false);
+      }
+      return;
+    }
+    if (feedback.refreshNs > 0) {
+      presentationRefreshNs = feedback.refreshNs;
+    }
+    lastPresentedNs = feedback.presentedSteadyNs;
+    NOCTALIA_TRACE_PLOT("CEF scheduler refresh ns", static_cast<std::int64_t>(presentationRefreshNs));
+    if (beginFrameOutstanding || pendingUrgentBeginFrame || scheduledBeginFrameUrgent) {
+      return;
+    }
+
+    scheduleForNextPresentation(false);
+  }
+
+  void startExternalScheduler() {
+    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+      return;
+    }
+    issueExternalBeginFrame(false);
+  }
+
+  void stopExternalScheduler() {
+    externalSchedulerTimer.stop();
+    beginFrameOutstanding = false;
+    pendingUrgentBeginFrame = false;
+    scheduledBeginFrameUrgent = false;
+    lastBeginFrameUrgent = false;
+    noDamageStreak = 0;
+    lastExternalBeginFrameNs = 0;
+    lastPresentedNs = 0;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -218,6 +410,8 @@ public:
 
   bool GetScreenInfo(CefRefPtr<CefBrowser> /*browser*/, CefScreenInfo& info) override {
     info.device_scale_factor = m_impl->deviceScale;
+    info.rect = CefRect(0, 0, m_impl->logicalWidth, m_impl->logicalHeight);
+    info.available_rect = info.rect;
     return true;
   }
 
@@ -229,56 +423,81 @@ public:
     (void)buffer;
     (void)width;
     (void)height;
-    kLog.error("CEF delivered a CPU OSR frame despite shared textures being required");
+    if (!m_impl->loggedCpuPaint.exchange(true)) {
+      kLog.error("CEF delivered a CPU OSR frame despite shared textures being required ({}x{})", width, height);
+    }
   }
 
-  // Zero-copy path: CEF hands us a GPU dmabuf. Its fds are valid only for the
-  // duration of this call ("released to the pool on return"), so we dup them and
-  // import on the main thread. CEF rotates its buffer pool, so a one-frame
-  // consume latency is safe.
+  // CEF's fds are borrowed for this callback only. The bridge duplicates a
+  // DMA-BUF only on an import-cache miss. The normal path samples that cached
+  // import directly and returns a release fence after Graphite submission;
+  // the compatibility path copies it into a Noctalia-owned image.
   void OnAcceleratedPaint(
       CefRefPtr<CefBrowser> /*browser*/, PaintElementType type, const RectList& /*dirtyRects*/,
       const CefAcceleratedPaintInfo& info
   ) override {
+    NOCTALIA_TRACE_ZONE("CEF OnAcceleratedPaint");
+    CEF_REQUIRE_UI_THREAD();
     if (type != PET_VIEW) {
       return;
     }
-    TextureManager::DmabufImage img;
-    img.width = info.extra.coded_size.width > 0
+    if (m_impl->gpuBridge == nullptr) {
+      kLog.error("received accelerated CEF frame before the Vulkan bridge was attached");
+      return;
+    }
+    m_impl->onAcceleratedFrameArrived();
+    tracy_latency::acceleratedPaintArrived();
+    BorrowedDmabufFrame frame;
+    frame.width = info.extra.coded_size.width > 0
         ? info.extra.coded_size.width
         : static_cast<int>(static_cast<float>(m_impl->logicalWidth) * m_impl->deviceScale);
-    img.height = info.extra.coded_size.height > 0
+    frame.height = info.extra.coded_size.height > 0
         ? info.extra.coded_size.height
         : static_cast<int>(static_cast<float>(m_impl->logicalHeight) * m_impl->deviceScale);
-    img.fourcc = drmFourccFromCef(info.format);
-    img.modifier = info.modifier;
-    img.hasModifier = true;
-    img.planeCount = std::min(info.plane_count, 4);
-    for (int i = 0; i < img.planeCount; ++i) {
-      img.planes[i].fd = ::dup(info.planes[i].fd);
-      if (img.planes[i].fd < 0) {
-        for (int j = 0; j < i; ++j) {
-          ::close(img.planes[j].fd);
-        }
-        kLog.error("failed to duplicate CEF dmabuf plane fd");
-        return;
-      }
-      img.planes[i].stride = info.planes[i].stride;
-      img.planes[i].offset = info.planes[i].offset;
+    if (!info.extra.has_capture_counter) {
+      kLog.error("CEF accelerated frame did not include a capture counter");
+      return;
     }
-    {
-      std::scoped_lock lock(m_impl->frameMutex);
-      m_impl->closePendingDmabufLocked(); // drop an unconsumed older frame's fds
-      m_impl->pendingDmabuf = img;
-      m_impl->havePendingDmabuf = true;
+    frame.captureCounter = info.extra.capture_counter;
+    frame.fourcc = drmFourccFromCef(info.format);
+    frame.modifier = info.modifier;
+    frame.acquireFenceFd = info.acquire_fence_fd;
+    frame.planeCount = std::min(info.plane_count, 4);
+    if (!m_impl->loggedAcceleratedPaint.exchange(true)) {
+      kLog.info(
+          "received first accelerated CEF frame: {}x{}, fourcc=0x{:08x}, modifier=0x{:016x}, planes={}",
+          frame.width, frame.height, frame.fourcc, frame.modifier, frame.planeCount
+      );
     }
-    auto alive = m_impl->alive;
-    auto* impl = m_impl;
-    DeferredCall::callLater([alive, impl]() {
-      if (alive->load() && impl->frameReady) {
-        impl->frameReady();
-      }
-    });
+    for (int i = 0; i < frame.planeCount; ++i) {
+      frame.planes[i].fd = info.planes[i].fd;
+      frame.planes[i].stride = info.planes[i].stride;
+      frame.planes[i].offset = info.planes[i].offset;
+    }
+    if (!m_impl->gpuBridge->acceptFrame(frame)) {
+      tracy_latency::acceleratedPaintFailed();
+      kLog.error("failed to accept CEF DMA-BUF through Vulkan: {}", m_impl->gpuBridge->lastError());
+      m_impl->issueExternalBeginFrame(false);
+      return;
+    }
+    NOCTALIA_TRACE_FRAME("CEF accelerated frame accepted");
+    NOCTALIA_TRACE_PLOT(
+        "CEF frames accepted", static_cast<std::int64_t>(m_impl->gpuBridge->acceptedFrameCount())
+    );
+    NOCTALIA_TRACE_PLOT("CEF frame width", static_cast<std::int64_t>(frame.width));
+    NOCTALIA_TRACE_PLOT("CEF frame height", static_cast<std::int64_t>(frame.height));
+    if (m_impl->textureChanged) {
+      ++m_impl->supersededReadyFrames;
+      NOCTALIA_TRACE_PLOT(
+          "CEF ready frames superseded before adoption",
+          static_cast<std::int64_t>(m_impl->supersededReadyFrames)
+      );
+    }
+    m_impl->texture = m_impl->gpuBridge->texture();
+    m_impl->textureChanged = true;
+    if (m_impl->frameReady) {
+      m_impl->frameReady();
+    }
   }
 
   bool OnCursorChange(
@@ -286,6 +505,11 @@ public:
       const CefCursorInfo& /*info*/
   ) override {
     const std::uint32_t shape = cursorShapeFromCef(type);
+    if (m_impl->lastCursorType != static_cast<int>(type) || m_impl->lastCursorShape != shape) {
+      kLog.debug("CEF cursor changed: type={} shape={}", static_cast<int>(type), shape);
+      m_impl->lastCursorType = static_cast<int>(type);
+      m_impl->lastCursorShape = shape;
+    }
     auto alive = m_impl->alive;
     auto* impl = m_impl;
     DeferredCall::callLater([alive, impl, shape]() {
@@ -300,8 +524,44 @@ public:
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     m_impl->browser = browser;
+    browser->GetHost()->WasHidden(!m_impl->attached);
+    browser->GetHost()->WasResized();
+    if (m_impl->attached) {
+      browser->GetHost()->Invalidate(PET_VIEW);
+      browser->GetHost()->SetFocus(true);
+    }
+    m_impl->startExternalScheduler();
+    kLog.info("CEF browser created");
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override { m_impl->browser = nullptr; }
+
+  // CefLoadHandler
+  void OnLoadingStateChange(
+      CefRefPtr<CefBrowser> /*browser*/, bool isLoading, bool /*canGoBack*/, bool /*canGoForward*/
+  ) override {
+    kLog.info("CEF loading state changed: {}", isLoading ? "loading" : "idle");
+    m_impl->issueExternalBeginFrame(isLoading);
+  }
+
+  void OnLoadEnd(
+      CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, int httpStatusCode
+  ) override {
+    if (frame->IsMain()) {
+      kLog.info("CEF main frame loaded: status={} url={}", httpStatusCode, frame->GetURL().ToString());
+    }
+  }
+
+  void OnLoadError(
+      CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, ErrorCode errorCode,
+      const CefString& errorText, const CefString& failedUrl
+  ) override {
+    if (frame->IsMain()) {
+      kLog.error(
+          "CEF main frame load failed: code={} error={} url={}", static_cast<int>(errorCode),
+          errorText.ToString(), failedUrl.ToString()
+      );
+    }
+  }
 
 private:
   CefService::Impl* m_impl;
@@ -316,6 +576,7 @@ private:
 CefService::CefService(std::string cefDir, std::string helperPath) : m_impl(std::make_unique<Impl>()) {
   m_impl->cefDir = std::move(cefDir);
   m_impl->helperPath = helperPath.empty() ? helperNextToSelf() : std::move(helperPath);
+  m_impl->externalBeginFramesEnabled = presentationAwareBeginFramesRequested();
 }
 
 CefService::~CefService() {
@@ -335,11 +596,6 @@ bool CefService::initialize() {
 
   auto* impl = m_impl.get();
   auto alive = m_impl->alive;
-  if (!m_impl->acceleratedEnabled) {
-    kLog.error("refusing to initialize CEF: EGL dmabuf import is unavailable");
-    return false;
-  }
-
   m_impl->app = new NoctaliaCefApp([alive, impl](std::int64_t delayMs) {
     // OnScheduleMessagePumpWork can fire on any CEF thread — marshal.
     if (alive->load() && impl->scheduleWork) {
@@ -347,13 +603,30 @@ bool CefService::initialize() {
     }
   });
 
+  const std::string rootCachePath = userCachePath();
+  if (const char* widevine = std::getenv("NOCTALIA_CEF_WIDEVINE");
+      widevine != nullptr && widevine[0] != '\0') {
+    std::string widevineError;
+    if (!prepareNoctaliaWidevineHint(rootCachePath, widevine, widevineError)) {
+      kLog.error("{}", widevineError);
+      return false;
+    }
+  }
+
   CefSettings settings;
   settings.no_sandbox = true;
   settings.windowless_rendering_enabled = true;
   settings.multi_threaded_message_loop = false;
   settings.external_message_pump = true;
   settings.log_severity = LOGSEVERITY_WARNING;
-  CefString(&settings.root_cache_path).FromString(userCachePath());
+  // Apple Music uses session cookies for part of its authentication state.
+  // Keep those cookies in the persistent CEF profile across shell restarts.
+  settings.persist_session_cookies = true;
+  // A root_cache_path alone does not create a persistent request context.
+  // Reuse the existing root as the global profile so enabling persistence does
+  // not relocate or discard the current Apple Music browser data.
+  CefString(&settings.root_cache_path).FromString(rootCachePath);
+  CefString(&settings.cache_path).FromString(rootCachePath);
   CefString(&settings.resources_dir_path).FromString(m_impl->cefDir + "/Resources");
   CefString(&settings.locales_dir_path).FromString(m_impl->cefDir + "/Resources/locales");
   if (!m_impl->helperPath.empty()) {
@@ -365,26 +638,81 @@ bool CefService::initialize() {
     return false;
   }
   m_impl->initialized = true;
+  kLog.info("CEF persistent profile enabled at {}", rootCachePath);
   return true;
 }
 
-void CefService::shutdown() {
-  {
-    std::scoped_lock lock(m_impl->frameMutex);
-    m_impl->closePendingDmabufLocked();
+void CefService::attachGraphicsDevice(GraphicsDevice& graphics) {
+  if (!graphics.valid() || !graphics.cefExternalMemoryEnabled()) {
+    throw std::runtime_error("CEF requires the Vulkan external-memory GraphicsDevice contract");
   }
+  m_impl->gpuBridge = std::make_unique<CefGpuFrameBridge>(
+      graphics, &graphics.textureManager(),
+      [this](std::int64_t captureCounter, int fd) {
+        if (m_impl->browser == nullptr) {
+          kLog.warn("dropping CEF release fence for closed browser frame {}", captureCounter);
+          return;
+        }
+        m_impl->browser->GetHost()->SetAcceleratedPaintReleaseFence(captureCounter, fd);
+      }
+  );
+}
+
+void CefService::prepareForGraphicsDeviceRebuild() {
+  m_impl->stopExternalScheduler();
+  if (m_impl->gpuBridge != nullptr) {
+    m_impl->gpuBridge->abandonDevice();
+    m_impl->gpuBridge.reset();
+  }
+  m_impl->texture = {};
+  m_impl->textureChanged = true;
+}
+
+void CefService::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
+  attachGraphicsDevice(graphics);
+  m_impl->texture = {};
+  m_impl->textureChanged = true;
+  if (m_impl->browser != nullptr) {
+    m_impl->browser->GetHost()->Invalidate(PET_VIEW);
+    m_impl->browser->GetHost()->WasResized();
+    m_impl->issueExternalBeginFrame(true);
+    m_impl->startExternalScheduler();
+  }
+}
+
+void CefService::shutdown() {
   if (!m_impl->initialized) {
     return;
   }
   m_impl->alive->store(false);
+  m_impl->stopExternalScheduler();
   if (m_impl->browser) {
     m_impl->browser->GetHost()->CloseBrowser(true);
-    // Pump until the browser finishes closing.
-    for (int i = 0; i < 50 && m_impl->browser != nullptr; ++i) {
+    // OnBeforeClose is the CEF contract that all browser-owned objects have
+    // been released. Give Chromium's child processes real wall-clock time to
+    // drain instead of spinning through 50 message-pump calls immediately.
+    for (int i = 0; i < 500 && m_impl->browser != nullptr; ++i) {
       CefDoMessageLoopWork();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (m_impl->browser != nullptr) {
+      kLog.error("CEF browser did not reach OnBeforeClose before shutdown");
     }
   }
   m_impl->client = nullptr;
+  if (m_impl->gpuBridge != nullptr) {
+    const CefGpuFrameBridgeStats stats = m_impl->gpuBridge->stats();
+    kLog.info(
+        "CEF GPU bridge summary: accepted={}, directStaged={}, "
+        "directSampled={}, directDiscarded={}, releaseFences={}, imports={}/{}, "
+        "activeImports={}, cacheHits={}, cacheMisses={}",
+        stats.framesAccepted, stats.directFramesStaged,
+        stats.directFramesSampled, stats.directFramesDiscarded,
+        stats.releaseFenceFdsExported, stats.importsCreated, stats.importsDestroyed,
+        stats.activeImports, stats.importCacheHits, stats.importCacheMisses
+    );
+  }
+  m_impl->gpuBridge.reset();
   CefShutdown();
   m_impl->app = nullptr;
   m_impl->initialized = false;
@@ -393,6 +721,10 @@ void CefService::shutdown() {
 void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   m_impl->logicalWidth = logicalWidth > 0 ? logicalWidth : m_impl->logicalWidth;
   m_impl->logicalHeight = logicalHeight > 0 ? logicalHeight : m_impl->logicalHeight;
+  if (m_impl->gpuBridge == nullptr) {
+    kLog.error("refusing to create CEF browser: mandatory Vulkan DMA-BUF bridge is unavailable");
+    return;
+  }
   if (!m_impl->initialized && !initialize()) {
     return;
   }
@@ -404,11 +736,21 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   CefWindowInfo windowInfo;
   windowInfo.SetAsWindowless(0);
   windowInfo.shared_texture_enabled = 1;
+  windowInfo.external_begin_frame_enabled = m_impl->externalBeginFramesEnabled ? 1 : 0;
   CefBrowserSettings browserSettings;
-  browserSettings.windowless_frame_rate = 60;
+  browserSettings.windowless_frame_rate = kCefWindowlessFrameRate;
 
   const std::string url = m_impl->pendingUrl.empty() ? std::string("about:blank") : m_impl->pendingUrl;
-  CefBrowserHost::CreateBrowser(windowInfo, m_impl->client, url, browserSettings, nullptr, nullptr);
+  if (!CefBrowserHost::CreateBrowser(windowInfo, m_impl->client, url, browserSettings, nullptr, nullptr)) {
+    kLog.error("CEF browser creation request was rejected");
+  } else {
+    kLog.info("CEF browser creation requested: {}x{} fps={} scheduler={} url={}",
+              m_impl->logicalWidth,
+              m_impl->logicalHeight,
+              kCefWindowlessFrameRate,
+              m_impl->externalBeginFramesEnabled ? "presentation-aware" : "internal",
+              url);
+  }
 }
 
 void CefService::resize(int logicalWidth, int logicalHeight) {
@@ -422,6 +764,7 @@ void CefService::resize(int logicalWidth, int logicalHeight) {
   m_impl->logicalHeight = logicalHeight;
   if (m_impl->browser) {
     m_impl->browser->GetHost()->WasResized();
+    m_impl->issueExternalBeginFrame(false);
   }
 }
 
@@ -429,12 +772,14 @@ void CefService::navigate(const std::string& url) {
   m_impl->pendingUrl = url;
   if (m_impl->browser) {
     m_impl->browser->GetMainFrame()->LoadURL(url);
+    m_impl->issueExternalBeginFrame(false);
   }
 }
 
 void CefService::execJs(const std::string& code) {
   if (m_impl->browser) {
     m_impl->browser->GetMainFrame()->ExecuteJavaScript(code, m_impl->browser->GetMainFrame()->GetURL(), 0);
+    m_impl->issueExternalBeginFrame(false);
   }
 }
 
@@ -446,18 +791,8 @@ void CefService::setDeviceScale(float scale) {
   if (m_impl->browser) {
     m_impl->browser->GetHost()->WasResized();
     m_impl->browser->GetHost()->NotifyScreenInfoChanged();
+    m_impl->issueExternalBeginFrame(false);
   }
-}
-
-void CefService::setAcceleratedEnabled(bool enabled) {
-  if (m_impl->initialized || m_impl->browser) {
-    return;
-  }
-  m_impl->acceleratedEnabled = enabled;
-}
-
-bool CefService::acceleratedEnabled() const noexcept {
-  return m_impl->acceleratedEnabled;
 }
 
 void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving) {
@@ -468,7 +803,9 @@ void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool l
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
   event.modifiers = cefModifiersFromKeyMod(modifiers);
+  tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerMove);
   m_impl->browser->GetHost()->SendMouseMoveEvent(event, leaving);
+  m_impl->issueExternalBeginFrame(false);
 }
 
 void CefService::sendMouseButton(
@@ -487,7 +824,11 @@ void CefService::sendMouseButton(
   } else if (button == 2) {
     type = MBT_RIGHT;
   }
+  if (pressed) {
+    tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerButton);
+  }
   m_impl->browser->GetHost()->SendMouseClickEvent(event, type, !pressed, clickCount);
+  m_impl->issueExternalBeginFrame(true);
 }
 
 void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, std::uint32_t modifiers) {
@@ -498,7 +839,9 @@ void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, st
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
   event.modifiers = cefModifiersFromKeyMod(modifiers);
+  tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerWheel);
   m_impl->browser->GetHost()->SendMouseWheelEvent(event, static_cast<int>(deltaX), static_cast<int>(deltaY));
+  m_impl->issueExternalBeginFrame(true);
 }
 
 void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed) {
@@ -513,6 +856,9 @@ void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t m
   event.windows_key_code = vk;
   event.native_key_code = static_cast<int>(sym);
   event.type = pressed ? KEYEVENT_RAWKEYDOWN : KEYEVENT_KEYUP;
+  if (pressed) {
+    tracy_latency::inputForwardedToCef(tracy_latency::InputKind::Key);
+  }
   m_impl->browser->GetHost()->SendKeyEvent(event);
 
   // Emit a CHAR event for printable input so text lands in fields.
@@ -525,11 +871,15 @@ void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t m
     charEvent.type = KEYEVENT_CHAR;
     m_impl->browser->GetHost()->SendKeyEvent(charEvent);
   }
+  m_impl->issueExternalBeginFrame(true);
 }
 
 void CefService::setFocus(bool focused) {
   if (m_impl->browser) {
     m_impl->browser->GetHost()->SetFocus(focused);
+    if (focused) {
+      m_impl->issueExternalBeginFrame(true);
+    }
   }
 }
 
@@ -545,11 +895,22 @@ void CefService::setDisplayAttached(bool attached) {
   if (attached) {
     m_impl->browser->GetHost()->Invalidate(PET_VIEW);
     m_impl->browser->GetHost()->SetFocus(true);
+    m_impl->startExternalScheduler();
+  } else {
+    m_impl->stopExternalScheduler();
+    if (m_impl->gpuBridge != nullptr) {
+      m_impl->gpuBridge->discardPendingFrame();
+    }
   }
+}
+
+void CefService::onPresentation(const SurfacePresentationFeedback& feedback) {
+  m_impl->onPresentation(feedback);
 }
 
 void CefService::doMessageLoopWork() {
   if (m_impl->initialized) {
+    NOCTALIA_TRACE_ZONE("CEF message-pump work");
     CefDoMessageLoopWork();
   }
 }
@@ -559,32 +920,8 @@ void CefService::setScheduleWorkCallback(std::function<void(std::int64_t)> cb) {
 }
 
 bool CefService::uploadIfDirty(TextureManager& textures) {
-  TextureManager::DmabufImage image;
-  {
-    std::scoped_lock lock(m_impl->frameMutex);
-    if (!m_impl->havePendingDmabuf) {
-      return false;
-    }
-    image = m_impl->pendingDmabuf;
-    m_impl->pendingDmabuf = {};
-    m_impl->havePendingDmabuf = false;
-  }
-
-  TextureHandle next = textures.importDmabuf(image);
-  for (int i = 0; i < image.planeCount && i < 4; ++i) {
-    if (image.planes[i].fd >= 0) {
-      ::close(image.planes[i].fd);
-    }
-  }
-  if (!next.valid()) {
-    kLog.error("failed to import CEF dmabuf frame as an EGLImage");
-    return false;
-  }
-  if (m_impl->texture.valid()) {
-    textures.unload(m_impl->texture);
-  }
-  m_impl->texture = next;
-  return true;
+  (void)textures;
+  return std::exchange(m_impl->textureChanged, false);
 }
 
 TextureHandle CefService::currentTexture() const noexcept {
@@ -592,11 +929,13 @@ TextureHandle CefService::currentTexture() const noexcept {
 }
 
 void CefService::invalidateGpuTexture() {
-  // The GL name and backing EGLImage are gone after context loss. A requested
-  // CEF repaint supplies a fresh dmabuf for the new context.
+  if (m_impl->gpuBridge != nullptr) {
+    m_impl->gpuBridge->invalidate();
+  }
   m_impl->texture = {};
   if (m_impl->browser) {
     m_impl->browser->GetHost()->Invalidate(PET_VIEW);
+    m_impl->issueExternalBeginFrame(false);
   }
 }
 

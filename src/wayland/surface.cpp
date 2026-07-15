@@ -411,6 +411,7 @@ bool Surface::createWlSurface() {
 
   if (m_renderContext != nullptr) {
     m_renderTarget.create(m_surface, *m_renderContext);
+    m_renderTarget.setPresentationCallback(m_presentationCallback);
   }
   return true;
 }
@@ -452,6 +453,11 @@ void Surface::setUpdateCallback(UpdateCallback callback) { m_updateCallback = st
 
 void Surface::setFrameTickCallback(FrameTickCallback callback) { m_frameTickCallback = std::move(callback); }
 
+void Surface::setPresentationCallback(SurfacePresentationCallback callback) {
+  m_presentationCallback = std::move(callback);
+  m_renderTarget.setPresentationCallback(m_presentationCallback);
+}
+
 void Surface::setSceneRoot(Node* root) {
   if (m_sceneRoot == root) {
     return;
@@ -489,6 +495,7 @@ void Surface::setRenderContext(RenderContext* ctx) {
 
   if (m_surface != nullptr && m_renderContext != nullptr) {
     m_renderTarget.create(m_surface, *m_renderContext);
+    m_renderTarget.setPresentationCallback(m_presentationCallback);
     resizeRenderTarget();
   }
 }
@@ -545,6 +552,7 @@ void Surface::resizeRenderTarget() {
 
   if (m_surface != nullptr && m_renderTarget.surfaceTarget() == nullptr) {
     m_renderTarget.create(m_surface, *m_renderContext);
+    m_renderTarget.setPresentationCallback(m_presentationCallback);
   }
 
   const auto bufferWidth = bufferWidthFor(m_width);

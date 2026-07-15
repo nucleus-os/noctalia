@@ -27,6 +27,7 @@
 #include "render/core/shared_texture_cache.h"
 #include "render/core/thumbnail_service.h"
 #include "render/gl_shared_context.h"
+#include "render/graphics_device.h"
 #include "render/render_context.h"
 #include "scripting/plugin_manager.h"
 #include "scripting/plugin_service_host.h"
@@ -87,10 +88,8 @@
 #include "wayland/wayland_connection.h"
 #include "wayland/workspace_poll_source.h"
 
-#ifdef NOCTALIA_ENABLE_CEF
 #include "cef/cef_poll_source.h"
 #include "cef/cef_service.h"
-#endif
 
 #include <atomic>
 #include <cstdint>
@@ -205,7 +204,8 @@ private:
   bool runIdleAction(const IdleActionRequest& action);
   void onIconThemeChanged();
   void onGraphicsReset(RenderGraphicsResetStatus status);
-  void recoverGraphicsAfterReset();
+  void onGraphiteDeviceLost(RenderGraphicsResetStatus status);
+  void rebuildGraphiteDevice();
   void requestAllSurfacesRedraw();
   void onUpowerStateChangedForHooks();
   void onNetworkStateChangedForEvents(const NetworkState& state, NetworkChangeOrigin origin);
@@ -278,10 +278,14 @@ private:
   std::unique_ptr<PipeWireSpectrum> m_pipewireSpectrum;
   std::unique_ptr<SoundPlayer> m_soundPlayer;
 
-#ifdef NOCTALIA_ENABLE_CEF
+  // Declared before CEF so reverse member destruction shuts CEF down before
+  // destroying Vulkan/Graphite objects that the production bridge will use.
+  GraphicsDevice m_graphicsDevice;
+  bool m_graphiteDeviceRecoveryScheduled = false;
+  bool m_graphiteDeviceRecoveryAttempted = false;
+
   std::unique_ptr<CefService> m_cefService;
   std::unique_ptr<CefPollSource> m_cefPollSource;
-#endif
 
   TelemetryService m_telemetryService;
   ScreenTimeService m_screenTimeService;
@@ -289,6 +293,7 @@ private:
   GlSharedContext m_glShared;
   SharedTextureCache m_sharedTextureCache;
   RenderContext m_renderContext;
+  RenderContext m_graphiteRenderContext;
   ThumbnailService m_thumbnailService;
   WallpaperScanner m_wallpaperScanner;
   Bar m_bar;

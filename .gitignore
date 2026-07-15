@@ -24,3 +24,6 @@ Thumbs.db
 result/
 result
 result-*
+
+# Local Tracy captures
+profiles/

@@ -146,6 +146,18 @@ void RenderContext::prepareForGraphicsReset() {
   m_backend->abandonAfterGraphicsReset();
 }
 
+void RenderContext::initializeGraphite(GraphicsDevice& graphics) {
+  cleanup();
+  m_backend = createGraphiteRenderBackend(graphics);
+  m_backend->textureManager().probeExtensions();
+  m_textRenderer.initialize(m_backend.get(), &m_backend->textureManager());
+  m_glyphRenderer.initialize(
+      paths::assetPath("fonts/tabler.ttf").string(), m_backend.get(), &m_backend->textureManager()
+  );
+  m_textFontFamily = "sans-serif";
+  ++m_textMetricsGeneration;
+}
+
 bool RenderContext::makeCurrentNoSurface() {
   if (m_backend == nullptr || m_graphicsResetPending) {
     return false;
@@ -199,6 +211,10 @@ void RenderContext::renderScene(RenderTarget& target, Node* sceneRoot) {
   }
   const auto totalStart = std::chrono::steady_clock::now();
   if (!m_backend->beginFrame(target)) {
+    const RenderGraphicsResetStatus resetStatus = m_backend->graphicsResetStatus();
+    if (resetStatus != RenderGraphicsResetStatus::NoError) {
+      handleGraphicsReset(resetStatus);
+    }
     return;
   }
   syncContentScale(target);

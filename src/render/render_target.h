@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render/presentation_timing.h"
+
 #include <cstdint>
 #include <memory>
 
@@ -20,6 +22,7 @@ public:
   void create(wl_surface* surface, RenderContext& context);
   void create(wl_surface* surface, RenderBackend& backend);
   void resize(std::uint32_t bufferWidth, std::uint32_t bufferHeight);
+  void setPresentationCallback(SurfacePresentationCallback callback);
   void destroy();
 
   [[nodiscard]] std::uint32_t bufferWidth() const noexcept { return m_bufferWidth; }

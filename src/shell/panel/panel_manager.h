@@ -56,7 +56,10 @@ public:
   static PanelManager& instance();
   static PanelManager* current() noexcept;
 
-  void initialize(CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext);
+  void initialize(
+      CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext,
+      RenderContext* graphiteRenderContext = nullptr
+  );
 
   // Optional: invoked from shell UI (e.g. control center) to spawn the standalone settings toplevel.
   void setOpenSettingsWindowCallback(std::function<void(std::string)> callback);
@@ -114,6 +117,8 @@ public:
   [[nodiscard]] std::optional<LayerPopupParentContext> fallbackPopupParentContext() const noexcept;
 
   [[nodiscard]] RenderContext* renderContext() const noexcept { return m_renderContext; }
+  [[nodiscard]] bool detachGraphiteSurfaceForDeviceRebuild();
+  void reattachGraphiteSurfaceAfterDeviceRebuild(bool wasAttached);
   [[nodiscard]] WaylandConnection* wayland() const noexcept;
 
   void setActivePopup(ContextMenuPopup* popup);
@@ -151,6 +156,7 @@ private:
 
   void buildScene(std::uint32_t width, std::uint32_t height);
   void prepareFrame(bool needsUpdate, bool needsLayout);
+  [[nodiscard]] RenderContext* activeRenderContext() const noexcept;
   void applyPendingPanelFocus();
   void destroyPanel();
   // Called BEFORE the panel surface commits so shields sit below the panel
@@ -174,6 +180,7 @@ private:
   CompositorPlatform* m_platform = nullptr;
   ConfigService* m_config = nullptr;
   RenderContext* m_renderContext = nullptr;
+  RenderContext* m_graphiteRenderContext = nullptr;
   std::function<void(std::string)> m_openSettingsWindow;
   std::function<void()> m_closeSettingsWindow;
   std::function<void(std::string)> m_toggleSettingsWindow;

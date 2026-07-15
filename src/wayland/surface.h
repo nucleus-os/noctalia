@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/core/render_styles.h"
+#include "render/presentation_timing.h"
 #include "render/render_target.h"
 
 #include <chrono>
@@ -78,6 +79,7 @@ public:
   void setPrepareFrameCallback(PrepareFrameCallback callback);
   void setUpdateCallback(UpdateCallback callback);
   void setFrameTickCallback(FrameTickCallback callback);
+  void setPresentationCallback(SurfacePresentationCallback callback);
   void setInputRegion(const std::vector<InputRect>& rects);
   void setBlurRegion(const std::vector<InputRect>& rects);
   void clearBlurRegion();
@@ -181,6 +183,7 @@ private:
   PrepareFrameCallback m_prepareFrameCallback;
   UpdateCallback m_updateCallback;
   FrameTickCallback m_frameTickCallback;
+  SurfacePresentationCallback m_presentationCallback;
   wl_callback* m_frameCallback = nullptr;
   ext_background_effect_surface_v1* m_backgroundEffect = nullptr;
   wp_viewport* m_viewport = nullptr;

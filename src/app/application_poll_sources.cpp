@@ -12,11 +12,9 @@
 
 std::vector<PollSource*> Application::currentPollSources() {
   std::vector<PollSource*> sources;
-#ifdef NOCTALIA_ENABLE_CEF
   if (m_cefPollSource != nullptr) {
     sources.push_back(m_cefPollSource.get());
   }
-#endif
   if (m_busPollSource != nullptr) {
     sources.push_back(m_busPollSource.get());
   }

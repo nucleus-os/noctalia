@@ -4,6 +4,7 @@
 #include "render/render_context.h"
 
 #include <stdexcept>
+#include <utility>
 
 RenderTarget::RenderTarget() = default;
 
@@ -29,6 +30,12 @@ void RenderTarget::resize(std::uint32_t bufferWidth, std::uint32_t bufferHeight)
 
   if (m_surfaceTarget != nullptr) {
     m_surfaceTarget->resize(bufferWidth, bufferHeight);
+  }
+}
+
+void RenderTarget::setPresentationCallback(SurfacePresentationCallback callback) {
+  if (m_surfaceTarget != nullptr) {
+    m_surfaceTarget->setPresentationCallback(std::move(callback));
   }
 }
 

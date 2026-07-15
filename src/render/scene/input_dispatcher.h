@@ -32,6 +32,8 @@ public:
   void pointerLeave();
   void pointerMotion(float x, float y, std::uint32_t serial);
   void syncPointerHover();
+  // Re-apply the hovered area's cursor after an asynchronous cursor change.
+  void refreshCursor();
   // Returns true if the event was consumed by a scene widget
   bool pointerButton(float x, float y, std::uint32_t button, bool pressed);
   bool pointerAxis(

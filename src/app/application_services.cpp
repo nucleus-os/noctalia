@@ -59,6 +59,7 @@
 #include "render/backend/render_backend.h"
 #include "render/core/texture_manager.h"
 #include "render/text/font_weight_catalog.h"
+#include "render/vulkan/vulkan_result.h"
 #include "scripting/plugin_ipc.h"
 #include "scripting/plugin_manifest.h"
 #include "scripting/plugin_panel_shell.h"
@@ -95,13 +96,16 @@
 #include "util/string_utils.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <malloc.h>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -116,6 +120,31 @@ namespace {
       scripting::ScriptRuntime::setShutdownSignal(signum);
       Application::s_shutdownRequested = true;
     }
+  }
+
+  bool vulkanValidationRequested() {
+    const char* value = std::getenv("NOCTALIA_VULKAN_VALIDATION");
+    return value != nullptr && (std::string_view(value) == "1" || std::string_view(value) == "true");
+  }
+
+  std::string uuidHex(const std::array<std::uint8_t, VK_UUID_SIZE>& uuid) {
+    static constexpr std::string_view digits = "0123456789ABCDEF";
+    std::string result(uuid.size() * 2U, '0');
+    for (std::size_t index = 0; index < uuid.size(); ++index) {
+      result[index * 2U] = digits[uuid[index] >> 4U];
+      result[index * 2U + 1U] = digits[uuid[index] & 0x0fU];
+    }
+    return result;
+  }
+
+  void publishCefGraphicsDevice(const GraphicsDevice& graphics) {
+    const GraphicsDeviceIdentity identity = graphics.identity();
+    const std::string uuid = uuidHex(identity.uuid);
+    if (setenv("NOCTALIA_CEF_VULKAN_DEVICE_UUID", uuid.c_str(), 1) != 0
+        || setenv("NOCTALIA_CEF_DRM_RENDER_NODE", identity.drmRenderNode.c_str(), 1) != 0) {
+      throw std::runtime_error("failed to publish the CEF graphics-device contract");
+    }
+    kLog.info("pinned CEF to Vulkan UUID={} renderNode={}", uuid, identity.drmRenderNode);
   }
 } // namespace
 
@@ -342,10 +371,8 @@ void Application::syncClipboardService() {
 }
 
 void Application::initServices() {
-#ifdef NOCTALIA_ENABLE_CEF
   m_cefService = std::make_unique<CefService>(NOCTALIA_CEF_DIR);
   m_cefPollSource = std::make_unique<CefPollSource>(*m_cefService);
-#endif
   initStyleThemeAndWayland();
   initWaylandCallbacks();
   initAuxServicesAndHooks();
@@ -525,6 +552,26 @@ void Application::initStyleThemeAndWayland() {
   if (!m_wayland.connect()) {
     throw std::runtime_error("failed to connect to Wayland display");
   }
+
+  // CEF owns process-wide allocator entry points. Establish that runtime
+  // before Vulkan/validation creates worker-thread TLS, matching the order
+  // proven by the standalone interop gate. Browser creation remains lazy.
+  if (!m_cefService->initialize()) {
+    throw std::runtime_error("failed to initialize the CEF runtime before Vulkan");
+  }
+  // Chromium installs process signal handlers during CefInitialize. Restore
+  // the shell's cooperative shutdown handlers afterwards so SIGTERM/SIGINT
+  // breaks the poll loop and lets CEF close before Graphite/Vulkan teardown.
+  std::signal(SIGTERM, signal_handler);
+  std::signal(SIGINT, signal_handler);
+  m_graphicsDevice.initialize(
+      m_wayland.display(),
+      {.cefExternalMemory = true, .validation = vulkanValidationRequested()},
+      m_wayland.presentation(), m_wayland.presentationClockId()
+  );
+  m_cefService->attachGraphicsDevice(m_graphicsDevice);
+  publishCefGraphicsDevice(m_graphicsDevice);
+
   m_compositorPlatform.initialize();
   m_screenTimeService.initialize(&m_wayland);
   syncScreenTimeService();
@@ -641,12 +688,6 @@ void Application::initWaylandCallbacks() {
     m_windowSwitcher.onToplevelChange();
     if (m_panelManager.isOpenPanel("control-center")) {
       m_panelManager.refresh();
-    }
-    if (!m_lockScreen.isActive() && m_wayland.hasPointerPosition() && !m_wayland.activeToplevel().has_value()) {
-      const std::uint32_t serial = m_wayland.lastInputSerial();
-      if (serial != 0) {
-        m_wayland.setCursorShape(serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
-      }
     }
   });
   if constexpr (kLockKeysEnabled) {

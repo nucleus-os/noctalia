@@ -2,22 +2,47 @@
 
 #include "cef/cef_service.h"
 #include "cef/cef_surface_node.h"
+#include "core/tracy.h"
+#include "core/tracy_latency.h"
 #include "render/core/renderer.h"
 #include "shell/panel/panel_manager.h"
 
 #include <memory>
+
+namespace {
+  std::uint64_t g_cefFrameReadyRequests = 0;
+}
 
 AppleMusicPanel::AppleMusicPanel(CefService& service) : m_service(service) {}
 
 void AppleMusicPanel::create() {
   auto surface = std::make_unique<CefSurfaceNode>(m_service);
   m_surface = surface.get();
-  m_surface->attach([]() { PanelManager::instance().requestFrameTick(); });
+  m_surface->attach(
+      []() {
+        NOCTALIA_TRACE_ZONE("Apple Music CEF frame-ready request");
+        ++g_cefFrameReadyRequests;
+        NOCTALIA_TRACE_PLOT(
+            "Apple Music CEF frame-ready requests",
+            static_cast<std::int64_t>(g_cefFrameReadyRequests)
+        );
+        tracy_latency::redrawQueued();
+        // A CEF frame must run AppleMusicPanel::doUpdate() so the scene adopts
+        // the new texture. requestFrameTick() only advances animations and can
+        // leave the browser frozen until unrelated user input requests update.
+        PanelManager::instance().requestUpdateOnly();
+        PanelManager::instance().requestRedraw();
+      },
+      []() { PanelManager::instance().inputDispatcher().refreshCursor(); }
+  );
   setRoot(std::move(surface));
 }
 
 void AppleMusicPanel::onOpen(std::string_view /*context*/) {
-  m_service.navigate("https://music.apple.com/");
+  if (!m_initialNavigationRequested) {
+    m_service.navigate("https://music.apple.com/");
+    m_initialNavigationRequested = true;
+  }
   m_service.setDisplayAttached(true);
 }
 
@@ -25,6 +50,10 @@ void AppleMusicPanel::onClose() {
   if (m_surface != nullptr) {
     m_surface->detach();
   }
+}
+
+void AppleMusicPanel::onPresentation(const SurfacePresentationFeedback& feedback) {
+  m_service.onPresentation(feedback);
 }
 
 InputArea* AppleMusicPanel::initialFocusArea() const {
@@ -41,6 +70,7 @@ void AppleMusicPanel::doLayout(Renderer& renderer, float width, float height) {
 }
 
 void AppleMusicPanel::doUpdate(Renderer& renderer) {
+  NOCTALIA_TRACE_ZONE("Apple Music adopt CEF texture");
   if (m_surface != nullptr && m_surface->syncTexture(renderer.textureManager())) {
     m_surface->markPaintDirty();
   }

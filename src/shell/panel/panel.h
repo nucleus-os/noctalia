@@ -3,6 +3,7 @@
 #include "config/config_types.h"
 #include "core/ui_phase.h"
 #include "render/scene/node.h"
+#include "render/presentation_timing.h"
 #include "wayland/layer_surface.h"
 
 #include <algorithm>
@@ -29,6 +30,7 @@ public:
     doUpdate(renderer);
   }
   virtual void onFrameTick(float deltaMs) { (void)deltaMs; }
+  virtual void onPresentation(const SurfacePresentationFeedback& feedback) { (void)feedback; }
   virtual void onOpen(std::string_view context) { (void)context; }
   virtual void onClose() {}
   virtual void onIconThemeChanged() {}

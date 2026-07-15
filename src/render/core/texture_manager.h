@@ -60,28 +60,6 @@ public:
   [[nodiscard]] virtual TextureHandle createBgraSurface(int width, int height) = 0;
   virtual bool updateBgraSurface(TextureHandle& handle, const std::uint8_t* data, int width, int height) = 0;
 
-  // Zero-copy import of an externally-produced dmabuf (e.g. an embedded
-  // browser's GPU-rendered shared texture) as a GL texture backed by an
-  // EGLImage — no pixel copy, no upload. The caller retains ownership of the
-  // fds and may close them once import returns (the EGLImage takes its own
-  // reference). unload() releases the EGLImage. Returns an invalid handle if
-  // dmabuf import is unavailable (see supportsDmabufImport()).
-  struct DmabufPlane {
-    int fd = -1;
-    std::uint32_t stride = 0;
-    std::uint64_t offset = 0;
-  };
-  struct DmabufImage {
-    int width = 0;
-    int height = 0;
-    std::uint32_t fourcc = 0;   // DRM FourCC (e.g. DRM_FORMAT_ARGB8888)
-    std::uint64_t modifier = 0; // DRM format modifier
-    bool hasModifier = false;
-    int planeCount = 0;
-    DmabufPlane planes[4];
-  };
-  [[nodiscard]] virtual bool supportsDmabufImport() const = 0;
-  [[nodiscard]] virtual TextureHandle importDmabuf(const DmabufImage& image) = 0;
   virtual bool replace(
       TextureHandle& handle, const std::uint8_t* data, int width, int height, TextureDataFormat format,
       TextureFilter filter = TextureFilter::Linear, bool mipmap = false

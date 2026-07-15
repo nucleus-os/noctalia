@@ -5,9 +5,7 @@
 #include "core/log.h"
 #include "shell/bar/widgets/active_window_widget.h"
 #include "shell/bar/widgets/audio_visualizer_widget.h"
-#ifdef NOCTALIA_ENABLE_CEF
 #include "shell/bar/widgets/apple_music_widget.h"
-#endif
 #include "shell/bar/widgets/battery_widget.h"
 #include "shell/bar/widgets/bluetooth_widget.h"
 #include "shell/bar/widgets/brightness_widget.h"
@@ -180,7 +178,6 @@ std::unique_ptr<Widget> WidgetFactory::create(
     return widget;
   }
 
-#ifdef NOCTALIA_ENABLE_CEF
   if (type == "apple-music") {
     const float maxWidth = static_cast<float>(wc != nullptr ? wc->getDouble("max_length", 220.0) : 220.0);
     const float minWidth = static_cast<float>(wc != nullptr ? wc->getDouble("min_length", 80.0) : 80.0);
@@ -197,7 +194,6 @@ std::unique_ptr<Widget> WidgetFactory::create(
     widget->setContentScale(contentScale);
     return widget;
   }
-#endif
 
   if (type == "battery") {
     const std::string deviceSelector = wc != nullptr ? wc->getString("device", "auto") : std::string("auto");

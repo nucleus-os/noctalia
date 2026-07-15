@@ -311,11 +311,21 @@ WaylandConnection* PanelManager::wayland() const noexcept {
   return m_platform != nullptr ? &m_platform->wayland() : nullptr;
 }
 
-void PanelManager::initialize(CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext) {
+void PanelManager::initialize(
+    CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext,
+    RenderContext* graphiteRenderContext
+) {
   m_platform = &platform;
   m_config = config;
   m_renderContext = renderContext;
+  m_graphiteRenderContext = graphiteRenderContext;
   m_clickShield.initialize(platform.wayland());
+}
+
+RenderContext* PanelManager::activeRenderContext() const noexcept {
+  // CEF is the first production vertical slice. It has no GLES fallback: its
+  // persistent Vulkan image and Wayland swapchain must share this context.
+  return m_activePanelId == "apple-music" ? m_graphiteRenderContext : m_renderContext;
 }
 
 void PanelManager::setOpenSettingsWindowCallback(std::function<void(std::string)> callback) {
@@ -756,7 +766,12 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   };
 
   const auto configureSurfaceCallbacks = [this](Surface& surface) {
-    surface.setRenderContext(m_renderContext);
+    surface.setPresentationCallback([this](const SurfacePresentationFeedback& feedback) {
+      if (m_activePanel != nullptr) {
+        m_activePanel->onPresentation(feedback);
+      }
+    });
+    surface.setRenderContext(activeRenderContext());
     surface.setConfigureCallback([this](std::uint32_t /*width*/, std::uint32_t /*height*/) {
       if (m_surface != nullptr) {
         m_surface->requestLayout();
@@ -1393,7 +1408,7 @@ bool PanelManager::onPointerEvent(const PointerEvent& event) {
     break;
   }
   case PointerEvent::Type::Motion: {
-    if (!m_pointerInside) {
+    if (!m_pointerInside || event.surface != m_wlSurface) {
       return false;
     }
     m_inputDispatcher.pointerMotion(static_cast<float>(event.sx), static_cast<float>(event.sy), 0);
@@ -1422,7 +1437,7 @@ bool PanelManager::onPointerEvent(const PointerEvent& event) {
     break;
   }
   case PointerEvent::Type::Axis: {
-    if (!m_pointerInside) {
+    if (!m_pointerInside || event.surface != m_wlSurface) {
       return false;
     }
     m_inputDispatcher.pointerAxis(
@@ -1525,6 +1540,25 @@ void PanelManager::requestRedraw() {
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
+  m_surface->requestRedraw();
+}
+
+bool PanelManager::detachGraphiteSurfaceForDeviceRebuild() {
+  if (m_surface == nullptr || m_graphiteRenderContext == nullptr
+      || m_surface->renderContext() != m_graphiteRenderContext) {
+    return false;
+  }
+  m_surface->setRenderContext(nullptr);
+  return true;
+}
+
+void PanelManager::reattachGraphiteSurfaceAfterDeviceRebuild(bool wasAttached) {
+  if (!wasAttached || m_surface == nullptr || m_graphiteRenderContext == nullptr
+      || m_activePanelId != "apple-music") {
+    return;
+  }
+  m_surface->setRenderContext(m_graphiteRenderContext);
+  m_surface->requestLayout();
   m_surface->requestRedraw();
 }
 
@@ -2095,10 +2129,10 @@ void PanelManager::onConfigReloaded() {
 
 void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
   uiAssertNotRendering("PanelManager::buildScene");
-  if (m_renderContext == nullptr || m_activePanel == nullptr) {
+  if (activeRenderContext() == nullptr || m_activePanel == nullptr) {
     return;
   }
-  auto* renderer = m_renderContext;
+  auto* renderer = activeRenderContext();
   const bool hasDecoration = m_activePanel->hasDecoration();
 
   const auto w = static_cast<float>(width);
@@ -2355,14 +2389,15 @@ void PanelManager::applyPendingPanelFocus() {
 }
 
 void PanelManager::prepareFrame(bool needsUpdate, bool needsLayout) {
-  if (m_renderContext == nullptr || m_surface == nullptr) {
+  auto* renderer = activeRenderContext();
+  if (renderer == nullptr || m_surface == nullptr) {
     return;
   }
   if (m_activePanel == nullptr) {
     return;
   }
 
-  m_renderContext->makeCurrent(m_surface->renderTarget());
+  renderer->makeCurrent(m_surface->renderTarget());
 
   const auto width = m_surface->width();
   const auto height = m_surface->height();
@@ -2376,12 +2411,12 @@ void PanelManager::prepareFrame(bool needsUpdate, bool needsLayout) {
 
   if (!needsSceneBuild && needsUpdate) {
     UiPhaseScope updatePhase(UiPhase::Update);
-    m_activePanel->update(*m_renderContext);
+    m_activePanel->update(*renderer);
   }
   if (!needsSceneBuild && needsLayout) {
     UiPhaseScope layoutPhase(UiPhase::Layout);
     if (m_activePanel != nullptr) {
-      m_activePanel->layout(*m_renderContext, m_contentWidth, m_contentHeight);
+      m_activePanel->layout(*renderer, m_contentWidth, m_contentHeight);
     }
     if (m_pointerInside) {
       m_inputDispatcher.syncPointerHover();

@@ -234,6 +234,14 @@ void InputDispatcher::syncPointerHover() {
   updateHover(m_lastPointerX, m_lastPointerY, m_lastSerial);
 }
 
+void InputDispatcher::refreshCursor() {
+  if (!m_hasPointerPosition) {
+    return;
+  }
+  pruneDetachedAreas();
+  updateCursor(m_lastSerial);
+}
+
 bool InputDispatcher::pointerAxis(
     float x, float y, std::uint32_t axis, std::uint32_t axisSource, double value, std::int32_t discrete,
     std::int32_t value120, float lines

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/core/texture_handle.h"
+#include "render/presentation_timing.h"
 
 #include <cstdint>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <string>
 
 class TextureManager;
+class GraphicsDevice;
 
 // App-level owner of the embedded CEF browser. Deliberately exposes NO CEF
 // types (pImpl) so the rest of the shell — panels, the surface node, the bar
@@ -31,8 +33,16 @@ public:
   CefService(const CefService&) = delete;
   CefService& operator=(const CefService&) = delete;
 
-  // Lazily initialize CEF (first browser use). Returns false on failure.
+  // Initialize CEF's process allocator and browser runtime. This may happen
+  // before a renderer is attached; ensureBrowser separately enforces that an
+  // accelerated DMA-BUF path is available.
   bool initialize();
+  // Bind the mandatory process-wide Vulkan/Graphite device after CEF has
+  // established its allocator. Browser creation is refused until this bridge
+  // exists; there is no GLES or CPU rendering path.
+  void attachGraphicsDevice(GraphicsDevice& graphics);
+  void prepareForGraphicsDeviceRebuild();
+  void resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics);
   void shutdown();
   [[nodiscard]] bool initialized() const noexcept;
 
@@ -44,12 +54,6 @@ public:
   void execJs(const std::string& code);
   void setDeviceScale(float scale);
 
-  // Declare whether the renderer can import dmabufs. Must be set before CEF is
-  // initialized. Browser creation is refused when unavailable; production CEF
-  // rendering has no CPU paint fallback.
-  void setAcceleratedEnabled(bool enabled);
-  [[nodiscard]] bool acceleratedEnabled() const noexcept;
-
   // Input — logical (DIP) coordinates, matching CefMouseEvent's coordinate space.
   void sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving = false);
   void sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers);
@@ -60,13 +64,14 @@ public:
   // Keep the browser alive but stop painting when its display is detached
   // (panel closed); repaint + focus on re-attach.
   void setDisplayAttached(bool attached);
+  void onPresentation(const SurfacePresentationFeedback& feedback);
 
   // Message pump — driven by CefPollSource on the main thread.
   void doMessageLoopWork();
   void setScheduleWorkCallback(std::function<void(std::int64_t delayMs)> cb);
 
-  // Texture bridge — call on the main thread with the GL context current (from
-  // the surface node's update). Imports the latest dmabuf frame if one arrived.
+  // Texture bridge — observes whether accelerated paint rebound the stable
+  // Graphite texture handle to a newly arrived DMA-BUF image.
   bool uploadIfDirty(TextureManager& textures);
   [[nodiscard]] TextureHandle currentTexture() const noexcept;
   // GPU-loss / scene rebuild: drop the texture handle and force a repaint so

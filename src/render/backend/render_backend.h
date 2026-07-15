@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render/presentation_timing.h"
+
 #include "render/core/color.h"
 #include "render/core/mat3.h"
 #include "render/core/texture_handle.h"
@@ -9,6 +11,7 @@
 #include <span>
 
 class GlSharedContext;
+class GraphicsDevice;
 class RenderTarget;
 class TextureManager;
 struct wl_surface;
@@ -102,6 +105,7 @@ public:
 
   virtual void resize(std::uint32_t bufferWidth, std::uint32_t bufferHeight) = 0;
   virtual void destroy() = 0;
+  virtual void setPresentationCallback(SurfacePresentationCallback callback) { (void)callback; }
 
   [[nodiscard]] virtual bool isReady() const noexcept = 0;
 };
@@ -184,4 +188,5 @@ public:
 };
 
 [[nodiscard]] std::unique_ptr<RenderBackend> createDefaultRenderBackend();
+[[nodiscard]] std::unique_ptr<RenderBackend> createGraphiteRenderBackend(GraphicsDevice& graphics);
 [[nodiscard]] std::unique_ptr<TextureManager> createDefaultTextureManager();

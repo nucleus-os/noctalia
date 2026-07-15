@@ -6,5 +6,8 @@ option(
   value: false,
   description: 'Optimize for the build machine CPU; output may not be portable',
 )
-option('enable_cef', type: 'boolean', value: false, description: 'Enable the embedded CEF (Chromium Embedded Framework) browser for the in-shell Apple Music experience.')
-option('cef_sdk_path', type: 'string', value: '', description: 'Absolute path to the codec-enabled CEF distribution root. Required when enable_cef=true.')
+option('cef_sdk_path', type: 'string', value: '', description: 'Absolute path to the required codec-enabled CEF distribution root.')
+option('nucleus_render_sdk_path', type: 'string', value: '', description: 'Absolute path to the versioned Nucleus render SDK. Required for the Vulkan/Graphite renderer.')
+option('nucleus_cpp_deps_path', type: 'string', value: '', description: 'Absolute path to ABI-matched libc++ builds of sdbus-c++, libqalculate, and toml++. Required.')
+option('tracy', type: 'feature', value: 'disabled', description: 'Build the Noctalia executable with Tracy profiling instrumentation.')
+option('tracy_source_path', type: 'string', value: '', description: 'Absolute path to the pinned Tracy source tree. Required when -Dtracy=enabled.')

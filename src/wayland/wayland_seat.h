@@ -172,6 +172,7 @@ private:
   std::array<AxisDetent, 2> m_pendingAxisDetents{};
   wl_surface* m_lastPointerSurface = nullptr;
   std::uint32_t m_pointerEnterSerial = 0;
+  std::uint32_t m_appliedCursorShape = 0;
   double m_lastPointerX = 0.0;
   double m_lastPointerY = 0.0;
   bool m_hasPointerPosition = false;

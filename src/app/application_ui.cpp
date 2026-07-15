@@ -66,9 +66,7 @@
 #include "shell/control_center/control_center_panel.h"
 #include "shell/greeter/greeter_appearance_sync.h"
 #include "shell/launcher/launcher_panel.h"
-#ifdef NOCTALIA_ENABLE_CEF
 #include "shell/apple_music/apple_music_panel.h"
-#endif
 #include "shell/panel/plugin_panel.h"
 #include "shell/polkit/polkit_panel.h"
 #include "shell/session/session_ipc.h"
@@ -127,11 +125,16 @@ void Application::initUi() {
 void Application::initUiRenderSurfacesAndSettings() {
 
   m_renderContext.initialize(m_glShared);
+  m_graphiteRenderContext.initializeGraphite(m_graphicsDevice);
   m_renderContext.setGraphicsResetCallback([this](RenderGraphicsResetStatus status) { onGraphicsReset(status); });
+  m_graphiteRenderContext.setGraphicsResetCallback(
+      [this](RenderGraphicsResetStatus status) { onGraphiteDeviceLost(status); }
+  );
   if (!m_glShared.hasSharedContext()) {
     m_asyncTextureCache.setMakeCurrentCallback([this]() { m_renderContext.backend().makeCurrentNoSurface(); });
   }
   m_renderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
+  m_graphiteRenderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
   m_wallpaper.initialize(m_wayland, &m_configService, &m_renderContext, &m_sharedTextureCache);
   m_backdrop.initialize(m_wayland, &m_configService, &m_sharedTextureCache, &m_glShared);
   m_settingsWindow.initialize(
@@ -471,7 +474,7 @@ void Application::initInputDispatch() {
 
 void Application::initPanelManagerAndPanels() {
   // Panel manager must be before bar so widgets can access PanelManager::instance()
-  m_panelManager.initialize(m_compositorPlatform, &m_configService, &m_renderContext);
+  m_panelManager.initialize(m_compositorPlatform, &m_configService, &m_renderContext, &m_graphiteRenderContext);
   m_panelManager.setOpenSettingsWindowCallback([this](std::string context) {
     m_settingsWindow.open(std::move(context));
   });
@@ -586,11 +589,7 @@ void Application::initPanelManagerAndPanels() {
       },
       "launcher-usage"
   );
-#ifdef NOCTALIA_ENABLE_CEF
-  if (m_cefService != nullptr) {
-    m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(*m_cefService));
-  }
-#endif
+  m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(*m_cefService));
   m_settingsWindow.setResetLauncherUsage([this]() {
     if (m_launcherPanel != nullptr) {
       m_launcherPanel->clearUsage();
@@ -949,6 +948,7 @@ void Application::initWidgetControllersAndCallbacks() {
         lastShellFontFamily = newShellFontFamily;
         text::invalidateFontWeightCatalogCache();
         m_renderContext.setTextFontFamily(newShellFontFamily);
+        m_graphiteRenderContext.setTextFontFamily(newShellFontFamily);
         m_bar.requestLayout();
         m_dock.requestLayout();
         m_desktopWidgetsController.requestLayout();

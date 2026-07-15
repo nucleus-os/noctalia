@@ -47,6 +47,7 @@ struct zwlr_gamma_control_manager_v1;
 struct zwlr_screencopy_manager_v1;
 struct wp_fractional_scale_manager_v1;
 struct wp_viewporter;
+struct wp_presentation;
 class ClipboardService;
 class FocusGrabService;
 struct DataControlOps;
@@ -162,6 +163,8 @@ public:
   [[nodiscard]] FocusGrabService* focusGrabService() const noexcept;
   [[nodiscard]] TextInputService* textInputService() const noexcept { return m_textInputService; }
   [[nodiscard]] wp_viewporter* viewporter() const noexcept;
+  [[nodiscard]] wp_presentation* presentation() const noexcept;
+  [[nodiscard]] std::int32_t presentationClockId() const noexcept { return m_presentationClockId; }
   [[nodiscard]] wl_display* display() const noexcept;
   [[nodiscard]] std::string describeDisplayError(int operationErrno = 0) const;
   [[nodiscard]] wl_compositor* compositor() const noexcept;
@@ -235,6 +238,7 @@ public:
   static void handleGlobalRemove(void* data, wl_registry* registry, std::uint32_t name);
 
   void onBackgroundEffectCapabilities(std::uint32_t capabilities) noexcept;
+  void onPresentationClockId(std::uint32_t clockId) noexcept;
   void notifyIdleCapabilitiesReady();
 
 private:
@@ -266,6 +270,8 @@ private:
   zwlr_screencopy_manager_v1* m_screencopyManager = nullptr;
   std::unique_ptr<FocusGrabService> m_focusGrabService;
   wp_viewporter* m_viewporter = nullptr;
+  wp_presentation* m_presentation = nullptr;
+  std::int32_t m_presentationClockId = -1;
   bool m_backgroundEffectBlurSupported = false;
   void* m_dataControlManager = nullptr;
   const DataControlOps* m_dataControlOps = nullptr;

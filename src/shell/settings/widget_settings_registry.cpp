@@ -57,9 +57,7 @@ namespace settings {
 
     const std::vector<WidgetTypeSpec> kWidgetTypeSpecs = {
         {.type = "active_window", .labelKey = "settings.widgets.types.active-window", .glyph = "app-window"},
-#ifdef NOCTALIA_ENABLE_CEF
         {.type = "apple-music", .labelKey = "settings.widgets.types.apple-music", .glyph = "brand-apple"},
-#endif
         {.type = "audio_visualizer", .labelKey = "settings.widgets.types.audio-visualizer", .glyph = "wave-sine"},
         {.type = "battery", .labelKey = "settings.widgets.types.battery", .glyph = "battery-4"},
         {.type = "bluetooth", .labelKey = "settings.widgets.types.bluetooth", .glyph = "bluetooth"},

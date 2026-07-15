@@ -16,6 +16,7 @@
 #include "hyprland-toplevel-mapping-v1-client-protocol.h"
 #include "idle-inhibit-unstable-v1-client-protocol.h"
 #include "org-kde-plasma-virtual-desktop-client-protocol.h"
+#include "presentation-time-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "util/string_utils.h"
 #include "viewporter-client-protocol.h"
@@ -64,6 +65,7 @@ namespace {
   constexpr std::uint32_t kHyprlandFocusGrabManagerVersion = 1;
   constexpr std::uint32_t kHyprlandToplevelMappingManagerVersion = 1;
   constexpr std::uint32_t kViewporterVersion = 1;
+  constexpr std::uint32_t kPresentationVersion = 2;
   constexpr std::uint32_t kOutputVersion = 4;
   constexpr std::uint32_t kTextInputManagerVersion = 2;
   constexpr std::uint32_t kVirtualKeyboardManagerVersion = 1;
@@ -139,6 +141,16 @@ namespace {
 
   const ext_background_effect_manager_v1_listener kBackgroundEffectListener = {
       .capabilities = &backgroundEffectCapabilities,
+  };
+
+  void presentationClockId(
+      void* data, wp_presentation* /*presentation*/, std::uint32_t clockId
+  ) {
+    static_cast<WaylandConnection*>(data)->onPresentationClockId(clockId);
+  }
+
+  const wp_presentation_listener kPresentationListener = {
+      .clock_id = &presentationClockId,
   };
 
   void outputGeometry(
@@ -710,6 +722,11 @@ hyprland_focus_grab_manager_v1* WaylandConnection::hyprlandFocusGrabManager() co
 }
 FocusGrabService* WaylandConnection::focusGrabService() const noexcept { return m_focusGrabService.get(); }
 wp_viewporter* WaylandConnection::viewporter() const noexcept { return m_viewporter; }
+wp_presentation* WaylandConnection::presentation() const noexcept { return m_presentation; }
+
+void WaylandConnection::onPresentationClockId(std::uint32_t clockId) noexcept {
+  m_presentationClockId = static_cast<std::int32_t>(clockId);
+}
 
 void WaylandConnection::onBackgroundEffectCapabilities(std::uint32_t capabilities) noexcept {
   m_backgroundEffectBlurSupported = (capabilities & EXT_BACKGROUND_EFFECT_MANAGER_V1_CAPABILITY_BLUR) != 0;
@@ -969,6 +986,15 @@ void WaylandConnection::bindGlobal(
     return;
   }
 
+  if (interfaceName == wp_presentation_interface.name) {
+    const auto bindVersion = std::min(version, kPresentationVersion);
+    m_presentation = static_cast<wp_presentation*>(
+        wl_registry_bind(registry, name, &wp_presentation_interface, bindVersion)
+    );
+    wp_presentation_add_listener(m_presentation, &kPresentationListener, this);
+    return;
+  }
+
   if (interfaceName == hyprland_focus_grab_manager_v1_interface.name) {
     const auto bindVersion = std::min(version, kHyprlandFocusGrabManagerVersion);
     m_hyprlandFocusGrabManager = static_cast<hyprland_focus_grab_manager_v1*>(
@@ -1187,6 +1213,12 @@ void WaylandConnection::cleanup() {
     m_viewporter = nullptr;
   }
 
+  if (m_presentation != nullptr) {
+    wp_presentation_destroy(m_presentation);
+    m_presentation = nullptr;
+    m_presentationClockId = -1;
+  }
+
   if (m_dataControlManager != nullptr && m_dataControlOps != nullptr) {
     m_dataControlOps->destroyManager(m_dataControlManager);
     m_dataControlManager = nullptr;
@@ -1266,12 +1298,12 @@ void WaylandConnection::cleanup() {
 void WaylandConnection::logStartupSummary() const {
   kLog.info(
       "connected compositor={} shm={} layer-shell={} xdg-shell={} xdg-output={} ext-workspace={} kde-vd={} dwl-ipc={} "
-      "session-lock={} fractional-scale={} gamma-control={} outputs={}",
+      "session-lock={} fractional-scale={} presentation-time={} presentation-clock={} gamma-control={} outputs={}",
       m_compositor != nullptr ? "yes" : "no", m_shm != nullptr ? "yes" : "no", hasLayerShell() ? "yes" : "no",
       hasXdgShell() ? "yes" : "no", hasXdgOutputManager() ? "yes" : "no", hasExtWorkspaceManager() ? "yes" : "no",
       hasKdeVirtualDesktopManager() ? "yes" : "no", hasDwlIpcManager() ? "yes" : "no",
-      hasSessionLockManager() ? "yes" : "no", hasFractionalScale() ? "yes" : "no", hasGammaControl() ? "yes" : "no",
-      m_outputs.size()
+      hasSessionLockManager() ? "yes" : "no", hasFractionalScale() ? "yes" : "no",
+      m_presentation != nullptr ? "yes" : "no", m_presentationClockId, hasGammaControl() ? "yes" : "no", m_outputs.size()
   );
 
   for (const auto& output : m_outputs) {

@@ -11,19 +11,139 @@ project('noctalia', ['c', 'cpp'],
 cc  = meson.get_compiler('c')
 cpp = meson.get_compiler('cpp')
 
-
-# Clang requires an opt-in flag to properly use experimental C++ libraries.
-# GCC/libstdc++ doesn't need this since these libraries are unconditionally
-# exposed.
-is_libcxx = cpp.get_define('_LIBCPP_VERSION', prefix: '#include <version>' ) != ''
-if is_libcxx
-  add_project_arguments('-fexperimental-library', language: 'cpp')
-  add_project_link_arguments('-lc++experimental', language: 'cpp')
+# Nucleus owns the native rendering ABI. Mixing compilers or C++ standard
+# libraries with its Skia archives is unsupported even when the final link
+# happens to succeed.
+if cpp.get_id() != 'clang'
+  error('Noctalia requires the Nucleus Clang/libc++ toolchain; GCC is unsupported')
 endif
+is_libcxx = cpp.get_define('_LIBCPP_VERSION', prefix: '#include <version>' ) != ''
+if not is_libcxx
+  error('Noctalia requires the Nucleus Clang/libc++ toolchain; libstdc++ is unsupported')
+endif
+add_project_arguments('-fexperimental-library', language: 'cpp')
+add_project_link_arguments('-lc++experimental', language: 'cpp')
+nucleus_render_sdk_path = get_option('nucleus_render_sdk_path')
+if nucleus_render_sdk_path == ''
+  error('nucleus_render_sdk_path is required (for example: -Dnucleus_render_sdk_path=$HOME/.cache/nucleus/nucleus-native-sdk/render)')
+endif
+if not nucleus_render_sdk_path.startswith('/')
+  error('nucleus_render_sdk_path must be absolute: ' + nucleus_render_sdk_path)
+endif
+
+python = import('python').find_installation('python3')
+nucleus_sdk_check = run_command(
+  python,
+  files('tools/nucleus-render-sdk.py'),
+  'validate',
+  '--sdk', nucleus_render_sdk_path,
+  '--compiler', cpp.cmd_array()[0],
+  check: false,
+)
+if nucleus_sdk_check.returncode() != 0
+  error(nucleus_sdk_check.stderr().strip())
+endif
+message(nucleus_sdk_check.stdout().strip())
+
+nucleus_cpp_deps_path = get_option('nucleus_cpp_deps_path')
+if nucleus_cpp_deps_path == ''
+  error('nucleus_cpp_deps_path is required; create it with tools/bootstrap-nucleus-cpp-deps.sh')
+endif
+if not nucleus_cpp_deps_path.startswith('/')
+  error('nucleus_cpp_deps_path must be absolute: ' + nucleus_cpp_deps_path)
+endif
+
+private_deps_fs = import('fs')
+foreach required : [
+  'include/sdbus-c++/sdbus-c++.h',
+  'include/libqalculate/Calculator.h',
+  'include/toml++/toml.hpp',
+  'lib/libsdbus-c++.so',
+  'lib/libqalculate.so',
+  'lib/libc++.so.1',
+  'lib/libc++abi.so.1',
+  'lib/libunwind.so.1',
+  'share/noctalia-cpp-deps/manifest.txt',
+]
+  if not private_deps_fs.exists(nucleus_cpp_deps_path / required)
+    error('Invalid nucleus_cpp_deps_path: missing ' + nucleus_cpp_deps_path / required)
+  endif
+endforeach
+private_deps_manifest = run_command(
+  python, '-c',
+  'import pathlib,sys; p=pathlib.Path(sys.argv[1]); s=p.read_text(); required=["compiler=clang-21", "stdlib=libc++", "sdbus-cpp=2.2.1", "libqalculate=5.9.0", "tomlplusplus=3.4.0"]; missing=[x for x in required if x not in s]; print(", ".join(missing)); sys.exit(bool(missing))',
+  nucleus_cpp_deps_path / 'share/noctalia-cpp-deps/manifest.txt',
+  check: false,
+)
+if private_deps_manifest.returncode() != 0
+  error('Private C++ dependency manifest does not match the Nucleus ABI contract; missing: ' + private_deps_manifest.stdout().strip())
+endif
+message('Private libc++ dependencies: ' + nucleus_cpp_deps_path)
+
+nucleus_skia_root = nucleus_render_sdk_path / 'include' / 'skia'
+nucleus_skia_libdir = nucleus_render_sdk_path / 'lib' / 'skia-graphite'
+nucleus_skia_inc = include_directories(
+  nucleus_skia_root,
+  nucleus_skia_root / 'src',
+  nucleus_skia_root / 'include' / 'third_party' / 'vulkan',
+  nucleus_skia_root / 'src' / 'gpu' / 'vk' / 'vulkanmemoryallocator',
+  nucleus_skia_root / 'third_party' / 'externals' / 'vulkanmemoryallocator' / 'include',
+  nucleus_skia_root / 'third_party' / 'externals' / 'vulkan-headers' / 'include',
+  is_system: true,
+)
+nucleus_skia_cpp_args = [
+  '-DNDEBUG',
+  '-DSK_GRAPHITE',
+  '-DSK_DAWN',
+  '-DSK_VULKAN',
+  '-DSK_GAMMA_APPLY_TO_A8',
+  '-DSK_ALLOW_STATIC_GLOBAL_INITIALIZERS=1',
+]
+nucleus_skia_archives = [
+  'skia', 'skshaper', 'skparagraph', 'skunicode_core', 'skunicode_icu',
+  'svg', 'skcms', 'skresources', 'freetype2', 'harfbuzz', 'icu',
+  'png', 'jpeg', 'jpeg12', 'jpeg16', 'webp', 'webp_sse41', 'expat',
+  'zlib', 'wuffs', 'dng_sdk', 'piex', 'dawn_combined',
+]
+nucleus_skia_link_args = ['-Wl,--start-group']
+foreach archive : nucleus_skia_archives
+  nucleus_skia_link_args += [nucleus_skia_libdir / ('lib' + archive + '.a')]
+endforeach
+# CEF owns the process-wide malloc/new shim in CEF-enabled processes. Nucleus
+# Skia is built without PartitionAlloc, and every symbol contributed by its
+# static archive group stays out of the executable's dynamic symbol table so it
+# cannot preempt Chromium's private Skia implementation.
+nucleus_skia_link_args += [
+  '-Wl,--end-group',
+  '-Wl,--exclude-libs,ALL',
+  '-Wl,--version-script=' + meson.project_source_root() / 'tools/noctalia-skia.map',
+]
 
 # Sanitizers are enabled via meson's built-in -Db_sanitize=address,undefined.
 # lsan_suppressions.cpp is only needed when address sanitizer is active.
 sanitize = get_option('b_sanitize') != 'none'
+
+# Tracy is an opt-in profiling build, never part of ordinary debug or release
+# binaries. Use the source revision pinned by nucleus-workspace so the client
+# protocol always matches its tracy-capture and tracy-csvexport receivers.
+tracy_enabled = get_option('tracy').enabled()
+tracy_source_path = ''
+if tracy_enabled
+  tracy_source_path = get_option('tracy_source_path')
+  if tracy_source_path == ''
+    error('tracy_source_path is required when Tracy is enabled (for example: -Dtracy_source_path=/path/to/nucleus-workspace/swift-tracy/third-party/tracy)')
+  endif
+  if not tracy_source_path.startswith('/')
+    error('tracy_source_path must be absolute: ' + tracy_source_path)
+  endif
+  tracy_fs = import('fs')
+  foreach required : ['public/TracyClient.cpp', 'public/tracy/Tracy.hpp']
+    if not tracy_fs.exists(tracy_source_path / required)
+      error('Invalid tracy_source_path: missing ' + tracy_source_path / required)
+    endif
+  endforeach
+  message('Tracy profiling enabled from ' + tracy_source_path)
+endif
 
 # Hardened standard-library assertions in debug builds only. A std::clamp(v, lo, hi)
 # with hi < lo aborts here (distro packagers enable this in release, so users see
@@ -33,9 +153,7 @@ sanitize = get_option('b_sanitize') != 'none'
 # value rather than abort a user's session (converted sites log and return lo via
 # clampOrdered). The cost is a few precondition branches (not the heavy _GLIBCXX_DEBUG).
 if get_option('buildtype') != 'release'
-  if is_libcxx
-    add_project_arguments('-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE', language: 'cpp')
-  else
+  if not is_libcxx
     add_project_arguments('-D_GLIBCXX_ASSERTIONS', language: 'cpp')
   endif
 endif
@@ -61,10 +179,45 @@ if get_option('native_optimizations')
   add_project_arguments('-march=native', '-mtune=native', language: ['c', 'cpp'])
 endif
 
+tracy_compile_dep = declare_dependency()
+tracy_link_dep = declare_dependency()
+if tracy_enabled
+  tracy_inc = include_directories(tracy_source_path / 'public', is_system: true)
+  tracy_defines = [
+    '-DTRACY_ENABLE',
+    '-DTRACY_NO_BROADCAST',
+    '-DTRACY_NO_CRASH_HANDLER',
+    '-DTRACY_ONLY_LOCALHOST',
+  ]
+  tracy_client = static_library(
+    'noctalia_tracy_client',
+    tracy_source_path / 'public' / 'TracyClient.cpp',
+    include_directories: tracy_inc,
+    cpp_args: ['-w'] + tracy_defines,
+    override_options: ['warning_level=0'],
+  )
+  tracy_compile_dep = declare_dependency(
+    include_directories: tracy_inc,
+    compile_args: ['-DNOCTALIA_TRACY_ENABLE'] + tracy_defines,
+  )
+  tracy_link_dep = declare_dependency(
+    link_whole: tracy_client,
+    dependencies: tracy_compile_dep,
+  )
+endif
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
-sdbus_cpp_dep       = dependency('sdbus-c++')
+private_cpp_inc = include_directories(nucleus_cpp_deps_path / 'include', is_system: true)
+private_cpp_libdir = nucleus_cpp_deps_path / 'lib'
+private_cpp_install_dir = get_option('libdir') / 'noctalia'
+private_cpp_install_rpath = '$ORIGIN/../' + private_cpp_install_dir
+sdbus_cpp_dep = declare_dependency(
+  dependencies: cpp.find_library('sdbus-c++', dirs: [private_cpp_libdir], static: false),
+  include_directories: private_cpp_inc,
+)
 wayland_client_dep  = dependency('wayland-client')
 wayland_protos_dep  = dependency('wayland-protocols')
+vulkan_dep          = dependency('vulkan', version: '>=1.4')
 #egl_dep             = dependency('egl')
 #glesv2_dep          = dependency('glesv2')
 wayland_egl_dep     = dependency('wayland-egl')
@@ -88,11 +241,14 @@ polkit_gobject_dep  = dependency('polkit-gobject-1')
 pipewire_dep        = dependency('libpipewire-0.3', include_type: 'system')
 wireplumber_dep     = dependency('wireplumber-0.5', include_type: 'system')
 curl_dep            = dependency('libcurl')
-libqalculate_dep    = dependency('libqalculate')
+libqalculate_dep = declare_dependency(
+  dependencies: cpp.find_library('qalculate', dirs: [private_cpp_libdir], static: false),
+  include_directories: private_cpp_inc,
+)
 libxml2_dep         = dependency('libxml-2.0')
 md4c_dep            = dependency('md4c')
 nlohmann_dep        = dependency('nlohmann_json')
-tomlplusplus_dep    = dependency('tomlplusplus')
+tomlplusplus_dep = declare_dependency(include_directories: private_cpp_inc)
 pam_dep             = cc.find_library('pam')
 dl_dep              = cpp.find_library('dl', required: false)
 
@@ -105,12 +261,8 @@ if jemalloc_option.enabled() and not is_glibc
   error('jemalloc support requires glibc')
 endif
 
-if is_glibc
-  jemalloc_dep = dependency('jemalloc', required: jemalloc_option)
-  if jemalloc_dep.found()
-    jemalloc_deps += [jemalloc_dep]
-    jemalloc_cpp_args += ['-DNOCTALIA_USE_JEMALLOC=1']
-  endif
+if jemalloc_option.enabled()
+  error('jemalloc is incompatible with CEF allocator boundaries; use -Djemalloc=disabled')
 endif
 
 egl_dep = dependency('egl', required: false)
@@ -328,6 +480,8 @@ foreach _p : [
     wayland_protos_dir / 'staging/fractional-scale/fractional-scale-v1.xml'],
   ['viewporter',
     wayland_protos_dir / 'stable/viewporter/viewporter.xml'],
+  ['presentation-time',
+    wayland_protos_dir / 'stable/presentation-time/presentation-time.xml'],
   ['idle-inhibit-unstable-v1',
     wayland_protos_dir / 'unstable/idle-inhibit/idle-inhibit-unstable-v1.xml'],
 
@@ -503,6 +657,11 @@ _noctalia_sources = files(
   'src/render/animation/motion_service.cpp',
   'src/render/backend/gles_framebuffer.cpp',
   'src/render/backend/gles_render_backend.cpp',
+  'src/render/backend/graphite_render_backend.cpp',
+  'src/render/backend/graphite_surface_target.cpp',
+  'src/render/backend/graphite_texture_manager.cpp',
+  'src/render/graphics_device.cpp',
+  'src/render/vulkan/vulkan_result.cpp',
   'src/render/backend/gles_texture_manager.cpp',
   'src/render/backend/render_backend.cpp',
   'src/render/core/async_texture_cache.cpp',
@@ -906,12 +1065,14 @@ _noctalia_inc = [
   # '.' adds both the source root and the corresponding build-dir root, so
   # generated protocol headers (written to the build root) are found by #include.
   include_directories('.'),
+  nucleus_skia_inc,
 ]
 
 # ── Executable ────────────────────────────────────────────────────────────────
 _noctalia_deps = [
     sdbus_cpp_dep,
     wayland_client_dep,
+    vulkan_dep,
     egl_dep,
     gles2_dep,
     wayland_egl_dep,
@@ -946,19 +1107,16 @@ _noctalia_deps = [
     luau_dep,
   ] + jemalloc_deps + (dl_dep.found() ? [dl_dep] : [])
 
-_noctalia_cpp_args = []
-_noctalia_build_rpath = ''
-if get_option('enable_cef')
-  _cef_root = get_option('cef_sdk_path')
-  if _cef_root == ''
-    error('enable_cef=true requires -Dcef_sdk_path=/absolute/path/to/codec-enabled/cef')
-  endif
-  if not _cef_root.startswith('/')
-    error('cef_sdk_path must be an absolute path: ' + _cef_root)
-  endif
+_cef_root = get_option('cef_sdk_path')
+if _cef_root == ''
+  error('cef_sdk_path is required (use -Dcef_sdk_path=/absolute/path/to/codec-enabled/cef)')
+endif
+if not _cef_root.startswith('/')
+  error('cef_sdk_path must be an absolute path: ' + _cef_root)
+endif
 
-  _cef_fs = import('fs')
-  foreach _required : [
+_cef_fs = import('fs')
+foreach _required : [
     'include/cef_app.h',
     'libcef_dll/wrapper/libcef_dll_wrapper.cc',
     'Release/libcef.so',
@@ -967,50 +1125,51 @@ if get_option('enable_cef')
     'Resources/chrome_100_percent.pak',
     'Resources/icudtl.dat',
     'Resources/locales',
-  ]
-    if not _cef_fs.exists(_cef_root / _required)
-      error('Invalid CEF SDK: missing ' + _cef_root / _required)
-    endif
-  endforeach
+]
+  if not _cef_fs.exists(_cef_root / _required)
+    error('Invalid CEF SDK: missing ' + _cef_root / _required)
+  endif
+endforeach
 
-  _cef_inc = include_directories(_cef_root, is_system: true)
-  _cef_wrapper_find = run_command(
+_cef_inc = include_directories(_cef_root, is_system: true)
+_cef_wrapper_find = run_command(
     find_program('find'),
     _cef_root / 'libcef_dll', '-name', '*.cc', '-printf', '%p\n',
     check: true,
-  )
-  _cef_wrapper_srcs = _cef_wrapper_find.stdout().strip().split('\n')
-  _cef_wrapper_lib = static_library('cef_dll_wrapper',
+)
+_cef_wrapper_srcs = _cef_wrapper_find.stdout().strip().split('\n')
+_cef_wrapper_lib = static_library('cef_dll_wrapper',
     _cef_wrapper_srcs,
     include_directories: _cef_inc,
     cpp_args: ['-w', '-DWRAPPING_CEF_SHARED'],
     override_options: ['warning_level=0'],
-  )
-  _cef_lib = cpp.find_library('cef', dirs: [_cef_root / 'Release'])
-  cef_dep = declare_dependency(
+)
+_cef_lib = cpp.find_library('cef', dirs: [_cef_root / 'Release'])
+cef_dep = declare_dependency(
     link_with: _cef_wrapper_lib,
     dependencies: _cef_lib,
     include_directories: _cef_inc,
     compile_args: ['-DNOCTALIA_CEF_DIR="' + _cef_root + '"'],
-  )
-  noctalia_cef_lib = static_library('noctalia_cef',
+)
+noctalia_cef_lib = static_library('noctalia_cef',
     files(
       'src/cef/noctalia_cef_app.cpp',
       'src/cef/cef_service.cpp',
       'src/cef/cef_poll_source.cpp',
       'src/cef/cef_surface_node.cpp',
+      'src/cef/cef_gpu_frame_bridge.cpp',
     ) + _protocol_headers,
     include_directories: _noctalia_inc,
-    dependencies: [cef_dep],
-    cpp_args: ['-Wall', '-Wextra', '-Wno-missing-field-initializers', '-DNOCTALIA_ENABLE_CEF'],
-  )
-  _noctalia_sources += files(
-    'src/shell/apple_music/apple_music_panel.cpp',
-  )
-  _noctalia_deps += declare_dependency(link_whole: noctalia_cef_lib, dependencies: cef_dep)
-  _noctalia_cpp_args += ['-DNOCTALIA_ENABLE_CEF']
-  _noctalia_build_rpath = _cef_root / 'Release'
-endif
+    dependencies: [cef_dep, tracy_compile_dep],
+    cpp_args: ['-Wall', '-Wextra', '-Wno-missing-field-initializers'] + nucleus_skia_cpp_args,
+)
+_noctalia_sources += files(
+  'src/shell/apple_music/apple_music_panel.cpp',
+)
+_noctalia_deps += declare_dependency(link_whole: noctalia_cef_lib, dependencies: cef_dep)
+_noctalia_deps += tracy_link_dep
+_noctalia_build_rpath = private_cpp_libdir + ':' + _cef_root / 'Release'
+_noctalia_install_rpath = private_cpp_install_rpath + ':' + _cef_root / 'Release'
 
 noctalia_exe = executable('noctalia',
   sources: _noctalia_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
@@ -1022,9 +1181,48 @@ noctalia_exe = executable('noctalia',
     '-DNOCTALIA_INSTALL_PREFIX="' + get_option('prefix') + '"',
     '-DNOCTALIA_INSTALL_DATADIR="' + get_option('datadir') + '"',
     '-DNOCTALIA_VERSION="' + meson.project_version() + '"',
-  ] + jemalloc_cpp_args + _noctalia_cpp_args,
+  ] + jemalloc_cpp_args + nucleus_skia_cpp_args,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
   build_rpath: _noctalia_build_rpath,
+  install_rpath: _noctalia_install_rpath,
   install: true,
+)
+
+custom_target('cpp_abi_contract',
+  input: noctalia_exe,
+  output: 'cpp-abi-contract.stamp',
+  command: [
+    python,
+    files('tools/check-cpp-abi-contract.py'),
+    '--binary', '@INPUT@',
+    '--prefix', nucleus_cpp_deps_path,
+    '--stamp', '@OUTPUT@',
+  ],
+)
+
+# Install only the ABI-bearing private runtime, not development symlinks or
+# headers. The executable resolves these through a relative RUNPATH.
+foreach private_runtime : [
+  'libsdbus-c++.so.2.2.1',
+  'libqalculate.so.23.3.10',
+  'libc++.so.1',
+  'libc++abi.so.1',
+  'libunwind.so.1',
+]
+  install_data(
+    nucleus_cpp_deps_path / 'lib' / private_runtime,
+    install_dir: private_cpp_install_dir,
+  )
+endforeach
+install_symlink(
+  'libsdbus-c++.so.2',
+  pointing_to: 'libsdbus-c++.so.2.2.1',
+  install_dir: private_cpp_install_dir,
+)
+install_symlink(
+  'libqalculate.so.23',
+  pointing_to: 'libqalculate.so.23.3.10',
+  install_dir: private_cpp_install_dir,
 )
 
 install_subdir('assets',
@@ -1043,6 +1241,29 @@ install_data(
 )
 
 if build_tests
+
+private_cpp_test_env = environment()
+private_cpp_test_env.prepend('LD_LIBRARY_PATH', private_cpp_libdir)
+add_test_setup(
+  'privatecppruntime',
+  env: private_cpp_test_env,
+  is_default: true,
+)
+
+texture_handle_test = executable('texture_handle_test',
+  'tests/texture_handle_test.cpp',
+  include_directories: _noctalia_inc,
+  build_rpath: private_cpp_libdir,
+)
+test('texture_handle', texture_handle_test, env: private_cpp_test_env)
+
+vulkan_result_test = executable('vulkan_result_test',
+  files('tests/vulkan_result_test.cpp', 'src/render/vulkan/vulkan_result.cpp'),
+  dependencies: vulkan_dep,
+  include_directories: _noctalia_inc,
+  build_rpath: private_cpp_libdir,
+)
+test('vulkan_result', vulkan_result_test, env: private_cpp_test_env)
 
 notification_history_utf8_test = executable('notification_history_utf8_test',
   sources: files(
@@ -1685,29 +1906,17 @@ test('wayland_toplevels_identity', wayland_toplevels_identity_test)
 endif # build_tests
 
 # ── CEF (Chromium Embedded Framework) — in-shell Apple Music ──────────────────
-# Gated behind -Denable_cef=true and an explicit, read-only codec-enabled CEF
-# distribution supplied with -Dcef_sdk_path=/absolute/path.
-if get_option('enable_cef')
-  # Phase 1 de-risking spike: standalone OSR browser that renders a page (and,
-  # critically, a Widevine-DRM stream) off-screen and dumps PNG snapshots.
-  # Single binary: re-execs itself for CEF subprocesses via CefExecuteProcess.
-  executable('noctalia_cef_spike',
-    'src/cef/spike/spike_main.cpp',
-    dependencies: [cef_dep],
-    include_directories: [include_directories('src'), _cef_inc],
-    cpp_args: ['-w'],
-    build_rpath: _cef_root / 'Release',
-    install: false,
-  )
-
-  # CEF subprocess entry (renderer/GPU/utility). CefSettings.browser_subprocess_path
-  # points here so noctalia's main() never runs inside a CEF subprocess.
-  executable('noctalia_cef_helper',
+# CEF is a required renderer dependency supplied as an explicit, read-only,
+# codec-enabled distribution with -Dcef_sdk_path=/absolute/path.
+# CEF subprocess entry (renderer/GPU/utility). CefSettings.browser_subprocess_path
+# points here so Graphite, Vulkan, and Nucleus Skia are never loaded into a
+# Chromium subprocess.
+cef_helper = executable('noctalia_cef_helper',
     'src/cef/cef_subprocess_main.cpp',
     'src/cef/noctalia_cef_app.cpp',
     dependencies: [cef_dep],
     include_directories: [include_directories('src'), _cef_inc],
-    build_rpath: _cef_root / 'Release',
-    install: false,
+    build_rpath: private_cpp_libdir + ':' + _cef_root / 'Release',
+    install_rpath: private_cpp_install_rpath + ':' + _cef_root / 'Release',
+    install: true,
   )
-endif

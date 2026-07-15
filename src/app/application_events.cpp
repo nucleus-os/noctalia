@@ -98,6 +98,49 @@ void Application::recoverGraphicsAfterReset() {
   }
 }
 
+void Application::onGraphiteDeviceLost(RenderGraphicsResetStatus status) {
+  (void)status;
+  if (m_graphiteDeviceRecoveryScheduled || m_graphiteDeviceRecoveryAttempted) {
+    if (m_graphiteDeviceRecoveryAttempted && !m_graphiteDeviceRecoveryScheduled) {
+      kLog.error("Graphite device was lost again after the one permitted recovery attempt");
+    }
+    return;
+  }
+  m_graphiteDeviceRecoveryScheduled = true;
+  DeferredCall::callLater([this]() { rebuildGraphiteDevice(); });
+}
+
+void Application::rebuildGraphiteDevice() {
+  if (!m_graphiteDeviceRecoveryScheduled || m_graphiteDeviceRecoveryAttempted) {
+    return;
+  }
+  m_graphiteDeviceRecoveryScheduled = false;
+  m_graphiteDeviceRecoveryAttempted = true;
+  kLog.warn("rebuilding process-wide Vulkan/Graphite device after VK_ERROR_DEVICE_LOST");
+
+  const GraphicsDeviceIdentity previousIdentity = m_graphicsDevice.identity();
+  const bool panelSurfaceAttached = m_panelManager.detachGraphiteSurfaceForDeviceRebuild();
+  try {
+    m_cefService->prepareForGraphicsDeviceRebuild();
+    m_graphiteRenderContext.cleanup();
+    m_graphicsDevice.rebuild();
+    const GraphicsDeviceIdentity rebuiltIdentity = m_graphicsDevice.identity();
+    if (rebuiltIdentity.uuid != previousIdentity.uuid) {
+      throw std::runtime_error(
+          "Vulkan recovery selected a different GPU than the running CEF process"
+      );
+    }
+    m_graphiteRenderContext.initializeGraphite(m_graphicsDevice);
+    m_graphiteRenderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
+    m_graphiteRenderContext.invalidateGpuResourcesNextFrame();
+    m_cefService->resumeAfterGraphicsDeviceRebuild(m_graphicsDevice);
+    m_panelManager.reattachGraphiteSurfaceAfterDeviceRebuild(panelSurfaceAttached);
+    kLog.info("Vulkan/Graphite device recovery completed; requested a fresh CEF frame");
+  } catch (const std::exception& error) {
+    kLog.error("Vulkan/Graphite device recovery failed: {}", error.what());
+  }
+}
+
 void Application::requestAllSurfacesRedraw() {
   DeferredCall::callLater([this]() {
     m_bar.requestRedraw();

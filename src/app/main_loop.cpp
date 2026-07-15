@@ -436,9 +436,10 @@ void MainLoop::run() {
 
     // If the flush was blocked, raise the timeout floor so we actually wait
     // for POLLOUT instead of tight-looping with a 0-timeout source on top of
-    // a full kernel buffer. ~16ms caps the spin at one frame at 60Hz.
-    if (flushBlocked && pollTimeout >= 0 && pollTimeout < 16) {
-      pollTimeout = 16;
+    // a full kernel buffer. Keep the fallback below one frame at 120Hz; normal
+    // frame pacing comes from wl_surface.frame callbacks rather than this path.
+    if (flushBlocked && pollTimeout >= 0 && pollTimeout < 8) {
+      pollTimeout = 8;
     }
 
     ms = elapsedSince(opStart);

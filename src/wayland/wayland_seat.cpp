@@ -93,15 +93,29 @@ void WaylandSeat::setLockKeysChangeCallback(LockKeysChangeCallback callback) {
 }
 
 void WaylandSeat::setCursorShape(std::uint32_t serial, std::uint32_t shape) {
-  if (m_cursorShapeDevice == nullptr) {
+  if (m_cursorShapeDevice == nullptr || m_pointerEnterSerial == 0) {
     return;
   }
-  // Use the wl_pointer.enter serial for the surface hover lifetime.
-  const std::uint32_t effectiveSerial = m_pointerEnterSerial != 0 ? m_pointerEnterSerial : serial;
-  if (effectiveSerial == 0) {
+
+  // The wl_pointer.enter serial is also our surface-ownership token. Never
+  // substitute the current serial for a caller: doing so lets a stale
+  // dispatcher belonging to a bar, dock, notification, or previous panel
+  // overwrite the cursor of the surface that owns the pointer now.
+  if (serial != m_pointerEnterSerial) {
+    kLog.debug(
+        "cursor request rejected: request_serial={} enter_serial={} shape={} surface={}",
+        serial, m_pointerEnterSerial, shape, static_cast<void*>(m_lastPointerSurface)
+    );
     return;
   }
-  wp_cursor_shape_device_v1_set_shape(m_cursorShapeDevice, effectiveSerial, shape);
+  if (shape == m_appliedCursorShape) {
+    return;
+  }
+  kLog.debug(
+      "cursor applied: serial={} shape={} surface={}", serial, shape, static_cast<void*>(m_lastPointerSurface)
+  );
+  wp_cursor_shape_device_v1_set_shape(m_cursorShapeDevice, serial, shape);
+  m_appliedCursorShape = shape;
 }
 
 void WaylandSeat::forgetSurface(wl_surface* surface) noexcept {
@@ -116,6 +130,7 @@ void WaylandSeat::forgetSurface(wl_surface* surface) noexcept {
     }
     m_lastPointerSurface = nullptr;
     m_pointerEnterSerial = 0;
+    m_appliedCursorShape = 0;
     m_hasPointerPosition = false;
   }
   if (m_lastKeyboardSurface == surface) {
@@ -241,9 +256,14 @@ void WaylandSeat::handlePointerEnter(
   self->m_lastInputSource = InputSource::Pointer;
   self->m_lastPointerSurface = surface;
   self->m_pointerEnterSerial = serial;
+  self->m_appliedCursorShape = 0;
   self->m_lastPointerX = wl_fixed_to_double(sx);
   self->m_lastPointerY = wl_fixed_to_double(sy);
   self->m_hasPointerPosition = true;
+  kLog.debug(
+      "pointer enter: serial={} surface={} x={} y={}", serial, static_cast<void*>(surface),
+      self->m_lastPointerX, self->m_lastPointerY
+  );
   self->m_pendingPointerEvents.push_back(
       PointerEvent{
           .type = PointerEvent::Type::Enter,
@@ -257,6 +277,10 @@ void WaylandSeat::handlePointerEnter(
 
 void WaylandSeat::handlePointerLeave(void* data, wl_pointer* /*pointer*/, std::uint32_t serial, wl_surface* surface) {
   auto* self = static_cast<WaylandSeat*>(data);
+  kLog.debug(
+      "pointer leave: serial={} enter_serial={} surface={} current_surface={}", serial,
+      self->m_pointerEnterSerial, static_cast<void*>(surface), static_cast<void*>(self->m_lastPointerSurface)
+  );
   if (self->m_cursorShapeDevice != nullptr
       && self->m_pointerEnterSerial != 0
       && self->m_lastPointerSurface == surface) {
@@ -268,6 +292,7 @@ void WaylandSeat::handlePointerLeave(void* data, wl_pointer* /*pointer*/, std::u
   self->m_lastInputSource = InputSource::Pointer;
   self->m_lastPointerSurface = surface;
   self->m_pointerEnterSerial = 0;
+  self->m_appliedCursorShape = 0;
   self->m_hasPointerPosition = false;
   self->m_pendingPointerEvents.push_back(
       PointerEvent{
@@ -276,6 +301,9 @@ void WaylandSeat::handlePointerLeave(void* data, wl_pointer* /*pointer*/, std::u
           .surface = surface,
       }
   );
+  // A leave ends ownership until the next enter. Retaining the old surface
+  // here lets unrelated dispatchers mistake later events for input on it.
+  self->m_lastPointerSurface = nullptr;
 }
 
 void WaylandSeat::handlePointerMotion(
@@ -288,6 +316,7 @@ void WaylandSeat::handlePointerMotion(
   self->m_pendingPointerEvents.push_back(
       PointerEvent{
           .type = PointerEvent::Type::Motion,
+          .surface = self->m_lastPointerSurface,
           .sx = self->m_lastPointerX,
           .sy = self->m_lastPointerY,
           .time = time,

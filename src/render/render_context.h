@@ -11,6 +11,7 @@
 #include <utility>
 
 class GlSharedContext;
+class GraphicsDevice;
 class Node;
 class RenderBackend;
 class RenderTarget;
@@ -26,6 +27,7 @@ public:
   RenderContext& operator=(const RenderContext&) = delete;
 
   void initialize(GlSharedContext& shared);
+  void initializeGraphite(GraphicsDevice& graphics);
   void cleanup();
   void prepareForGraphicsReset();
   void restoreAfterGraphicsReset(GlSharedContext& shared);

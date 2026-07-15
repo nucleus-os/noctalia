@@ -12,6 +12,7 @@ public:
   void create() override;
   void onOpen(std::string_view context) override;
   void onClose() override;
+  void onPresentation(const SurfacePresentationFeedback& feedback) override;
 
   [[nodiscard]] float preferredWidth() const override { return scaled(1120.0f); }
   [[nodiscard]] float preferredHeight() const override { return scaled(720.0f); }
@@ -28,4 +29,5 @@ protected:
 private:
   CefService& m_service;
   CefSurfaceNode* m_surface = nullptr;
+  bool m_initialNavigationRequested = false;
 };

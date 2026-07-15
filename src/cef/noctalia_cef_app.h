@@ -4,7 +4,15 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <utility>
+
+// Linux Chromium discovers Widevine before starting its zygote by reading a
+// profile-local hint file. Accept either the WidevineCdm base directory or its
+// linux_x64 library directory and provision that file before CefInitialize.
+[[nodiscard]] bool prepareNoctaliaWidevineHint(
+    const std::string& rootCachePath, const std::string& widevinePath, std::string& error
+);
 
 // CefApp shared by the browser process and the renderer/GPU/utility
 // subprocesses (the helper binary constructs one too). In the browser process
@@ -23,6 +31,7 @@ public:
 
   // CefBrowserProcessHandler — may fire on any CEF thread; the callback marshals
   // to the main loop.
+  void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) override;
   void OnScheduleMessagePumpWork(std::int64_t delayMs) override;
 
 private:

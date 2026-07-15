@@ -22,7 +22,7 @@ public:
   // Wire the display live: requestRedraw is invoked on the main thread whenever
   // a fresh browser frame is ready, so the owner can schedule a repaint. Marks
   // the browser attached (it resumes painting + takes focus).
-  void attach(std::function<void()> requestRedraw);
+  void attach(std::function<void()> requestRedraw, std::function<void()> refreshCursor);
   // Detach the display: the browser keeps running (audio continues) but stops
   // painting until re-attached.
   void detach();
