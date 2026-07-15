@@ -281,13 +281,13 @@ is mandatory.
   is required. The `VK_SUBOPTIMAL_KHR` acquire path was corrected to present
   its valid acquired image once before rebuilding, avoiding abandonment of the
   image and reuse of a signaled acquire fence.
-- Presentation-aware OSR scheduling is now wired from each Graphite panel
-  surface's exact `wp_presentation` callback into `CefService`. It learns a
-  rolling begin-to-paint lead, predicts the next output phase, immediately
-  wakes for latency-sensitive input, keeps a bounded activity burst during
-  loading/input, coalesces one outstanding request, progressively backs off
-  no-damage probes, and stops completely while detached. CEF's internal clock
-  is available only through `NOCTALIA_CEF_INTERNAL_BEGIN_FRAME=1` for A/Bs.
+- Compositor-paced OSR scheduling is wired from the Apple Music panel's
+  `wl_surface.frame` callback into `CefService`. A painted frame commits through
+  Graphite and the compositor's next frame opportunity advances Chromium.
+  Latency-sensitive input wakes immediately, duplicate requests coalesce, and
+  a bounded watchdog handles CEF's unacknowledged no-damage case before backing
+  off to slow idle probes. The watchdog is not the active frame clock. CEF's
+  internal clock and the former predictive presentation timer were removed.
 - The July 15 validation gate reported a constant 8,333,333 ns interval with
   exact clock conversion, loaded the authenticated Apple Music home page at
   HTTP 200, and produced no Vulkan VUID or synchronization diagnostics. After

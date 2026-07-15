@@ -49,14 +49,14 @@ Set `NUCLEUS_WORKSPACE_PATH` if the workspace is not Noctalia's sibling. Use
 `--validation` for a correctness-correlated capture. Leave validation disabled
 for the fair release performance capture.
 
-Presentation-aware external begin frames are now the production default. The
-Apple Music surface feeds its realized `wp_presentation` timestamp and refresh
-interval back into CEF scheduling; recent load/input activity is paced near
-that phase, unchanged content progressively backs off, duplicate requests are
-coalesced, and scheduling stops while the panel is hidden. Set
-`NOCTALIA_CEF_INTERNAL_BEGIN_FRAME=1` for a diagnostic A/B against CEF's
-independent internal clock. `NOCTALIA_CEF_EXTERNAL_BEGIN_FRAME=0` remains an
-equivalent temporary opt-out while older capture commands are retired.
+External begin frames are mandatory. The Apple Music surface's
+`wl_surface.frame` callback is the normal CEF clock: a painted frame causes a
+Graphite commit, the compositor supplies the next frame opportunity, and that
+opportunity advances Chromium. Input can issue an immediate request. A bounded
+watchdog breaks CEF's unacknowledged no-damage case and then probes slowly for
+autonomous webpage animation work; it is not the active frame clock. Scheduling
+stops while the panel is hidden. Presentation feedback remains measurement and
+refresh-rate telemetry rather than a userspace deadline timer.
 
 Important zones include:
 
@@ -94,10 +94,9 @@ Use the reported refresh interval as the frame budget. For example, the July
 output, not 16.667 ms or 33 ms. It also reported vsync, hardware-clock, and
 hardware-completion flags. Native Noctalia repaint pacing remains driven by
 `wl_surface.frame`. Presentation feedback is retrospective proof that a commit
-became visible, not a guaranteed future deadline; the CEF scheduler uses the
-last realized timestamp plus the reported interval only as a prediction and
-keeps a bounded timer for startup and no-damage cases where no new surface
-commit exists.
+became visible, not a guaranteed future deadline. CEF uses the surface frame
+callback as its active clock and keeps only a bounded no-damage watchdog for
+cases where no new surface commit exists.
 
 `Graphite swapchain reason` distinguishes initial creation, size changes, and
 acquire/present `OUT_OF_DATE` or `SUBOPTIMAL` results. The apparent second

@@ -57,10 +57,13 @@ swapchain image rather than the CEF DMA-BUF.
 ## Threading and scheduling
 
 CEF uses its external message pump on Noctalia's main thread. Visible browser
-surfaces use external begin frames driven by Wayland presentation feedback.
-The reported refresh interval is used directly, including 8.333 ms on a 120 Hz
-output. Hidden or detached panels call CEF's hidden-state API and stop producing
-presentation-driven work.
+surfaces use mandatory external begin frames driven by the owning Wayland
+surface's `wl_surface.frame` callback. Input may request a frame immediately.
+Because CEF does not acknowledge begin frames that produce no paint, a bounded
+watchdog clears the outstanding request and probes slowly while idle; it is not
+the active frame clock. `wp_presentation_feedback` records the realized refresh
+interval, including 8.333 ms on a 120 Hz output, for telemetry. Hidden or
+detached panels call CEF's hidden-state API and stop all begin-frame work.
 
 Graphite recording, texture rebinding, Vulkan queue submission, and CEF frame
 acceptance all occur on the main thread. Background workers remain CPU-only.

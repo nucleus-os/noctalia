@@ -64,6 +64,9 @@ public:
   // Keep the browser alive but stop painting when its display is detached
   // (panel closed); repaint + focus on re-attach.
   void setDisplayAttached(bool attached);
+  // Called from the owning Wayland surface's wl_surface.frame callback. This
+  // is the normal clock for external CEF begin frames while the panel paints.
+  void onFrameOpportunity();
   void onPresentation(const SurfacePresentationFeedback& feedback);
 
   // Message pump — driven by CefPollSource on the main thread.

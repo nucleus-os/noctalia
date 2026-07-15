@@ -37,21 +37,8 @@ namespace {
 
 constexpr Logger kLog("cef");
 constexpr int kCefWindowlessFrameRate = 120;
-constexpr std::int64_t kDefaultPresentationRefreshNs = 8'333'333;
-constexpr std::int64_t kInitialCefPaintEstimateNs = 2'000'000;
-constexpr std::int64_t kPresentationSafetyMarginNs = 750'000;
-constexpr std::int64_t kMinimumSchedulerDelayNs = 1'000'000;
-
-bool presentationAwareBeginFramesRequested() {
-  if (const char* internal = std::getenv("NOCTALIA_CEF_INTERNAL_BEGIN_FRAME");
-      internal != nullptr && internal[0] != '\0' && std::string_view(internal) != "0") {
-    return false;
-  }
-  // Preserve the old diagnostic's explicit zero as an A/B opt-out while
-  // making presentation-aware external scheduling the production default.
-  const char* value = std::getenv("NOCTALIA_CEF_EXTERNAL_BEGIN_FRAME");
-  return value == nullptr || value[0] == '\0' || std::string_view(value) != "0";
-}
+constexpr std::int64_t kBeginFrameCompletionWatchdogNs = 100'000'000;
+constexpr std::int64_t kIdleAnimationProbeNs = 250'000'000;
 
 // Resolve the CEF subprocess helper binary next to the running executable.
 std::string helperNextToSelf() {
@@ -183,17 +170,11 @@ struct CefService::Impl {
 
   bool initialized = false;
   bool attached = false;
-  bool externalBeginFramesEnabled = false;
   bool beginFrameOutstanding = false;
   bool pendingUrgentBeginFrame = false;
-  bool scheduledBeginFrameUrgent = false;
-  bool lastBeginFrameUrgent = false;
-  std::uint32_t presentationRefreshNs = static_cast<std::uint32_t>(kDefaultPresentationRefreshNs);
+  std::uint32_t presentationRefreshNs = 0;
   std::uint32_t noDamageStreak = 0;
-  std::int64_t lastExternalBeginFrameNs = 0;
-  std::int64_t lastPresentedNs = 0;
-  std::int64_t cefPaintEstimateNs = kInitialCefPaintEstimateNs;
-  Timer externalSchedulerTimer;
+  Timer beginFrameWatchdog;
   std::string pendingUrl;
   int logicalWidth = 1280;
   int logicalHeight = 720;
@@ -215,33 +196,8 @@ struct CefService::Impl {
   // Guards deferred main-thread callbacks against use-after-free during shutdown.
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
 
-  static std::int64_t nowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               std::chrono::steady_clock::now().time_since_epoch()
-    ).count();
-  }
-
-  void armExternalScheduler(std::int64_t delayNs, bool urgent) {
-    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
-      externalSchedulerTimer.stop();
-      return;
-    }
-    scheduledBeginFrameUrgent = scheduledBeginFrameUrgent || urgent;
-    const std::int64_t clampedNs = std::max(kMinimumSchedulerDelayNs, delayNs);
-    const auto delayMs = std::chrono::milliseconds((clampedNs + 999'999) / 1'000'000);
-    auto token = alive;
-    externalSchedulerTimer.start(delayMs, [this, token]() {
-      if (!token->load()) {
-        return;
-      }
-      const bool urgentRequest = std::exchange(scheduledBeginFrameUrgent, false);
-      issueExternalBeginFrame(urgentRequest);
-    });
-    NOCTALIA_TRACE_PLOT("CEF presentation scheduler delay ms", static_cast<double>(clampedNs) / 1'000'000.0);
-  }
-
   void issueExternalBeginFrame(bool urgent) {
-    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+    if (!attached || browser == nullptr) {
       return;
     }
     if (beginFrameOutstanding) {
@@ -250,28 +206,20 @@ struct CefService::Impl {
       NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(1));
       return;
     }
-    externalSchedulerTimer.stop();
-    scheduledBeginFrameUrgent = false;
+    beginFrameWatchdog.stop();
     browser->GetHost()->SendExternalBeginFrame();
-    lastExternalBeginFrameNs = nowNs();
-    lastBeginFrameUrgent = urgent;
     beginFrameOutstanding = true;
     tracy_latency::externalBeginFrameIssued(urgent);
     NOCTALIA_TRACE_PLOT("CEF external begin frames", static_cast<std::int64_t>(1));
     NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(1));
 
-    // External begin frames have no acknowledgement when they cause no paint,
-    // and CEF exposes no reliable signal that future animation work became
-    // pending. Expire the outstanding marker before the next predicted phase
-    // and keep ticking for as long as the browser is visible. WasHidden(true)
-    // remains the only safe condition for stopping the external clock.
-    const std::int64_t timeoutNs = std::max<std::int64_t>(
-        cefPaintEstimateNs + kPresentationSafetyMarginNs,
-        static_cast<std::int64_t>(presentationRefreshNs) - kMinimumSchedulerDelayNs
-    );
+    // CEF does not acknowledge an external begin frame that produces no paint.
+    // Normal continuation comes from the Wayland frame callback after a painted
+    // image is committed. This watchdog only breaks the no-damage deadlock and
+    // then probes slowly for autonomous web animation work.
     auto token = alive;
-    externalSchedulerTimer.start(
-        std::chrono::milliseconds((timeoutNs + 999'999) / 1'000'000),
+    beginFrameWatchdog.start(
+        std::chrono::milliseconds(kBeginFrameCompletionWatchdogNs / 1'000'000),
         [this, token]() {
           if (!token->load() || !beginFrameOutstanding) {
             return;
@@ -285,103 +233,54 @@ struct CefService::Impl {
             issueExternalBeginFrame(true);
             return;
           }
-          scheduleForNextPresentation(false);
+          beginFrameWatchdog.start(
+              std::chrono::milliseconds(kIdleAnimationProbeNs / 1'000'000),
+              [this, token]() {
+                if (token->load() && attached && browser != nullptr && !beginFrameOutstanding) {
+                  issueExternalBeginFrame(false);
+                }
+              }
+          );
         }
     );
   }
 
   void onAcceleratedFrameArrived() {
-    if (!externalBeginFramesEnabled) {
-      return;
-    }
-    const std::int64_t now = nowNs();
-    if (beginFrameOutstanding && lastExternalBeginFrameNs > 0) {
-      const std::int64_t sampleNs = now - lastExternalBeginFrameNs;
-      if (!lastBeginFrameUrgent && sampleNs > 0 && sampleNs < 250'000'000) {
-        cefPaintEstimateNs = (cefPaintEstimateNs * 7 + sampleNs) / 8;
-        const std::int64_t maxEstimate = std::max<std::int64_t>(
-            2'000'000, static_cast<std::int64_t>(presentationRefreshNs) * 2
-        );
-        cefPaintEstimateNs = std::clamp<std::int64_t>(cefPaintEstimateNs, 1'000'000, maxEstimate);
-      }
-    }
     beginFrameOutstanding = false;
     noDamageStreak = 0;
-    externalSchedulerTimer.stop();
+    beginFrameWatchdog.stop();
     NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(0));
-    NOCTALIA_TRACE_PLOT("CEF paint estimate ms", static_cast<double>(cefPaintEstimateNs) / 1'000'000.0);
     if (pendingUrgentBeginFrame) {
       pendingUrgentBeginFrame = false;
-      armExternalScheduler(kMinimumSchedulerDelayNs, true);
-    } else {
-      // A frame-ready callback can be coalesced, discarded, or fail to reach a
-      // surface commit. Presentation feedback refines the phase when it arrives
-      // but must never be the only continuation path for Chromium's clock.
-      scheduleForNextPresentation(false);
+      issueExternalBeginFrame(true);
     }
-  }
-
-  void scheduleForNextPresentation(bool urgent) {
-    const std::int64_t now = nowNs();
-    const std::int64_t refreshNs = presentationRefreshNs;
-    if (lastPresentedNs <= 0) {
-      const std::int64_t nextBeginNs = lastExternalBeginFrameNs > 0
-          ? lastExternalBeginFrameNs + refreshNs
-          : now + refreshNs;
-      armExternalScheduler(nextBeginNs - now, urgent);
-      return;
-    }
-    const std::int64_t leadNs = std::clamp<std::int64_t>(
-        cefPaintEstimateNs + kPresentationSafetyMarginNs, 1'000'000, refreshNs * 2
-    );
-    std::int64_t targetNs = lastPresentedNs + refreshNs;
-    while (targetNs - leadNs <= now + kMinimumSchedulerDelayNs) {
-      targetNs += refreshNs;
-    }
-    NOCTALIA_TRACE_PLOT(
-        "CEF predicted presentation lead ms", static_cast<double>(leadNs) / 1'000'000.0
-    );
-    armExternalScheduler(targetNs - leadNs - now, urgent);
   }
 
   void onPresentation(const SurfacePresentationFeedback& feedback) {
-    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+    if (!attached || browser == nullptr) {
       return;
     }
     if (!feedback.presented) {
-      if (!beginFrameOutstanding && !scheduledBeginFrameUrgent) {
-        armExternalScheduler(kMinimumSchedulerDelayNs, false);
-      }
       return;
     }
     if (feedback.refreshNs > 0) {
       presentationRefreshNs = feedback.refreshNs;
     }
-    lastPresentedNs = feedback.presentedSteadyNs;
-    NOCTALIA_TRACE_PLOT("CEF scheduler refresh ns", static_cast<std::int64_t>(presentationRefreshNs));
-    if (beginFrameOutstanding || pendingUrgentBeginFrame || scheduledBeginFrameUrgent) {
-      return;
-    }
-
-    scheduleForNextPresentation(false);
+    NOCTALIA_TRACE_PLOT("CEF surface refresh ns", static_cast<std::int64_t>(presentationRefreshNs));
   }
 
   void startExternalScheduler() {
-    if (!externalBeginFramesEnabled || !attached || browser == nullptr) {
+    if (!attached || browser == nullptr) {
       return;
     }
     issueExternalBeginFrame(false);
   }
 
   void stopExternalScheduler() {
-    externalSchedulerTimer.stop();
+    beginFrameWatchdog.stop();
     beginFrameOutstanding = false;
     pendingUrgentBeginFrame = false;
-    scheduledBeginFrameUrgent = false;
-    lastBeginFrameUrgent = false;
     noDamageStreak = 0;
-    lastExternalBeginFrameNs = 0;
-    lastPresentedNs = 0;
   }
 };
 
@@ -431,7 +330,7 @@ public:
   // CEF's fds are borrowed for this callback only. The bridge duplicates a
   // DMA-BUF only on an import-cache miss. The normal path samples that cached
   // import directly and returns a release fence after Graphite submission;
-  // the compatibility path copies it into a Noctalia-owned image.
+  // sampling submission returns a token-correlated release fence to CEF.
   void OnAcceleratedPaint(
       CefRefPtr<CefBrowser> /*browser*/, PaintElementType type, const RectList& /*dirtyRects*/,
       const CefAcceleratedPaintInfo& info
@@ -576,7 +475,6 @@ private:
 CefService::CefService(std::string cefDir, std::string helperPath) : m_impl(std::make_unique<Impl>()) {
   m_impl->cefDir = std::move(cefDir);
   m_impl->helperPath = helperPath.empty() ? helperNextToSelf() : std::move(helperPath);
-  m_impl->externalBeginFramesEnabled = presentationAwareBeginFramesRequested();
 }
 
 CefService::~CefService() {
@@ -736,7 +634,7 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   CefWindowInfo windowInfo;
   windowInfo.SetAsWindowless(0);
   windowInfo.shared_texture_enabled = 1;
-  windowInfo.external_begin_frame_enabled = m_impl->externalBeginFramesEnabled ? 1 : 0;
+  windowInfo.external_begin_frame_enabled = 1;
   CefBrowserSettings browserSettings;
   browserSettings.windowless_frame_rate = kCefWindowlessFrameRate;
 
@@ -748,7 +646,7 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
               m_impl->logicalWidth,
               m_impl->logicalHeight,
               kCefWindowlessFrameRate,
-              m_impl->externalBeginFramesEnabled ? "presentation-aware" : "internal",
+              "wayland-frame-callback",
               url);
   }
 }
@@ -906,6 +804,10 @@ void CefService::setDisplayAttached(bool attached) {
 
 void CefService::onPresentation(const SurfacePresentationFeedback& feedback) {
   m_impl->onPresentation(feedback);
+}
+
+void CefService::onFrameOpportunity() {
+  m_impl->issueExternalBeginFrame(false);
 }
 
 void CefService::doMessageLoopWork() {

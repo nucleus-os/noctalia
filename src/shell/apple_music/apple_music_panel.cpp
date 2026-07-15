@@ -52,6 +52,10 @@ void AppleMusicPanel::onClose() {
   }
 }
 
+void AppleMusicPanel::onFrameTick(float /*deltaMs*/) {
+  m_service.onFrameOpportunity();
+}
+
 void AppleMusicPanel::onPresentation(const SurfacePresentationFeedback& feedback) {
   m_service.onPresentation(feedback);
 }

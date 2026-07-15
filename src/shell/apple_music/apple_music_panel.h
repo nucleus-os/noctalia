@@ -12,6 +12,7 @@ public:
   void create() override;
   void onOpen(std::string_view context) override;
   void onClose() override;
+  void onFrameTick(float deltaMs) override;
   void onPresentation(const SurfacePresentationFeedback& feedback) override;
 
   [[nodiscard]] float preferredWidth() const override { return scaled(1120.0f); }
