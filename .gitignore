@@ -24,6 +24,3 @@ Thumbs.db
 result/
 result
 result-*
-
-# CEF SDK — fetched on demand by scripts/fetch_cef.py, never committed (see plan)
-/third_party/cef/

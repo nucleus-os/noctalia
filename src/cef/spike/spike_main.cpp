@@ -264,12 +264,9 @@ int main(int argc, char* argv[]) {
   settings.log_severity = LOGSEVERITY_WARNING;
   CefString(&settings.root_cache_path).FromString("/tmp/noctalia-cef-spike-cache");
 #ifdef NOCTALIA_CEF_DIR
-  // ICU (icudtl.dat) initializes very early — it must sit next to libcef.so in
-  // Release/. The fetch/install step colocates the Resources/ payload there, so
-  // point both resource paths at Release/.
   const std::string cefDir = NOCTALIA_CEF_DIR;
-  CefString(&settings.resources_dir_path).FromString(cefDir + "/Release");
-  CefString(&settings.locales_dir_path).FromString(cefDir + "/Release/locales");
+  CefString(&settings.resources_dir_path).FromString(cefDir + "/Resources");
+  CefString(&settings.locales_dir_path).FromString(cefDir + "/Resources/locales");
 #endif
 
   if (!CefInitialize(mainArgs, settings, app.get(), nullptr)) {

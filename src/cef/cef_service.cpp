@@ -354,8 +354,8 @@ bool CefService::initialize() {
   settings.external_message_pump = true;
   settings.log_severity = LOGSEVERITY_WARNING;
   CefString(&settings.root_cache_path).FromString(userCachePath());
-  CefString(&settings.resources_dir_path).FromString(m_impl->cefDir + "/Release");
-  CefString(&settings.locales_dir_path).FromString(m_impl->cefDir + "/Release/locales");
+  CefString(&settings.resources_dir_path).FromString(m_impl->cefDir + "/Resources");
+  CefString(&settings.locales_dir_path).FromString(m_impl->cefDir + "/Resources/locales");
   if (!m_impl->helperPath.empty()) {
     CefString(&settings.browser_subprocess_path).FromString(m_impl->helperPath);
   }

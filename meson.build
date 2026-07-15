@@ -949,18 +949,34 @@ _noctalia_deps = [
 _noctalia_cpp_args = []
 _noctalia_build_rpath = ''
 if get_option('enable_cef')
-  _cef_root = meson.project_source_root() / 'third_party/cef'
-  _cef_python = find_program('python3')
-  _cef_check = run_command(_cef_python, 'scripts/fetch_cef.py', '--check', check: false)
-  if _cef_check.returncode() != 0
-    message('CEF SDK not found; fetching (this downloads ~315 MB)...')
-    run_command(_cef_python, 'scripts/fetch_cef.py', '--fetch', check: true)
+  _cef_root = get_option('cef_sdk_path')
+  if _cef_root == ''
+    error('enable_cef=true requires -Dcef_sdk_path=/absolute/path/to/codec-enabled/cef')
+  endif
+  if not _cef_root.startswith('/')
+    error('cef_sdk_path must be an absolute path: ' + _cef_root)
   endif
 
-  _cef_inc = include_directories('third_party/cef', is_system: true)
+  _cef_fs = import('fs')
+  foreach _required : [
+    'include/cef_app.h',
+    'libcef_dll/wrapper/libcef_dll_wrapper.cc',
+    'Release/libcef.so',
+    'Release/chrome-sandbox',
+    'Release/v8_context_snapshot.bin',
+    'Resources/chrome_100_percent.pak',
+    'Resources/icudtl.dat',
+    'Resources/locales',
+  ]
+    if not _cef_fs.exists(_cef_root / _required)
+      error('Invalid CEF SDK: missing ' + _cef_root / _required)
+    endif
+  endforeach
+
+  _cef_inc = include_directories(_cef_root, is_system: true)
   _cef_wrapper_find = run_command(
     find_program('find'),
-    'third_party/cef/libcef_dll', '-name', '*.cc', '-printf', 'third_party/cef/libcef_dll/%P\n',
+    _cef_root / 'libcef_dll', '-name', '*.cc', '-printf', '%p\n',
     check: true,
   )
   _cef_wrapper_srcs = _cef_wrapper_find.stdout().strip().split('\n')
@@ -1669,9 +1685,8 @@ test('wayland_toplevels_identity', wayland_toplevels_identity_test)
 endif # build_tests
 
 # ── CEF (Chromium Embedded Framework) — in-shell Apple Music ──────────────────
-# Gated behind -Denable_cef=true. The SDK is fetched on demand (not committed);
-# see scripts/fetch_cef.py. Phase 1 builds only a standalone de-risking spike so
-# the 1.4 GB libcef.so is not linked into the main binary until DRM is proven.
+# Gated behind -Denable_cef=true and an explicit, read-only codec-enabled CEF
+# distribution supplied with -Dcef_sdk_path=/absolute/path.
 if get_option('enable_cef')
   # Phase 1 de-risking spike: standalone OSR browser that renders a page (and,
   # critically, a Widevine-DRM stream) off-screen and dumps PNG snapshots.
