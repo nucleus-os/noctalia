@@ -50,6 +50,7 @@ private:
     Label* source = nullptr;
     Label* title = nullptr;
     Label* artist = nullptr;
+    Label* album = nullptr;
     Slider* progress = nullptr;
     Button* prevButton = nullptr;
     Button* playPauseButton = nullptr;

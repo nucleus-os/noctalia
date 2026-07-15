@@ -705,6 +705,7 @@ _noctalia_sources = files(
   'src/shell/bar/widgets/nightlight_widget.cpp',
   'src/shell/bar/widgets/launcher_widget.cpp',
   'src/shell/bar/widgets/media_widget.cpp',
+  'src/shell/bar/widgets/apple_music_widget.cpp',
   'src/shell/bar/widgets/network_widget.cpp',
   'src/shell/bar/widgets/notification_widget.cpp',
   'src/shell/bar/widgets/plugin_widget.cpp',
@@ -908,9 +909,7 @@ _noctalia_inc = [
 ]
 
 # ── Executable ────────────────────────────────────────────────────────────────
-noctalia_exe = executable('noctalia',
-  sources: _noctalia_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
-  dependencies: [
+_noctalia_deps = [
     sdbus_cpp_dep,
     wayland_client_dep,
     egl_dep,
@@ -945,7 +944,61 @@ noctalia_exe = executable('noctalia',
     md4c_dep,
     libwebp_dep,
     luau_dep,
-  ] + jemalloc_deps + (dl_dep.found() ? [dl_dep] : []),
+  ] + jemalloc_deps + (dl_dep.found() ? [dl_dep] : [])
+
+_noctalia_cpp_args = []
+_noctalia_build_rpath = ''
+if get_option('enable_cef')
+  _cef_root = meson.project_source_root() / 'third_party/cef'
+  _cef_python = find_program('python3')
+  _cef_check = run_command(_cef_python, 'scripts/fetch_cef.py', '--check', check: false)
+  if _cef_check.returncode() != 0
+    message('CEF SDK not found; fetching (this downloads ~315 MB)...')
+    run_command(_cef_python, 'scripts/fetch_cef.py', '--fetch', check: true)
+  endif
+
+  _cef_inc = include_directories('third_party/cef', is_system: true)
+  _cef_wrapper_find = run_command(
+    find_program('find'),
+    'third_party/cef/libcef_dll', '-name', '*.cc', '-printf', 'third_party/cef/libcef_dll/%P\n',
+    check: true,
+  )
+  _cef_wrapper_srcs = _cef_wrapper_find.stdout().strip().split('\n')
+  _cef_wrapper_lib = static_library('cef_dll_wrapper',
+    _cef_wrapper_srcs,
+    include_directories: _cef_inc,
+    cpp_args: ['-w', '-DWRAPPING_CEF_SHARED'],
+    override_options: ['warning_level=0'],
+  )
+  _cef_lib = cpp.find_library('cef', dirs: [_cef_root / 'Release'])
+  cef_dep = declare_dependency(
+    link_with: _cef_wrapper_lib,
+    dependencies: _cef_lib,
+    include_directories: _cef_inc,
+    compile_args: ['-DNOCTALIA_CEF_DIR="' + _cef_root + '"'],
+  )
+  noctalia_cef_lib = static_library('noctalia_cef',
+    files(
+      'src/cef/noctalia_cef_app.cpp',
+      'src/cef/cef_service.cpp',
+      'src/cef/cef_poll_source.cpp',
+      'src/cef/cef_surface_node.cpp',
+    ) + _protocol_headers,
+    include_directories: _noctalia_inc,
+    dependencies: [cef_dep],
+    cpp_args: ['-Wall', '-Wextra', '-Wno-missing-field-initializers', '-DNOCTALIA_ENABLE_CEF'],
+  )
+  _noctalia_sources += files(
+    'src/shell/apple_music/apple_music_panel.cpp',
+  )
+  _noctalia_deps += declare_dependency(link_whole: noctalia_cef_lib, dependencies: cef_dep)
+  _noctalia_cpp_args += ['-DNOCTALIA_ENABLE_CEF']
+  _noctalia_build_rpath = _cef_root / 'Release'
+endif
+
+noctalia_exe = executable('noctalia',
+  sources: _noctalia_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
+  dependencies: _noctalia_deps,
   include_directories: _noctalia_inc,
   cpp_args: [
     '-Wall', '-Wextra', '-Wno-missing-field-initializers', '-Wpedantic', '-Wconversion', '-Wshadow',
@@ -953,7 +1006,8 @@ noctalia_exe = executable('noctalia',
     '-DNOCTALIA_INSTALL_PREFIX="' + get_option('prefix') + '"',
     '-DNOCTALIA_INSTALL_DATADIR="' + get_option('datadir') + '"',
     '-DNOCTALIA_VERSION="' + meson.project_version() + '"',
-  ] + jemalloc_cpp_args,
+  ] + jemalloc_cpp_args + _noctalia_cpp_args,
+  build_rpath: _noctalia_build_rpath,
   install: true,
 )
 
@@ -1613,3 +1667,32 @@ wayland_toplevels_identity_test = executable('wayland_toplevels_identity_test',
 test('wayland_toplevels_identity', wayland_toplevels_identity_test)
 
 endif # build_tests
+
+# ── CEF (Chromium Embedded Framework) — in-shell Apple Music ──────────────────
+# Gated behind -Denable_cef=true. The SDK is fetched on demand (not committed);
+# see scripts/fetch_cef.py. Phase 1 builds only a standalone de-risking spike so
+# the 1.4 GB libcef.so is not linked into the main binary until DRM is proven.
+if get_option('enable_cef')
+  # Phase 1 de-risking spike: standalone OSR browser that renders a page (and,
+  # critically, a Widevine-DRM stream) off-screen and dumps PNG snapshots.
+  # Single binary: re-execs itself for CEF subprocesses via CefExecuteProcess.
+  executable('noctalia_cef_spike',
+    'src/cef/spike/spike_main.cpp',
+    dependencies: [cef_dep],
+    include_directories: [include_directories('src'), _cef_inc],
+    cpp_args: ['-w'],
+    build_rpath: _cef_root / 'Release',
+    install: false,
+  )
+
+  # CEF subprocess entry (renderer/GPU/utility). CefSettings.browser_subprocess_path
+  # points here so noctalia's main() never runs inside a CEF subprocess.
+  executable('noctalia_cef_helper',
+    'src/cef/cef_subprocess_main.cpp',
+    'src/cef/noctalia_cef_app.cpp',
+    dependencies: [cef_dep],
+    include_directories: [include_directories('src'), _cef_inc],
+    build_rpath: _cef_root / 'Release',
+    install: false,
+  )
+endif

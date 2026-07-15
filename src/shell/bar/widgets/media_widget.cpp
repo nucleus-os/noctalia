@@ -25,11 +25,13 @@ namespace {
 
 MediaWidget::MediaWidget(
     MprisService* mpris, HttpClient* httpClient, wl_output* /*output*/, float maxWidth, float minWidth, float artSize,
-    MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia, bool albumArtOnly, bool hideAlbumArt, bool hideArtist
+    MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia, bool albumArtOnly, bool hideAlbumArt, bool hideArtist,
+    std::string playerBusName, std::string panelId, std::string panelContext
 )
     : m_mpris(mpris), m_httpClient(httpClient), m_maxWidth(maxWidth), m_minWidth(minWidth), m_artSize(artSize),
       m_titleScrollMode(titleScrollMode), m_hideWhenNoMedia(hideWhenNoMedia), m_albumArtOnly(albumArtOnly),
-      m_hideAlbumArt(hideAlbumArt), m_hideArtist(hideArtist) {}
+      m_hideAlbumArt(hideAlbumArt), m_hideArtist(hideArtist), m_playerBusName(std::move(playerBusName)),
+      m_panelId(std::move(panelId)), m_panelContext(std::move(panelContext)) {}
 
 void MediaWidget::create() {
   auto area = std::make_unique<InputArea>();
@@ -44,11 +46,15 @@ void MediaWidget::create() {
   });
   area->setOnClick([this](const InputArea::PointerData& data) {
     if (data.button == BTN_LEFT) {
-      requestPanelToggle("control-center", "media");
+      requestPanelToggle(m_panelId, m_panelContext);
       return;
     }
     if (data.button == BTN_RIGHT && m_mpris != nullptr) {
-      m_mpris->playPauseActive();
+      if (m_playerBusName.empty()) {
+        m_mpris->playPauseActive();
+      } else {
+        m_mpris->playPause(m_playerBusName);
+      }
     }
   });
   m_area = area.get();
@@ -211,7 +217,14 @@ void MediaWidget::syncState(Renderer& renderer) {
     return;
   }
 
-  const auto active = m_mpris != nullptr ? m_mpris->activePlayer() : std::nullopt;
+  std::optional<MprisPlayerInfo> active;
+  if (m_mpris != nullptr) {
+    if (m_playerBusName.empty()) {
+      active = m_mpris->activePlayer();
+    } else if (const auto it = m_mpris->players().find(m_playerBusName); it != m_mpris->players().end()) {
+      active = it->second;
+    }
+  }
   syncWidgetVisibility(active.has_value());
   if (m_hideWhenNoMedia && !active.has_value()) {
     applyTitleScrollMode(false);

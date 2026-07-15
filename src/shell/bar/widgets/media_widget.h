@@ -27,7 +27,8 @@ public:
   MediaWidget(
       MprisService* mpris, HttpClient* httpClient, wl_output* output, float maxWidth, float minWidth, float artSize,
       MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia = false, bool albumArtOnly = false,
-      bool hideAlbumArt = false, bool hideArtist = false
+      bool hideAlbumArt = false, bool hideArtist = false, std::string playerBusName = {},
+      std::string panelId = "control-center", std::string panelContext = "media"
   );
 
   void create() override;
@@ -50,6 +51,9 @@ private:
   bool m_albumArtOnly = false;
   bool m_hideAlbumArt = false;
   bool m_hideArtist = false;
+  std::string m_playerBusName;
+  std::string m_panelId;
+  std::string m_panelContext;
   InputArea* m_area = nullptr;
   Image* m_art = nullptr;
   Glyph* m_emptyGlyph = nullptr;

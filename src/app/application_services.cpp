@@ -342,6 +342,10 @@ void Application::syncClipboardService() {
 }
 
 void Application::initServices() {
+#ifdef NOCTALIA_ENABLE_CEF
+  m_cefService = std::make_unique<CefService>(NOCTALIA_CEF_DIR);
+  m_cefPollSource = std::make_unique<CefPollSource>(*m_cefService);
+#endif
   initStyleThemeAndWayland();
   initWaylandCallbacks();
   initAuxServicesAndHooks();

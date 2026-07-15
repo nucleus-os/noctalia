@@ -5,6 +5,9 @@
 #include "core/log.h"
 #include "shell/bar/widgets/active_window_widget.h"
 #include "shell/bar/widgets/audio_visualizer_widget.h"
+#ifdef NOCTALIA_ENABLE_CEF
+#include "shell/bar/widgets/apple_music_widget.h"
+#endif
 #include "shell/bar/widgets/battery_widget.h"
 #include "shell/bar/widgets/bluetooth_widget.h"
 #include "shell/bar/widgets/brightness_widget.h"
@@ -176,6 +179,25 @@ std::unique_ptr<Widget> WidgetFactory::create(
     widget->setContentScale(contentScale);
     return widget;
   }
+
+#ifdef NOCTALIA_ENABLE_CEF
+  if (type == "apple-music") {
+    const float maxWidth = static_cast<float>(wc != nullptr ? wc->getDouble("max_length", 220.0) : 220.0);
+    const float minWidth = static_cast<float>(wc != nullptr ? wc->getDouble("min_length", 80.0) : 80.0);
+    const float artSize = static_cast<float>(wc != nullptr ? wc->getDouble("art_size", 16.0) : 16.0);
+    const std::string titleScroll = wc != nullptr ? wc->getString("title_scroll", "none") : std::string("none");
+    const bool hideWhenNoMedia = wc != nullptr ? wc->getBool("hide_when_no_media", false) : false;
+    const bool albumArtOnly = wc != nullptr ? wc->getBool("album_art_only", false) : false;
+    const bool hideAlbumArt = wc != nullptr ? wc->getBool("hide_album_art", false) : false;
+    const bool hideArtist = wc != nullptr ? wc->getBool("hide_artist", false) : false;
+    auto widget = std::make_unique<AppleMusicWidget>(
+        m_mpris, m_httpClient, output, maxWidth, minWidth, artSize, parseMediaTitleScrollMode(titleScroll),
+        hideWhenNoMedia, albumArtOnly, hideAlbumArt, hideArtist
+    );
+    widget->setContentScale(contentScale);
+    return widget;
+  }
+#endif
 
   if (type == "battery") {
     const std::string deviceSelector = wc != nullptr ? wc->getString("device", "auto") : std::string("auto");

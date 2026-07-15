@@ -66,6 +66,9 @@
 #include "shell/control_center/control_center_panel.h"
 #include "shell/greeter/greeter_appearance_sync.h"
 #include "shell/launcher/launcher_panel.h"
+#ifdef NOCTALIA_ENABLE_CEF
+#include "shell/apple_music/apple_music_panel.h"
+#endif
 #include "shell/panel/plugin_panel.h"
 #include "shell/polkit/polkit_panel.h"
 #include "shell/session/session_ipc.h"
@@ -583,6 +586,11 @@ void Application::initPanelManagerAndPanels() {
       },
       "launcher-usage"
   );
+#ifdef NOCTALIA_ENABLE_CEF
+  if (m_cefService != nullptr) {
+    m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(*m_cefService));
+  }
+#endif
   m_settingsWindow.setResetLauncherUsage([this]() {
     if (m_launcherPanel != nullptr) {
       m_launcherPanel->clearUsage();

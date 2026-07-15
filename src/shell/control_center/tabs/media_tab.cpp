@@ -161,6 +161,14 @@ std::unique_ptr<Flex> MediaTab::buildCard(PlayerCard& card, float scale) {
   );
   right->addChild(
       ui::label({
+          .out = &card.album,
+          .text = "",
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+      })
+  );
+  right->addChild(
+      ui::label({
           .out = &card.artist,
           .text = "",
           .fontSize = Style::fontSizeBody * scale,
@@ -368,6 +376,9 @@ void MediaTab::applyCardMetrics() {
     if (card->artist != nullptr) {
       card->artist->setMaxWidth(textWidth);
     }
+    if (card->album != nullptr) {
+      card->album->setMaxWidth(textWidth);
+    }
     if (card->progress != nullptr) {
       card->progress->setSize(textWidth, 0.0f);
     }
@@ -378,7 +389,8 @@ void MediaTab::applyCardMetrics() {
 }
 
 void MediaTab::syncCard(Renderer& renderer, PlayerCard& card, const MprisPlayerInfo& player) {
-  if (card.source == nullptr || card.title == nullptr || card.artist == nullptr || card.progress == nullptr) {
+  if (card.source == nullptr || card.title == nullptr || card.artist == nullptr || card.album == nullptr
+      || card.progress == nullptr) {
     return;
   }
   const auto now = std::chrono::steady_clock::now();
@@ -388,6 +400,8 @@ void MediaTab::syncCard(Renderer& renderer, PlayerCard& card, const MprisPlayerI
   const std::string artists = joinArtists(player.artists);
   card.artist->setText(artists);
   card.artist->setVisible(!artists.empty());
+  card.album->setText(player.album);
+  card.album->setVisible(!player.album.empty());
 
   // Artwork.
   const std::string resolvedArtUrl = effectiveArtUrl(player);

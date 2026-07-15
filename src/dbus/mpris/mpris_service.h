@@ -53,6 +53,11 @@ struct MprisPlayerInfo {
 
 // Joins artist names with ", ".
 [[nodiscard]] std::string joinedArtists(const std::vector<std::string>& artists);
+// Chromium's Linux MPRIS service is named from the browser-process PID. CEF's
+// browser process is noctalia itself, so this identifies only the embedded
+// browser and cannot collide with a separately-running Chromium instance.
+[[nodiscard]] std::string currentProcessChromiumMprisBusName();
+[[nodiscard]] bool isCurrentProcessChromiumMprisPlayer(std::string_view busName);
 
 class MprisService {
 public:

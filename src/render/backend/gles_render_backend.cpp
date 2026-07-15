@@ -219,6 +219,7 @@ GlesRenderBackend::~GlesRenderBackend() { cleanup(); }
 void GlesRenderBackend::initialize(GlSharedContext& shared) {
   m_display = shared.display();
   m_config = shared.config();
+  m_textureManager.setEglDisplay(m_display);
 
   m_context = shared.createContext(shared.rootContext(), "render");
   if (m_context == EGL_NO_CONTEXT) {

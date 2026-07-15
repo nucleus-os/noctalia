@@ -6,3 +6,4 @@ option(
   value: false,
   description: 'Optimize for the build machine CPU; output may not be portable',
 )
+option('enable_cef', type: 'boolean', value: false, description: 'Enable the embedded CEF (Chromium Embedded Framework) browser for the in-shell Apple Music experience. Requires the CEF SDK, fetched on demand by scripts/fetch_cef.py.')

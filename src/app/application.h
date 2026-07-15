@@ -87,6 +87,11 @@
 #include "wayland/wayland_connection.h"
 #include "wayland/workspace_poll_source.h"
 
+#ifdef NOCTALIA_ENABLE_CEF
+#include "cef/cef_poll_source.h"
+#include "cef/cef_service.h"
+#endif
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -272,6 +277,11 @@ private:
   std::unique_ptr<EasyEffectsService> m_easyEffectsService;
   std::unique_ptr<PipeWireSpectrum> m_pipewireSpectrum;
   std::unique_ptr<SoundPlayer> m_soundPlayer;
+
+#ifdef NOCTALIA_ENABLE_CEF
+  std::unique_ptr<CefService> m_cefService;
+  std::unique_ptr<CefPollSource> m_cefPollSource;
+#endif
 
   TelemetryService m_telemetryService;
   ScreenTimeService m_screenTimeService;

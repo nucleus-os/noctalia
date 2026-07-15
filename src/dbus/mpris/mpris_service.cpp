@@ -20,6 +20,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_set>
+#include <unistd.h>
 
 std::string joinedArtists(const std::vector<std::string>& artists) {
   if (artists.empty()) {
@@ -31,6 +32,14 @@ std::string joinedArtists(const std::vector<std::string>& artists) {
     joined += artists[i];
   }
   return joined;
+}
+
+std::string currentProcessChromiumMprisBusName() {
+  return "org.mpris.MediaPlayer2.chromium.instance" + std::to_string(::getpid());
+}
+
+bool isCurrentProcessChromiumMprisPlayer(std::string_view busName) {
+  return busName == currentProcessChromiumMprisBusName();
 }
 
 namespace {
@@ -2747,9 +2756,14 @@ MprisPlayerInfo MprisService::readPlayerInfoFromProperties(
   std::string trackId = normalizeTrackId(get_object_path_from_variant(metadata, "mpris:trackid"));
   std::vector<std::string> artists = normalizeArtists(get_string_array_from_variant(metadata, "xesam:artist"));
 
+  std::string identity = get_string_from_props(rootProps, "Identity");
+  if (isCurrentProcessChromiumMprisPlayer(busName)) {
+    identity = "Apple Music";
+  }
+
   return MprisPlayerInfo{
       .busName = busName,
-      .identity = get_string_from_props(rootProps, "Identity"),
+      .identity = std::move(identity),
       .desktopEntry = get_string_from_props(rootProps, "DesktopEntry"),
       .playbackStatus = get_string_from_props(playerProps, "PlaybackStatus"),
       .trackId = std::move(trackId),

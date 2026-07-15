@@ -1117,6 +1117,7 @@
         "location": "Location",
         "lock-screen": "Lock Screen",
         "media": "Media",
+        "apple-music": "Apple Music",
         "monitor": "System Monitor",
         "monitor-polling": "Poll Intervals",
         "monitor-thresholds": "Highlight Thresholds",

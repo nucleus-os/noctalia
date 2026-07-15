@@ -57,6 +57,9 @@ namespace settings {
 
     const std::vector<WidgetTypeSpec> kWidgetTypeSpecs = {
         {.type = "active_window", .labelKey = "settings.widgets.types.active-window", .glyph = "app-window"},
+#ifdef NOCTALIA_ENABLE_CEF
+        {.type = "apple-music", .labelKey = "settings.widgets.types.apple-music", .glyph = "brand-apple"},
+#endif
         {.type = "audio_visualizer", .labelKey = "settings.widgets.types.audio-visualizer", .glyph = "wave-sine"},
         {.type = "battery", .labelKey = "settings.widgets.types.battery", .glyph = "battery-4"},
         {.type = "bluetooth", .labelKey = "settings.widgets.types.bluetooth", .glyph = "bluetooth"},
@@ -803,7 +806,7 @@ namespace settings {
       add(boolSpec("show_scroll_lock", false));
       add(boolSpec("hide_when_off", false));
       add(segmentedSpec("display", "short", shortFull));
-    } else if (type == "media") {
+    } else if (type == "media" || type == "apple-music") {
       const WidgetSettingVisibility notAlbumArtOnly{"album_art_only", {"false"}};
       const WidgetSettingVisibility notHideAlbumArt{"hide_album_art", {"false"}};
       {
