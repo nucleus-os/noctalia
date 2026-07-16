@@ -56,6 +56,9 @@ public:
 
   // Input — logical (DIP) coordinates, matching CefMouseEvent's coordinate space.
   void sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving = false);
+  // Flush queued motion before ordering-sensitive input such as enter, click,
+  // or wheel events.
+  void flushMouseMove();
   void sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers);
   void sendMouseWheel(float x, float y, float deltaX, float deltaY, std::uint32_t modifiers);
   void sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed);

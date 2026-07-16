@@ -171,6 +171,16 @@ namespace ui {
       return std::nullopt;
     }
 
+    std::optional<ParagraphDirection> parseParagraphDirection(const UiTreeNode& node) {
+      const std::string* token = strProp(node, "paragraphDirection");
+      if (token == nullptr) return std::nullopt;
+      if (*token == "automatic") return ParagraphDirection::Automatic;
+      if (*token == "ltr") return ParagraphDirection::Ltr;
+      if (*token == "rtl") return ParagraphDirection::Rtl;
+      kLog.warn("ui node '{}': unknown paragraphDirection '{}'", node.type, *token);
+      return std::nullopt;
+    }
+
     std::optional<ButtonVariant> parseButtonVariant(const UiTreeNode& node) {
       const std::string* token = strProp(node, "variant");
       if (token == nullptr) {
@@ -291,7 +301,7 @@ namespace ui {
       static const std::unordered_set<std::string> kLabel = {"width",      "height",   "flexGrow", "opacity",
                                                              "visible",    "text",     "fontSize", "color",
                                                              "fontWeight", "maxWidth", "maxLines", "textAlign",
-                                                             "fontFamily", "baseline"};
+                                                             "fontFamily", "baseline", "paragraphDirection"};
       static const std::unordered_set<std::string> kGlyph = {"width",   "height", "flexGrow", "opacity",
                                                              "visible", "name",   "size",     "color"};
       static const std::unordered_set<std::string> kImage = {"width",   "height",      "flexGrow", "opacity",
@@ -727,6 +737,9 @@ namespace ui {
       }
       if (auto align = parseTextAlign(desired)) {
         label->setTextAlign(*align);
+      }
+      if (auto direction = parseParagraphDirection(desired)) {
+        label->setParagraphDirection(*direction);
       }
       return;
     }

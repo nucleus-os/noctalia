@@ -1144,6 +1144,23 @@ void Surface::requestFrameTick() {
   queueFrameWork(true, deltaMs);
 }
 
+void Surface::requestCallbackTick() {
+  if (!m_running || !m_configured || m_surface == nullptr) {
+    return;
+  }
+  if (m_frameCallback != nullptr) {
+    m_frameCallbackShouldTick = true;
+    return;
+  }
+
+  m_nextFrameCallbackShouldTick = true;
+  requestFrame();
+  // A frame request takes effect on commit. Committing without a new buffer is
+  // intentionally callback-only and does not resample the current render
+  // target or damage the surface.
+  wl_surface_commit(m_surface);
+}
+
 void Surface::renderNow() {
   if (m_running && m_configured) {
     cancelQueuedFrameWork();
@@ -1325,7 +1342,7 @@ void Surface::processQueuedFrameWork() {
 
     // Frame-tick callbacks make the surface's render target current and do GL
     // work. Skip them until the target is ready; on wlroots compositors the
-    // surface can be configured a frame before its EGL surface exists.
+    // surface can be configured a frame before its swapchain exists.
     if (m_frameTickCallback && ensureRenderTargetReady()) {
       const float callbackMs = elapsedMs([this, deltaMs] { m_frameTickCallback(deltaMs); });
       recordSurfaceProfileEvent(*this, SurfaceProfileEvent::FrameTick, callbackMs);

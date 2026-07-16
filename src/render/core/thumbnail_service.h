@@ -73,7 +73,8 @@ public:
   [[nodiscard]] TextureHandle acquire(const std::string& path, int targetPx = kDefaultTargetPx);
 
   // Non-owning lookup used while refreshing an already-acquired thumbnail.
-  [[nodiscard]] TextureHandle peek(const std::string& path, int targetPx = kDefaultTargetPx) const;
+  [[nodiscard]] TextureHandle
+  peek(const std::string& path, TextureManager& textures, int targetPx = kDefaultTargetPx) const;
 
   // Releases one acquire() owner. The texture is unloaded only when the last
   // owner releases it.
@@ -84,6 +85,7 @@ public:
   [[nodiscard]] bool uploadPending(TextureManager& textures);
   void abandonGpuResources() noexcept;
   void invalidateGpuResources(TextureManager& textures);
+  void abandonGpuResources() noexcept;
 
   [[nodiscard]] int pollTimeoutMs() const override { return -1; }
   void dispatch(const std::vector<pollfd>& fds, std::size_t startIdx) override;
@@ -122,7 +124,10 @@ private:
   void enqueueDecodeIfNeeded(const RequestKey& key);
 
   struct CacheEntry {
-    TextureHandle handle;
+    std::unordered_map<TextureManager*, TextureHandle> handles;
+    std::vector<std::uint8_t> rgba;
+    int width = 0;
+    int height = 0;
     std::size_t refCount = 0;
     bool failed = false;
   };
@@ -150,7 +155,6 @@ private:
   std::deque<DecodedJob> m_results;
 
   // Main thread only state.
-  TextureManager* m_textureManager = nullptr;
   std::unordered_map<RequestKey, CacheEntry, RequestKeyHash> m_entries;
   std::unordered_map<std::uint64_t, PendingListener> m_pendingListeners;
   std::unordered_map<std::uint64_t, ReadyListener> m_readyListeners;

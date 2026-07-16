@@ -2,6 +2,8 @@
 
 #include "core/log.h"
 
+#include <nucleus/text/TextLayoutBuilder.hpp>
+
 #include <atomic>
 #include <fontconfig/fontconfig.h>
 #include <unordered_set>
@@ -28,12 +30,18 @@ namespace text {
     const auto pathStr = path.string();
     const bool firstTime = !registeredFontFiles().contains(pathStr);
     if (firstTime) {
-      if (!FcConfigAppFontAddFile(nullptr, reinterpret_cast<const FcChar8*>(pathStr.c_str()))) {
+      FcConfig* config = FcConfigGetCurrent();
+      if (config == nullptr
+          || !FcConfigAppFontAddFile(config, reinterpret_cast<const FcChar8*>(pathStr.c_str()))) {
         kLog.warn("failed to register font file: {}", pathStr);
         return {};
       }
       registeredFontFiles().insert(pathStr);
       generation().fetch_add(1, std::memory_order_relaxed);
+      // The shared SkFontMgr and FontCollection may already have been created
+      // by another surface. Rebuild them immediately so plugin fonts become
+      // resolvable process-wide without relying on an unused generation poll.
+      nucleus::text::TextLayoutService{}.invalidateFontCollection();
     }
 
     FcFontSet* fontSet = FcFontSetCreate();

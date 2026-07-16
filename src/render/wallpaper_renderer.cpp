@@ -2,7 +2,7 @@
 
 #include "core/log.h"
 #include "render/backend/render_backend.h"
-#include "render/core/texture_manager.h"
+#include "render/graphics_device.h"
 #include "render/render_target.h"
 
 #include <chrono>
@@ -36,23 +36,25 @@ WallpaperRenderer::WallpaperRenderer() = default;
 
 WallpaperRenderer::~WallpaperRenderer() { cleanup(); }
 
-void WallpaperRenderer::bind(GlSharedContext& shared, wl_surface* surface) {
+void WallpaperRenderer::bind(GraphicsDevice& graphics, wl_surface* surface) {
   cleanup();
 
   if (surface == nullptr) {
     throw std::runtime_error("wallpaper renderer requires a valid Wayland surface");
   }
+  if (!graphics.valid()) {
+    throw std::runtime_error("wallpaper renderer requires an initialized GraphicsDevice");
+  }
 
   m_surface = surface;
-  m_backend = createDefaultRenderBackend();
-  m_backend->initialize(shared);
+  m_backend = createGraphiteRenderBackend(graphics);
   m_target = std::make_unique<RenderTarget>();
   m_target->create(surface, *m_backend);
 }
 
-void WallpaperRenderer::makeCurrent() {
-  if (!m_graphicsResetPending && m_backend != nullptr && m_target != nullptr && m_target->isReady()) {
-    m_backend->makeCurrent(*m_target);
+void WallpaperRenderer::selectTarget() {
+  if (m_backend != nullptr && m_target != nullptr && m_target->isReady()) {
+    m_backend->selectTarget(*m_target);
   }
 }
 
@@ -73,7 +75,7 @@ void WallpaperRenderer::resize(
     throw std::runtime_error("wallpaper renderer failed to create render target");
   }
 
-  makeCurrent();
+  selectTarget();
 
   m_bufferWidth = bufferWidth;
   m_bufferHeight = bufferHeight;
@@ -84,12 +86,14 @@ void WallpaperRenderer::resize(
 }
 
 void WallpaperRenderer::render() {
-  if (m_graphicsResetPending || m_backend == nullptr || m_target == nullptr || !m_target->isReady() || m_tex1 == 0) {
+  if (m_backend == nullptr || m_target == nullptr || !m_target->isReady() || m_tex1 == 0) {
     return;
   }
 
   const auto totalStart = std::chrono::steady_clock::now();
-  makeCurrent();
+  if (!beginSurfaceFrame()) {
+    return;
+  }
   const auto drawStart = std::chrono::steady_clock::now();
   m_backend->setViewport(m_bufferWidth, m_bufferHeight);
   m_backend->clear(rgba(0.0f, 0.0f, 0.0f, 1.0f));
@@ -118,6 +122,7 @@ void WallpaperRenderer::render() {
           .fillColor = m_fillColor,
       }
   );
+  m_backend->endOffscreenFrame();
 
   float ms = elapsedSince(drawStart);
   logSlowWallpaperRenderOperation(
@@ -139,19 +144,14 @@ void WallpaperRenderer::render() {
 }
 
 void WallpaperRenderer::renderToFramebuffer(const RenderFramebuffer& target) {
-  if (m_graphicsResetPending
-      || m_backend == nullptr
-      || m_target == nullptr
-      || !m_target->isReady()
-      || m_tex1 == 0
-      || !target.valid()) {
+  if (m_backend == nullptr || m_target == nullptr || !m_target->isReady() || m_tex1 == 0 || !target.valid()) {
     return;
   }
 
   const auto totalStart = std::chrono::steady_clock::now();
-  makeCurrent();
+  selectTarget();
   const auto drawStart = std::chrono::steady_clock::now();
-  m_backend->bindFramebuffer(target);
+  m_backend->beginOffscreenFrame(target);
   m_backend->setViewport(m_bufferWidth, m_bufferHeight);
   m_backend->clear(rgba(0.0f, 0.0f, 0.0f, 1.0f));
   m_backend->setBlendMode(RenderBlendMode::StraightAlpha);
@@ -185,7 +185,7 @@ void WallpaperRenderer::renderToFramebuffer(const RenderFramebuffer& target) {
   );
   ms = elapsedSince(totalStart);
   logSlowWallpaperRenderOperation(ms, "wallpaper framebuffer render took {:.1f}ms total", ms);
-  // No eglSwapBuffers — caller is responsible for presentation
+  // The caller owns presentation.
 }
 
 void WallpaperRenderer::renderBackdropFrame(
@@ -221,11 +221,7 @@ void WallpaperRenderer::renderBackdropContent(
 }
 
 void WallpaperRenderer::presentTexture(TextureId texture) {
-  if (m_graphicsResetPending
-      || m_backend == nullptr
-      || m_target == nullptr
-      || !m_target->isReady()
-      || texture == TextureId{}) {
+  if (m_backend == nullptr || m_target == nullptr || !m_target->isReady() || texture == TextureId{}) {
     return;
   }
 
@@ -239,42 +235,23 @@ void WallpaperRenderer::invalidateGpuResources() {
   }
 }
 
-void WallpaperRenderer::prepareForGraphicsReset() noexcept {
-  if (m_backend == nullptr) {
-    return;
-  }
-  m_backend->abandonAfterGraphicsReset();
-  m_graphicsResetPending = true;
-}
-
-void WallpaperRenderer::restoreAfterGraphicsReset(GlSharedContext& shared) {
-  // Mirrors prepareForGraphicsReset: an unbound renderer was never torn down, so it has
-  // nothing to restore and never set m_graphicsResetPending.
-  if (m_backend == nullptr) {
-    return;
-  }
-  m_backend->initialize(shared);
-  m_backend->textureManager().probeExtensions();
-  if (m_bufferWidth != 0 && m_bufferHeight != 0) {
-    m_backend->setViewport(m_bufferWidth, m_bufferHeight);
-  }
-}
-
 void WallpaperRenderer::blur(RenderFramebuffer& target, RenderFramebuffer& scratch, float radius, int rounds) {
   if (m_backend == nullptr || !target.valid() || !scratch.valid() || radius < 0.5f || rounds <= 0) {
     return;
   }
 
-  makeCurrent();
+  selectTarget();
   m_backend->setViewport(target.width(), target.height());
   m_backend->setBlendMode(RenderBlendMode::Disabled);
 
   for (int round = 0; round < rounds; ++round) {
-    m_backend->bindFramebuffer(scratch);
+    m_backend->beginOffscreenFrame(scratch);
     m_backend->drawFramebufferBlur(target.colorTexture(), target.width(), target.height(), 1.0f, 0.0f, radius);
+    m_backend->endOffscreenFrame();
 
-    m_backend->bindFramebuffer(target);
+    m_backend->beginOffscreenFrame(target);
     m_backend->drawFramebufferBlur(scratch.colorTexture(), scratch.width(), scratch.height(), 0.0f, 1.0f, radius);
+    m_backend->endOffscreenFrame();
   }
 }
 
@@ -283,11 +260,12 @@ void WallpaperRenderer::tint(RenderFramebuffer& target, Color color, float inten
     return;
   }
 
-  makeCurrent();
-  m_backend->bindFramebuffer(target);
+  selectTarget();
+  m_backend->beginOffscreenFrame(target);
   m_backend->setViewport(target.width(), target.height());
   m_backend->setBlendMode(RenderBlendMode::StraightAlpha);
   m_backend->drawFullscreenTint(rgba(color.r, color.g, color.b, intensity));
+  m_backend->endOffscreenFrame();
 }
 
 void WallpaperRenderer::blitToSurface(TextureId texture) {
@@ -295,14 +273,18 @@ void WallpaperRenderer::blitToSurface(TextureId texture) {
     return;
   }
 
-  makeCurrent();
-  m_backend->bindDefaultFramebuffer();
+  if (!beginSurfaceFrame()) {
+    return;
+  }
+  m_backend->endOffscreenFrame();
   m_backend->setViewport(m_bufferWidth, m_bufferHeight);
   m_backend->setBlendMode(RenderBlendMode::Disabled);
   m_backend->clear(rgba(0.0f, 0.0f, 0.0f, 0.0f));
-  // Offscreen framebuffers use GL convention (Y=0 at bottom), while the
-  // window surface uses top-left logical coordinates.
-  m_backend->drawFullscreenTexture(texture, true);
+  m_backend->drawFullscreenTexture(texture);
+}
+
+bool WallpaperRenderer::beginSurfaceFrame() {
+  return m_backend != nullptr && m_target != nullptr && m_target->isReady() && m_backend->beginFrame(*m_target);
 }
 
 void WallpaperRenderer::swapBuffers() {
@@ -320,10 +302,10 @@ void WallpaperRenderer::swapBuffers() {
 }
 
 std::unique_ptr<RenderFramebuffer> WallpaperRenderer::createFramebuffer(std::uint32_t width, std::uint32_t height) {
-  if (m_graphicsResetPending || m_backend == nullptr || width == 0 || height == 0) {
+  if (m_backend == nullptr || width == 0 || height == 0) {
     return nullptr;
   }
-  makeCurrent();
+  selectTarget();
   return m_backend->createFramebuffer(width, height);
 }
 
@@ -344,10 +326,6 @@ void WallpaperRenderer::setTransitionState(
 }
 
 void WallpaperRenderer::cleanup() {
-  if (m_backend != nullptr) {
-    m_backend->makeCurrentNoSurface();
-  }
-
   if (m_target != nullptr) {
     m_target->destroy();
     m_target.reset();

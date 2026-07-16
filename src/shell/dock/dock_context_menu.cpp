@@ -362,7 +362,7 @@ namespace shell::dock {
         return;
       }
 
-      renderContext.makeCurrent(menuPtr->surface->renderTarget());
+      renderContext.selectTarget(menuPtr->surface->renderTarget());
 
       const bool needsSceneBuild = menuPtr->sceneRoot == nullptr
           || static_cast<std::uint32_t>(std::round(menuPtr->sceneRoot->width())) != width

@@ -18,7 +18,7 @@ class ConfigService;
 
 namespace settings {
 
-  // Pango line budget for setting descriptions: wrap up to this many lines, then ellipsize.
+  // Paragraph line budget for setting descriptions: wrap up to this many lines, then ellipsize.
   inline constexpr int kSettingDescriptionMaxLines = 5;
 
   [[nodiscard]] std::unique_ptr<Label> makeSettingSubtitleLabel(std::string_view text, float scale);

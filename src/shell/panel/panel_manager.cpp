@@ -311,21 +311,15 @@ WaylandConnection* PanelManager::wayland() const noexcept {
   return m_platform != nullptr ? &m_platform->wayland() : nullptr;
 }
 
-void PanelManager::initialize(
-    CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext,
-    RenderContext* graphiteRenderContext
-) {
+void PanelManager::initialize(CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext) {
   m_platform = &platform;
   m_config = config;
   m_renderContext = renderContext;
-  m_graphiteRenderContext = graphiteRenderContext;
   m_clickShield.initialize(platform.wayland());
 }
 
 RenderContext* PanelManager::activeRenderContext() const noexcept {
-  // CEF is the first production vertical slice. It has no GLES fallback: its
-  // persistent Vulkan image and Wayland swapchain must share this context.
-  return m_activePanelId == "apple-music" ? m_graphiteRenderContext : m_renderContext;
+  return m_renderContext;
 }
 
 void PanelManager::setOpenSettingsWindowCallback(std::function<void(std::string)> callback) {
@@ -1543,30 +1537,18 @@ void PanelManager::requestRedraw() {
   m_surface->requestRedraw();
 }
 
-bool PanelManager::detachGraphiteSurfaceForDeviceRebuild() {
-  if (m_surface == nullptr || m_graphiteRenderContext == nullptr
-      || m_surface->renderContext() != m_graphiteRenderContext) {
-    return false;
-  }
-  m_surface->setRenderContext(nullptr);
-  return true;
-}
-
-void PanelManager::reattachGraphiteSurfaceAfterDeviceRebuild(bool wasAttached) {
-  if (!wasAttached || m_surface == nullptr || m_graphiteRenderContext == nullptr
-      || m_activePanelId != "apple-music") {
-    return;
-  }
-  m_surface->setRenderContext(m_graphiteRenderContext);
-  m_surface->requestLayout();
-  m_surface->requestRedraw();
-}
-
 void PanelManager::requestFrameTick() {
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
   m_surface->requestFrameTick();
+}
+
+void PanelManager::requestCallbackTick() {
+  if (!isOpen() || m_surface == nullptr) {
+    return;
+  }
+  m_surface->requestCallbackTick();
 }
 
 void PanelManager::close() { closePanel(); }
@@ -2397,7 +2379,7 @@ void PanelManager::prepareFrame(bool needsUpdate, bool needsLayout) {
     return;
   }
 
-  renderer->makeCurrent(m_surface->renderTarget());
+  renderer->selectTarget(m_surface->renderTarget());
 
   const auto width = m_surface->width();
   const auto height = m_surface->height();

@@ -58,6 +58,7 @@ void CefSurfaceNode::wireInput() {
   m_input->setOnEnter([this](const InputArea::PointerData& p) {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerMove);
     m_service.sendMouseMove(p.localX, p.localY, 0, false);
+    m_service.flushMouseMove();
   });
   m_input->setOnLeave([this]() {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerMove);
@@ -98,10 +99,17 @@ void CefSurfaceNode::attach(std::function<void()> requestRedraw, std::function<v
       }
     }
   });
-  m_service.setDisplayAttached(true);
+  if (!m_attached) {
+    m_service.setDisplayAttached(true);
+    m_attached = true;
+  }
 }
 
 void CefSurfaceNode::detach() {
+  if (!m_attached) {
+    return;
+  }
+  m_attached = false;
   m_service.setDisplayAttached(false);
   m_service.setFrameReadyCallback(nullptr);
   m_service.setCursorCallback(nullptr);

@@ -39,7 +39,15 @@ public:
   }
 
 private:
+  friend class RenderContext;
+
+  void suspendForGraphicsDeviceRebuild();
+  void resumeAfterGraphicsDeviceRebuild(RenderContext& context);
+
   std::unique_ptr<RenderSurfaceTarget> m_surfaceTarget;
+  wl_surface* m_surface = nullptr;
+  RenderContext* m_context = nullptr;
+  SurfacePresentationCallback m_presentationCallback;
   std::uint32_t m_bufferWidth = 0;
   std::uint32_t m_bufferHeight = 0;
   std::uint32_t m_logicalWidth = 0;

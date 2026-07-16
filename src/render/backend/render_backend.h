@@ -1,16 +1,15 @@
 #pragma once
 
-#include "render/presentation_timing.h"
-
 #include "render/core/color.h"
 #include "render/core/mat3.h"
 #include "render/core/texture_handle.h"
+#include "render/presentation_timing.h"
 
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string_view>
 
-class GlSharedContext;
 class GraphicsDevice;
 class RenderTarget;
 class TextureManager;
@@ -36,14 +35,7 @@ public:
   virtual void abandon() noexcept = 0;
 };
 
-enum class RenderGraphicsResetStatus {
-  NoError,
-  Guilty,
-  Innocent,
-  Unknown,
-  Purged,
-  Other,
-};
+enum class RenderDeviceStatus { Ready, Lost };
 
 enum class RenderBlendMode {
   Disabled,
@@ -114,19 +106,15 @@ class RenderBackend {
 public:
   virtual ~RenderBackend() = default;
 
-  virtual void initialize(GlSharedContext& shared) = 0;
   virtual void cleanup() = 0;
 
   // Returns false if the surface could not be made current (e.g. invalidated
   // during compositor teardown); callers must skip the frame, not treat it as fatal.
-  virtual bool makeCurrent(RenderTarget& target) = 0;
-  // Returns false if the surfaceless context could not be made current (e.g. lost on resume);
-  // best-effort callers may ignore it, GPU paths must skip the work, not treat it as fatal.
-  virtual bool makeCurrentNoSurface() = 0;
+  virtual bool selectTarget(RenderTarget& target) = 0;
   // Returns false if the frame could not begin; callers must skip drawing and endFrame.
   virtual bool beginFrame(RenderTarget& target) = 0;
   virtual void endFrame(RenderTarget& target) = 0;
-  [[nodiscard]] virtual RenderGraphicsResetStatus graphicsResetStatus() = 0;
+  [[nodiscard]] virtual RenderDeviceStatus deviceStatus() const noexcept = 0;
   virtual void invalidateGpuResources() = 0;
   // Tear down a lost context without attempting to preserve its invalid GL objects.
   virtual void abandonAfterGraphicsReset() noexcept = 0;
@@ -134,8 +122,8 @@ public:
   [[nodiscard]] virtual std::unique_ptr<RenderSurfaceTarget> createSurfaceTarget(wl_surface* surface) = 0;
   [[nodiscard]] virtual std::unique_ptr<RenderFramebuffer>
   createFramebuffer(std::uint32_t width, std::uint32_t height) = 0;
-  virtual void bindFramebuffer(const RenderFramebuffer& framebuffer) = 0;
-  virtual void bindDefaultFramebuffer() = 0;
+  virtual void beginOffscreenFrame(const RenderFramebuffer& framebuffer) = 0;
+  virtual void endOffscreenFrame() = 0;
   virtual void setViewport(std::uint32_t width, std::uint32_t height) = 0;
   virtual void clear(Color color) = 0;
   virtual void setBlendMode(RenderBlendMode mode) = 0;
@@ -148,6 +136,12 @@ public:
   ) = 0;
   virtual void drawImage(const RenderImageDraw& draw) = 0;
   virtual void drawGlyph(const RenderGlyphDraw& draw) = 0;
+  virtual void drawParagraph(std::uint64_t handle, float x, float y, const Mat3& transform) {
+    (void)handle; (void)x; (void)y; (void)transform;
+  }
+  virtual void drawTintedParagraph(std::uint64_t handle, float x, float y, const Color& color, const Mat3& transform) {
+    (void)color; drawParagraph(handle, x, y, transform);
+  }
   virtual void drawSpinner(
       float surfaceWidth, float surfaceHeight, float width, float height, const SpinnerStyle& style,
       const Mat3& transform
@@ -177,7 +171,7 @@ public:
       const GraphStyle& style, const Mat3& transform
   ) = 0;
   virtual void drawWallpaper(const WallpaperDrawParams& params) = 0;
-  virtual void drawFullscreenTexture(TextureId texture, bool flipY) = 0;
+  virtual void drawFullscreenTexture(TextureId texture) = 0;
   virtual void drawFullscreenTint(Color color) = 0;
   virtual void drawFramebufferBlur(
       TextureId sourceTexture, std::uint32_t width, std::uint32_t height, float directionX, float directionY,
@@ -187,6 +181,4 @@ public:
   [[nodiscard]] virtual TextureManager& textureManager() = 0;
 };
 
-[[nodiscard]] std::unique_ptr<RenderBackend> createDefaultRenderBackend();
 [[nodiscard]] std::unique_ptr<RenderBackend> createGraphiteRenderBackend(GraphicsDevice& graphics);
-[[nodiscard]] std::unique_ptr<TextureManager> createDefaultTextureManager();

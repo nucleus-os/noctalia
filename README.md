@@ -5,7 +5,7 @@ together a separate bar, launcher, notification daemon, lock screen, wallpaper t
 
 It provides the shell layer around your compositor: bars, widgets, dock, launcher, control center, notifications,
 wallpaper, lock screen, session actions, clipboard history, OSDs, tray integration, and desktop widgets. The project is
-built directly on Wayland and OpenGL ES with no Qt or GTK dependency, so the UI, rendering, configuration, and IPC model
+built directly on Wayland with Vulkan 1.4 and Skia Graphite, with no Qt or GTK dependency, so the UI, rendering, configuration, and IPC model
 are designed as one cohesive shell instead of a collection of unrelated panels and scripts.
 
 > [!IMPORTANT]
@@ -92,18 +92,42 @@ services, compositor-specific extras, hardware-specific controls, and third-part
 
 ## Dependencies
 
+Noctalia has one supported native ABI: the Nucleus Clang/libc++ toolchain, the
+versioned Nucleus render SDK, the private libc++ dependency bundle, and the
+codec-enabled CEF distribution. GCC, libstdc++, distro Skia, distro sdbus-c++,
+distro libqalculate, and a CEF build with a different allocator/Skia contract
+are unsupported even if they happen to link.
+
+Generate the required artifacts before configuring:
+
+```sh
+git clone --recurse-submodules git@github.com:nucleus-os/nucleus.git nucleus-workspace
+cd nucleus-workspace
+tools/nucleus bootstrap
+
+cd /path/to/noctalia
+tools/bootstrap-nucleus-cpp-deps.sh
+```
+
+The patched, codec-enabled CEF m151 distribution must be present under
+`~/.cache/nucleus/cef/dist/` with `latest.json`, or selected explicitly with
+`CEF_SDK_PATH`. `just configure` validates all three generated manifests and
+uses these defaults; `NUCLEUS_TOOLCHAIN_ROOT`, `NUCLEUS_RENDER_SDK_PATH`,
+`NUCLEUS_CPP_DEPS_PATH`, and `CEF_SDK_PATH` override them.
+
+The following lists are only the remaining C/system build prerequisites. Do
+not substitute their C++ sdbus-c++, libqalculate, toml++, Skia, or CEF packages.
+
 ### Arch
 
 ```sh
-sudo pacman -S meson gcc just \
+sudo pacman -S meson ninja cmake clang just \
   wayland wayland-protocols \
-  libglvnd freetype2 fontconfig \
-  cairo pango harfbuzz \
+  vulkan-headers vulkan-icd-loader freetype2 fontconfig \
   libxkbcommon glib2 \
-  sdbus-cpp libpipewire wireplumber polkit \
-  pam curl libwebp librsvg \
-  libqalculate libxml2 \
-  md4c tomlplusplus \
+  libpipewire wireplumber polkit \
+  pam curl libwebp libxml2 \
+  md4c \
   nlohmann-json stb \
   jemalloc
 ```
@@ -111,16 +135,14 @@ sudo pacman -S meson gcc just \
 ### Fedora
 
 ```sh
-sudo dnf install meson gcc-c++ just \
+sudo dnf install meson ninja-build cmake clang just \
   wayland-devel wayland-protocols-devel \
-  libEGL-devel mesa-libGLES-devel \
+  vulkan-headers vulkan-loader-devel \
   freetype-devel fontconfig-devel \
-  cairo-devel pango-devel harfbuzz-devel \
   libxkbcommon-devel glib2-devel \
-  sdbus-cpp-devel pipewire-devel wireplumber-devel \
-  pam-devel polkit-devel libcurl-devel libwebp-devel librsvg2-devel \
-  libqalculate-devel libxml2-devel \
-  md4c-devel tomlplusplus-devel \
+  pipewire-devel wireplumber-devel \
+  pam-devel polkit-devel libcurl-devel libwebp-devel \
+  libxml2-devel md4c-devel \
   json-devel stb_image_resize2-devel stb_image_write-devel \
   jemalloc-devel
 ```
@@ -128,16 +150,14 @@ sudo dnf install meson gcc-c++ just \
 ### openSUSE Tumbleweed / Slowroll
 
 ```sh
-sudo zypper install meson gcc-c++ just \
+sudo zypper install meson ninja cmake clang just \
   wayland-devel wayland-protocols-devel \
-  Mesa-libEGL-devel Mesa-libGLESv2-devel \
+  vulkan-devel \
   freetype2-devel fontconfig-devel \
-  cairo-devel pango-devel harfbuzz-devel \
   libxkbcommon-devel glib2-devel \
-  sdbus-cpp-devel pipewire-devel wireplumber-devel \
-  pam-devel polkit-devel libcurl-devel libwebp-devel librsvg-devel \
-  libqalculate-devel libxml2-devel \
-  md4c-devel tomlplusplus-devel \
+  pipewire-devel wireplumber-devel \
+  pam-devel polkit-devel libcurl-devel libwebp-devel \
+  libxml2-devel md4c-devel \
   nlohmann_json-devel stb-devel \
   jemalloc-devel
 ```
@@ -145,17 +165,15 @@ sudo zypper install meson gcc-c++ just \
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install meson g++ just \
+sudo apt install meson ninja-build cmake clang just \
   libwayland-dev wayland-protocols \
-  libegl-dev libgles-dev \
+  libvulkan-dev \
   libfreetype-dev libfontconfig-dev \
-  libcairo2-dev libpango1.0-dev libharfbuzz-dev \
   libxkbcommon-dev libglib2.0-dev \
-  libsdbus-c++-dev libpipewire-0.3-dev libwireplumber-0.5-dev \
+  libpipewire-0.3-dev libwireplumber-0.5-dev \
   libpam0g-dev libpolkit-agent-1-dev libpolkit-gobject-1-dev \
-  libcurl4-openssl-dev libwebp-dev librsvg2-dev \
-  libqalculate-dev libxml2-dev \
-  libmd4c-dev libtomlplusplus-dev \
+  libcurl4-openssl-dev libwebp-dev libxml2-dev \
+  libmd4c-dev \
   nlohmann-json3-dev libstb-dev \
   libjemalloc-dev
 ```
@@ -164,21 +182,19 @@ sudo apt install meson g++ just \
 
 ```sh
 sudo xbps-install meson ninja pkg-config git \
-  wayland-devel wayland-protocols libepoxy-devel \
-  MesaLib-devel libglvnd-devel cairo-devel \
-  pango-devel fontconfig-devel freetype-devel \
-  harfbuzz-devel libxkbcommon-devel pipewire-devel wireplumber-devel \
+  wayland-devel wayland-protocols Vulkan-Headers Vulkan-Loader \
+  fontconfig-devel freetype-devel \
+  libxkbcommon-devel pipewire-devel wireplumber-devel \
   libcurl-devel pam-devel libwebp-devel \
-  basu-devel sdbus-c++-devel \
-  libmd4c-devel tomlplusplus-devel \
+  basu-devel libmd4c-devel \
   json-c++ stb \
-  polkit-devel librsvg-devel libqalculate-devel libxml2-devel jemalloc-devel
+  polkit-devel libxml2-devel jemalloc-devel
 ```
 
 Vendored dependencies, with no system package needed: `Wuffs`,
 `Luau`, `dr_wav`, `fzy`, and Material Color Utilities.
 
-System packages required beyond the Wayland/GL stack: `libwebp` handles WebP decoding and thumbnail encoding. Wuffs
+System packages required beyond the Wayland/Vulkan stack: `libwebp` handles WebP decoding and thumbnail encoding. Wuffs
 handles the other supported raster image formats. `libqalculate` powers the launcher calculator (arithmetic, unit and
 currency conversion).
 
@@ -196,15 +212,13 @@ and daemon into separate packages, make sure you have both installed.
 
 `wtype` is an optional dependency used for clipboard auto-paste.
 
-`jemalloc` is recommended but optional. It reduces memory fragmentation in long-running sessions, and on glibc systems
-it is used automatically when detected. Use Meson's `-Djemalloc=enabled` or `-Djemalloc=disabled` option to require or
-disable it explicitly.
+`jemalloc` is disabled: it is incompatible with the mandatory CEF allocator boundary.
 
 Sanitizer runtime packages are only needed for ASan/UBSan builds configured with `just configure asan`.
 
-The sources are built as C++23, which requires GCC 13+ or Clang 16+. Current rolling and recent stable distros (Arch,
-Fedora 38+, Debian 13, Ubuntu 24.04+) ship a new enough compiler by default. On Debian 12 "bookworm" install `g++-13`
-and point Meson at it (e.g. `CXX=g++-13 just configure`).
+The sources are built as C++23 with the exact Clang/libc++ identity recorded in
+the Nucleus SDK manifests. A different system compiler is intentionally
+rejected.
 
 ## Building and installing
 

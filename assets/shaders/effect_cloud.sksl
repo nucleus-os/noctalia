@@ -1,0 +1,54 @@
+
+
+uniform float u_time;
+uniform float u_item_width;
+uniform float u_item_height;
+uniform float4 u_bg_color;
+uniform float u_radius;
+uniform float u_alternative;
+uniform float u_night;
+uniform float u_cloud_amount;
+uniform float u_intensity;
+uniform float3 u_sky_top;
+uniform float3 u_sky_bottom;
+
+// Literal condition-sky gradient (Option A): light near the top, deeper toward the bottom.
+// NOTE: this is a binary day/night sky. A future enhancement (see weather_tab.cpp
+// weatherEffectForCode) could interpolate a continuous dawn->dusk->night sky from the
+// real sunrise/sunset times, matching Apple Weather more closely.
+float3 computeBase(float2 uv) {
+    return mix(u_sky_top, u_sky_bottom, smoothstep(0.0, 1.0, uv.y));
+}
+
+float roundedBoxSDF(float2 center, float2 size, float radius) {
+    float2 q = abs(center) - size + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+}
+
+float cornerMask(float2 v_uv) {
+    float2 pixelPos = v_uv * float2(u_item_width, u_item_height);
+    float2 center = pixelPos - float2(u_item_width, u_item_height) * 0.5;
+    float2 halfSize = float2(u_item_width, u_item_height) * 0.5;
+    float dist = roundedBoxSDF(center, halfSize, u_radius);
+    return 1.0 - smoothstep(-1.0, 0.0, dist);
+}
+
+float ch(float2 p){p=fract(p*float2(234.34,435.345));p+=dot(p,p+34.23);return fract(p.x*p.y);}
+float cn(float2 p){float2 i=floor(p);float2 f=fract(p);f=f*f*(3.0-2.0*f);float a=ch(i),b=ch(i+float2(1.,0.)),c=ch(i+float2(0.,1.)),d=ch(i+float2(1.,1.));return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);}
+float turb(float2 p,float t){float s=1.0;float v=0.0;for(int i=0;i<5;i++){v+=abs(cn(p*s+t*0.1*s))/s;s*=2.0;}return v;}
+float4 main(float2 fragCoord){
+  float2 v_uv=fragCoord/float2(u_item_width,u_item_height);
+  float2 uv=v_uv;float3 base=computeBase(uv);
+  float ls1,ls2,ls3,dMin,dMax,bo,pa,driftX,evo;
+  if(u_alternative>0.5){ls1=1.0;ls2=2.5;ls3=2.0;dMin=0.1;dMax=0.9;bo=0.75;pa=0.05;driftX=0.032;evo=0.06;}
+  else{ls1=2.0;ls2=4.0;ls3=6.0;dMin=0.35;dMax=0.75;bo=0.4;pa=0.15;driftX=0.062;evo=0.13;}
+  float t=u_time;
+  float2 d1=float2(t*driftX,t*driftX*0.3);float2 d2=float2(-t*driftX*0.7,t*driftX*0.45);
+  float a=cn(uv*ls1+d1);float b=cn(uv*ls2+d2);float c=turb(uv*ls3+d1*0.5,t*evo);
+  float dens=smoothstep(dMin,dMax,a*0.5+b*0.3+c*0.2);dens*=sin(t*0.15)*pa+(1.0-pa);
+  float op=dens*bo*mix(1.0,0.82,u_night);
+  float3 cc=mix(float3(0.88,0.90,0.93),float3(0.42,0.45,0.52),u_night);
+  float3 col=cc*op+base*(1.0-op);
+  float m=cornerMask(uv);float aa=m*u_bg_color.a;
+  return float4(col*aa,aa);
+}

@@ -5,12 +5,14 @@
 #include "render/scene/node.h"
 
 #include <string>
+#include <vector>
 
 class TextNode : public Node {
 public:
   TextNode() : Node(NodeType::Text) {}
 
   [[nodiscard]] const std::string& text() const noexcept { return m_text; }
+  [[nodiscard]] const std::vector<StyledTextRun>& styledRuns() const noexcept { return m_styledRuns; }
   [[nodiscard]] float fontSize() const noexcept { return m_fontSize; }
   [[nodiscard]] const Color& color() const noexcept { return m_color; }
   [[nodiscard]] float maxWidth() const noexcept { return m_maxWidth; }
@@ -19,10 +21,20 @@ public:
   [[nodiscard]] const std::string& fontFamily() const noexcept { return m_fontFamily; }
 
   void setText(std::string text) {
-    if (m_text == text) {
+    if (m_text == text && m_styledRuns.empty()) {
       return;
     }
     m_text = std::move(text);
+    m_styledRuns.clear();
+    markLayoutDirty();
+  }
+
+  void setStyledRuns(std::vector<StyledTextRun> runs) {
+    std::string text;
+    for (const auto& run : runs) text += run.text;
+    if (m_text == text && m_styledRuns == runs) return;
+    m_text = std::move(text);
+    m_styledRuns = std::move(runs);
     markLayoutDirty();
   }
 
@@ -76,12 +88,19 @@ public:
   }
 
   [[nodiscard]] TextAlign textAlign() const noexcept { return m_textAlign; }
+  [[nodiscard]] ParagraphDirection paragraphDirection() const noexcept { return m_paragraphDirection; }
 
   void setTextAlign(TextAlign align) {
     if (m_textAlign == align) {
       return;
     }
     m_textAlign = align;
+    markLayoutDirty();
+  }
+
+  void setParagraphDirection(ParagraphDirection direction) {
+    if (m_paragraphDirection == direction) return;
+    m_paragraphDirection = direction;
     markLayoutDirty();
   }
 
@@ -92,16 +111,6 @@ public:
       return;
     }
     m_ellipsize = ellipsize;
-    markLayoutDirty();
-  }
-
-  [[nodiscard]] bool useMarkup() const noexcept { return m_useMarkup; }
-
-  void setUseMarkup(bool markup) {
-    if (m_useMarkup == markup) {
-      return;
-    }
-    m_useMarkup = markup;
     markLayoutDirty();
   }
 
@@ -128,15 +137,16 @@ public:
 
 private:
   std::string m_text;
+  std::vector<StyledTextRun> m_styledRuns;
   std::string m_fontFamily;
   float m_fontSize = 14.0f;
   float m_maxWidth = 0.0f;
   int m_maxLines = 0;
   Color m_color;
   TextAlign m_textAlign = TextAlign::Start;
+  ParagraphDirection m_paragraphDirection = ParagraphDirection::Automatic;
   TextEllipsize m_ellipsize = TextEllipsize::End;
   int m_fontWeight = static_cast<int>(FontWeight::Normal);
-  bool m_useMarkup = false;
   bool m_hasShadow = false;
   Color m_shadowColor;
   float m_shadowOffsetX = 0.0f;

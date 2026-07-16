@@ -16,7 +16,6 @@
 #include <unordered_set>
 #include <vector>
 
-class GlSharedContext;
 class TextureManager;
 
 class AsyncTextureCache : public PollSource {
@@ -52,8 +51,7 @@ public:
   AsyncTextureCache(const AsyncTextureCache&) = delete;
   AsyncTextureCache& operator=(const AsyncTextureCache&) = delete;
 
-  void initialize(GlSharedContext* sharedGl);
-  void setMakeCurrentCallback(std::function<void()> callback) { m_makeCurrentCallback = std::move(callback); }
+  void initialize(TextureManager& textures);
   [[nodiscard]] ReadySubscription
   subscribeReady(const std::string& path, int targetSize, bool mipmap, TextureReadyCallback callback);
 
@@ -89,6 +87,7 @@ private:
     TextureHandle handle;
     int refCount = 0;
     bool failed = false;
+    bool reloadAfterRecovery = false;
     std::uint64_t lastTouch = 0;
   };
 
@@ -108,7 +107,6 @@ private:
   void workerLoop();
   void signalMain();
   void pushResult(DecodedJob job);
-  void makeCurrent();
   void touchEntry(Entry& entry);
   void pruneUnusedEntries(std::size_t maxUnusedEntries);
   void removeReadyListener(std::uint64_t id);
@@ -116,9 +114,7 @@ private:
 
   [[nodiscard]] static RequestKey makeKey(const std::string& path, int targetSize, bool mipmap);
 
-  GlSharedContext* m_sharedGl = nullptr;
-  std::function<void()> m_makeCurrentCallback;
-  std::unique_ptr<TextureManager> m_textureManager;
+  TextureManager* m_textureManager = nullptr;
   int m_eventFd = -1;
   std::vector<std::thread> m_workers;
   std::atomic<bool> m_shutdown{false};

@@ -230,7 +230,7 @@ namespace {
   }
 
   int runShell() {
-    // Raise the soft fd limit before any Wayland/EGL init. The NVIDIA EGL/Wayland
+    // Raise the soft fd limit before Wayland/Vulkan initialization. The NVIDIA Vulkan/Wayland
     // driver leaks internal sync_file fences slowly across a session; the default
     // 1024 soft cap can be exhausted in a long-running session, after which the
     // Wayland connection fails fatally.

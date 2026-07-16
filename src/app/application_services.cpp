@@ -583,10 +583,6 @@ void Application::initStyleThemeAndWayland() {
   if (m_configService.config().shell.disableMipmaps) {
     TextureManager::setGlobalMipmapsEnabled(false);
   }
-  m_glShared.initialize(m_wayland.display(), m_configService.config().shell.sharedGlContext);
-  auto* sharedGlPtr = m_glShared.hasSharedContext() ? &m_glShared : nullptr;
-  m_sharedTextureCache.initialize(sharedGlPtr);
-  m_asyncTextureCache.initialize(sharedGlPtr);
   m_wayland.setTextInputService(&m_textInputService);
   m_wayland.setVirtualKeyboardService(&m_virtualKeyboardService);
 

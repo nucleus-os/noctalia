@@ -860,7 +860,7 @@ void TrayMenu::prepareMainMenuFrame(MenuInstance& inst, bool /*needsUpdate*/, bo
     return;
   }
 
-  m_renderContext->makeCurrent(inst.surface->renderTarget());
+  m_renderContext->selectTarget(inst.surface->renderTarget());
 
   const bool needsSceneBuild = inst.sceneRoot == nullptr
       || static_cast<uint32_t>(std::round(inst.sceneRoot->width())) != width
@@ -1212,7 +1212,7 @@ void TrayMenu::prepareSubmenuFrame(std::size_t levelIndex, MenuInstance& inst, b
     return;
   }
 
-  m_renderContext->makeCurrent(inst.surface->renderTarget());
+  m_renderContext->selectTarget(inst.surface->renderTarget());
 
   const bool needsSceneBuild = inst.sceneRoot == nullptr
       || static_cast<uint32_t>(std::round(inst.sceneRoot->width())) != width

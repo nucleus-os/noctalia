@@ -1,8 +1,8 @@
 #pragma once
 
-#include "render/core/texture_manager.h"
-
 #include "include/core/SkRefCnt.h"
+#include "render/backend/graphite_resource_observer.h"
+#include "render/core/texture_manager.h"
 
 #include <memory>
 
@@ -64,6 +64,8 @@ public:
   // the external BackendTexture.
   bool rebindExternalImage(TextureHandle& handle, sk_sp<SkImage> image, int width, int height);
   [[nodiscard]] GraphiteExternalImageSynchronization* externalSynchronization(TextureId id) const noexcept;
+  void addObserver(GraphiteTextureManagerObserver& observer);
+  void removeObserver(GraphiteTextureManagerObserver& observer) noexcept;
   void invalidateAll();
 
 private:

@@ -52,24 +52,6 @@ namespace {
     }
   }
 
-  std::string_view graphicsResetStatusName(RenderGraphicsResetStatus status) {
-    switch (status) {
-    case RenderGraphicsResetStatus::NoError:
-      return "no-error";
-    case RenderGraphicsResetStatus::Guilty:
-      return "guilty-context-reset";
-    case RenderGraphicsResetStatus::Innocent:
-      return "innocent-context-reset";
-    case RenderGraphicsResetStatus::Unknown:
-      return "unknown-context-reset";
-    case RenderGraphicsResetStatus::Purged:
-      return "purged-context-reset";
-    case RenderGraphicsResetStatus::Other:
-      return "other-context-reset";
-    }
-    return "other-context-reset";
-  }
-
   RenderScissor
   scissorForClip(float sw, float sh, float bw, float bh, float left, float top, float right, float bottom) {
     const float scaleX = sw > 0.0f ? bw / sw : 1.0f;
@@ -111,66 +93,48 @@ RenderContext::RenderContext() = default;
 
 RenderContext::~RenderContext() { cleanup(); }
 
-void RenderContext::initialize(GlSharedContext& shared) {
-  cleanup();
-  m_backend = createDefaultRenderBackend();
-  m_backend->initialize(shared);
-
-  // Pango handles font fallback via Fontconfig automatically — no explicit chain.
-  m_backend->textureManager().probeExtensions();
-  m_textRenderer.initialize(m_backend.get(), &m_backend->textureManager());
-  m_glyphRenderer.initialize(
-      paths::assetPath("fonts/tabler.ttf").string(), m_backend.get(), &m_backend->textureManager()
-  );
-  m_textRenderer.setFontFamily(m_textFontFamily);
-  ++m_textMetricsGeneration;
-  m_graphicsResetPending = false;
-}
-
-void RenderContext::restoreAfterGraphicsReset(GlSharedContext& shared) {
-  if (m_backend == nullptr) {
-    throw std::runtime_error("cannot restore an uninitialized render context");
-  }
-  m_backend->initialize(shared);
-  m_backend->textureManager().probeExtensions();
-  invalidateGpuResourcesNextFrame();
-}
-
-void RenderContext::prepareForGraphicsReset() {
-  if (m_backend == nullptr) {
-    return;
-  }
-
-  m_textRenderer.abandonGlyphTextures();
-  m_glyphRenderer.abandonGlyphTextures();
-  m_backend->abandonAfterGraphicsReset();
-}
-
 void RenderContext::initializeGraphite(GraphicsDevice& graphics) {
   cleanup();
+  m_deviceLossHandled = false;
   m_backend = createGraphiteRenderBackend(graphics);
   m_backend->textureManager().probeExtensions();
-  m_textRenderer.initialize(m_backend.get(), &m_backend->textureManager());
-  m_glyphRenderer.initialize(
-      paths::assetPath("fonts/tabler.ttf").string(), m_backend.get(), &m_backend->textureManager()
-  );
+  m_textRenderer.initialize(m_backend.get());
+  m_glyphRenderer.initialize(paths::assetPath("fonts/tabler.ttf").string(), m_backend.get());
   m_textFontFamily = "sans-serif";
   ++m_textMetricsGeneration;
 }
 
-bool RenderContext::makeCurrentNoSurface() {
-  if (m_backend == nullptr || m_graphicsResetPending) {
-    return false;
+void RenderContext::registerTarget(RenderTarget& target) { m_targets.insert(&target); }
+
+void RenderContext::unregisterTarget(RenderTarget& target) noexcept { m_targets.erase(&target); }
+
+void RenderContext::prepareForGraphicsDeviceRebuild() {
+  if (m_targetsSuspended) {
+    return;
   }
-  return m_backend->makeCurrentNoSurface();
+  for (RenderTarget* target : m_targets) {
+    target->suspendForGraphicsDeviceRebuild();
+  }
+  m_targetsSuspended = true;
 }
 
-bool RenderContext::makeCurrent(RenderTarget& target) {
-  if (m_backend == nullptr || m_graphicsResetPending || !m_backend->makeCurrent(target)) {
+void RenderContext::resumeAfterGraphicsDeviceRebuild() {
+  if (!m_targetsSuspended) {
+    return;
+  }
+  for (RenderTarget* target : m_targets) {
+    target->resumeAfterGraphicsDeviceRebuild(*this);
+  }
+  m_targetsSuspended = false;
+  invalidateGpuResourcesNextFrame();
+}
+
+bool RenderContext::selectTarget(RenderTarget& target) {
+  if (m_backend == nullptr || !m_backend->selectTarget(target)) {
     return false;
   }
   // Sync the shared text/glyph renderer to this target's buffer/logical ratio
-  // unconditionally on every makeCurrent. The text and glyph renderers are
+  // unconditionally on every target selection. The text and glyph renderers are
   // process-singletons; if this is left out, layout/measure on one surface can
   // run at a stale scale set by the last-rendered surface (visible as label
   // jitter on multi-monitor setups with mixed fractional scales). renderScene
@@ -194,7 +158,6 @@ void RenderContext::setTextFontFamily(std::string family) {
   if (m_textFontFamily == family) {
     return;
   }
-  makeCurrentNoSurface();
   m_textFontFamily = std::move(family);
   m_textRenderer.setFontFamily(m_textFontFamily);
   ++m_textMetricsGeneration;
@@ -206,14 +169,14 @@ void RenderContext::notifyFontConfigChanged() {
 }
 
 void RenderContext::renderScene(RenderTarget& target, Node* sceneRoot) {
-  if (m_backend == nullptr || m_graphicsResetPending) {
+  if (m_backend == nullptr) {
     return;
   }
   const auto totalStart = std::chrono::steady_clock::now();
   if (!m_backend->beginFrame(target)) {
-    const RenderGraphicsResetStatus resetStatus = m_backend->graphicsResetStatus();
-    if (resetStatus != RenderGraphicsResetStatus::NoError) {
-      handleGraphicsReset(resetStatus);
+    const RenderDeviceStatus status = m_backend->deviceStatus();
+    if (status == RenderDeviceStatus::Lost) {
+      handleDeviceLoss(status);
     }
     return;
   }
@@ -249,20 +212,19 @@ void RenderContext::renderScene(RenderTarget& target, Node* sceneRoot) {
   );
 
   m_backend->endFrame(target);
-  const RenderGraphicsResetStatus resetStatus = m_backend->graphicsResetStatus();
+  const RenderDeviceStatus status = m_backend->deviceStatus();
   ms = elapsedSince(totalStart);
   logSlowRenderOperation(ms, "renderScene took {:.1f}ms total", ms);
-  if (resetStatus != RenderGraphicsResetStatus::NoError) {
-    handleGraphicsReset(resetStatus);
+  if (status == RenderDeviceStatus::Lost) {
+    handleDeviceLoss(status);
   }
 }
 
 TextMetrics RenderContext::measureText(
     std::string_view text, float fontSize, FontWeight fontWeight, float maxWidth, int maxLines, TextAlign align,
-    std::string_view fontFamily, TextEllipsize ellipsize, bool useMarkup
+    std::string_view fontFamily, TextEllipsize ellipsize, ParagraphDirection direction
 ) {
-  auto m =
-      m_textRenderer.measure(text, fontSize, fontWeight, maxWidth, maxLines, align, fontFamily, ellipsize, useMarkup);
+  auto m = m_textRenderer.measure(text, fontSize, fontWeight, maxWidth, maxLines, align, fontFamily, ellipsize, direction);
   return TextMetrics{
       .width = m.width,
       .left = m.left,
@@ -275,6 +237,13 @@ TextMetrics RenderContext::measureText(
       .inkRight = m.inkRight,
       .lineCount = m.lineCount
   };
+}
+
+TextMetrics RenderContext::measureStyledText(
+    const std::vector<StyledTextRun>& runs, float fontSize, FontWeight fontWeight, float maxWidth, int maxLines,
+    TextAlign align, std::string_view fontFamily, TextEllipsize ellipsize, ParagraphDirection direction) {
+  return m_textRenderer.measureStyled(
+      runs, fontSize, fontWeight, maxWidth, maxLines, align, fontFamily, ellipsize, direction);
 }
 
 TextMetrics RenderContext::measureFont(float fontSize, FontWeight fontWeight) {
@@ -323,7 +292,6 @@ TextMetrics RenderContext::measureGlyph(char32_t codepoint, float fontSize) {
 }
 
 TextureManager& RenderContext::textureManager() {
-  makeCurrentNoSurface();
   return m_backend->textureManager();
 }
 
@@ -332,14 +300,21 @@ void RenderContext::invalidateGpuResourcesNextFrame() noexcept {
   m_glyphTexturesDirty = true;
 }
 
-void RenderContext::handleGraphicsReset(RenderGraphicsResetStatus status) {
-  if (m_graphicsResetPending) {
+void RenderContext::handleDeviceLoss(RenderDeviceStatus status) {
+  if (m_deviceLossHandled || status != RenderDeviceStatus::Lost) {
     return;
   }
-  kLog.warn("graphics reset detected: {}; scheduling context recovery", graphicsResetStatusName(status));
-  m_graphicsResetPending = true;
-  if (m_graphicsResetCallback) {
-    m_graphicsResetCallback(status);
+  m_deviceLossHandled = true;
+  kLog.warn("Vulkan device loss detected; rebuilding GPU resources");
+  invalidateGpuResourcesNextFrame();
+  if (m_backend != nullptr) {
+    m_backend->invalidateGpuResources();
+  }
+  m_textRenderer.invalidateGlyphTextures();
+  m_glyphRenderer.invalidateGlyphTextures();
+  m_glyphTexturesDirty = false;
+  if (m_deviceStatusCallback) {
+    m_deviceStatusCallback(status);
   }
 }
 
@@ -385,17 +360,31 @@ void RenderContext::renderNode(
         auto shadowColor = text->shadowColor();
         shadowColor.a *= effectiveOpacity;
         const Mat3 shadowTransform = worldTransform * Mat3::translation(text->shadowOffsetX(), text->shadowOffsetY());
-        m_textRenderer.draw(
-            sw, sh, 0.0f, 0.0f, text->text(), text->fontSize(), shadowColor, shadowTransform, text->fontWeight(),
-            text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(), text->useMarkup()
-        );
+        if (text->styledRuns().empty()) {
+          m_textRenderer.draw(
+              sw, sh, 0.0f, 0.0f, text->text(), text->fontSize(), shadowColor, shadowTransform, text->fontWeight(),
+              text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(),
+              text->paragraphDirection());
+        } else {
+          m_textRenderer.drawStyled(
+              sw, sh, 0.0f, 0.0f, text->styledRuns(), text->fontSize(), shadowColor, shadowTransform,
+              text->fontWeight(), text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(),
+              text->paragraphDirection(), false);
+        }
       }
       auto color = text->color();
       color.a *= effectiveOpacity;
-      m_textRenderer.draw(
-          sw, sh, 0.0f, 0.0f, text->text(), text->fontSize(), color, worldTransform, text->fontWeight(),
-          text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(), text->useMarkup()
-      );
+      if (text->styledRuns().empty()) {
+        m_textRenderer.draw(
+            sw, sh, 0.0f, 0.0f, text->text(), text->fontSize(), color, worldTransform, text->fontWeight(),
+            text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(),
+            text->paragraphDirection());
+      } else {
+        m_textRenderer.drawStyled(
+            sw, sh, 0.0f, 0.0f, text->styledRuns(), text->fontSize(), color, worldTransform, text->fontWeight(),
+            text->maxWidth(), text->maxLines(), text->textAlign(), font, text->ellipsize(),
+            text->paragraphDirection());
+      }
     }
     break;
   }
@@ -617,12 +606,8 @@ void RenderContext::renderNode(
 }
 
 void RenderContext::cleanup() {
-  if (m_backend != nullptr) {
-    // Need a current context to destroy GL resources, but we may not have a surface.
-    m_backend->makeCurrentNoSurface();
-  }
-
-  // Text renderers first — they destroy GL textures and need a current context.
+  // Text renderers own uploaded atlas textures and must release them before
+  // the backend goes away.
   m_textRenderer.cleanup();
   m_glyphRenderer.cleanup();
 

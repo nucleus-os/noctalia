@@ -2,6 +2,7 @@
 
 #include "cef/noctalia_cef_app.h"
 #include "cef/cef_gpu_frame_bridge.h"
+#include "cef/cef_pointer_motion_coalescer.h"
 #include "core/deferred_call.h"
 #include "core/input/key_modifiers.h"
 #include "core/log.h"
@@ -173,6 +174,7 @@ struct CefService::Impl {
   bool beginFrameOutstanding = false;
   bool pendingUrgentBeginFrame = false;
   std::uint32_t presentationRefreshNs = 0;
+  int configuredFrameRate = kCefWindowlessFrameRate;
   std::uint32_t noDamageStreak = 0;
   Timer beginFrameWatchdog;
   std::string pendingUrl;
@@ -186,6 +188,7 @@ struct CefService::Impl {
   TextureHandle texture;
   bool textureChanged = false;
   std::uint64_t supersededReadyFrames = 0;
+  CefPointerMotionCoalescer pointerMotion;
 
   std::function<void(std::int64_t)> scheduleWork;
   std::function<void()> frameReady;
@@ -265,6 +268,14 @@ struct CefService::Impl {
     }
     if (feedback.refreshNs > 0) {
       presentationRefreshNs = feedback.refreshNs;
+      const int frameRate = std::max(
+          1, static_cast<int>((1'000'000'000ULL + presentationRefreshNs / 2U) / presentationRefreshNs)
+      );
+      if (frameRate != configuredFrameRate) {
+        configuredFrameRate = frameRate;
+        browser->GetHost()->SetWindowlessFrameRate(frameRate);
+        kLog.info("CEF external begin-frame rate updated from presentation feedback: {} fps", frameRate);
+      }
     }
     NOCTALIA_TRACE_PLOT("CEF surface refresh ns", static_cast<std::int64_t>(presentationRefreshNs));
   }
@@ -281,6 +292,24 @@ struct CefService::Impl {
     beginFrameOutstanding = false;
     pendingUrgentBeginFrame = false;
     noDamageStreak = 0;
+    pointerMotion.reset();
+  }
+
+  void flushPointerMotion() {
+    if (browser == nullptr) {
+      pointerMotion.reset();
+      return;
+    }
+    const auto motion = pointerMotion.take();
+    if (!motion) {
+      return;
+    }
+    CefMouseEvent event;
+    event.x = motion->x;
+    event.y = motion->y;
+    event.modifiers = cefModifiersFromKeyMod(motion->modifiers);
+    tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerMove);
+    browser->GetHost()->SendMouseMoveEvent(event, false);
   }
 };
 
@@ -697,12 +726,22 @@ void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool l
   if (!m_impl->browser) {
     return;
   }
+  if (!leaving) {
+    m_impl->pointerMotion.queue({static_cast<int>(x), static_cast<int>(y), modifiers});
+    return;
+  }
+  m_impl->pointerMotion.reset();
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
   event.modifiers = cefModifiersFromKeyMod(modifiers);
   tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerMove);
-  m_impl->browser->GetHost()->SendMouseMoveEvent(event, leaving);
+  m_impl->browser->GetHost()->SendMouseMoveEvent(event, true);
+  m_impl->issueExternalBeginFrame(false);
+}
+
+void CefService::flushMouseMove() {
+  m_impl->flushPointerMotion();
   m_impl->issueExternalBeginFrame(false);
 }
 
@@ -712,6 +751,7 @@ void CefService::sendMouseButton(
   if (!m_impl->browser) {
     return;
   }
+  m_impl->flushPointerMotion();
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
@@ -733,6 +773,7 @@ void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, st
   if (!m_impl->browser) {
     return;
   }
+  m_impl->flushPointerMotion();
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
@@ -786,13 +827,19 @@ void CefService::setDisplayAttached(bool attached) {
     return;
   }
   m_impl->attached = attached;
-  if (!m_impl->browser) {
+  CefRefPtr<CefBrowser> browser = m_impl->browser;
+  if (!browser) {
     return;
   }
-  m_impl->browser->GetHost()->WasHidden(!attached);
+  CefRefPtr<CefBrowserHost> host = browser->GetHost();
+  if (!host) {
+    kLog.warn("CEF browser host unavailable while changing display attachment to {}", attached);
+    return;
+  }
+  host->WasHidden(!attached);
   if (attached) {
-    m_impl->browser->GetHost()->Invalidate(PET_VIEW);
-    m_impl->browser->GetHost()->SetFocus(true);
+    host->Invalidate(PET_VIEW);
+    host->SetFocus(true);
     m_impl->startExternalScheduler();
   } else {
     m_impl->stopExternalScheduler();
@@ -807,6 +854,13 @@ void CefService::onPresentation(const SurfacePresentationFeedback& feedback) {
 }
 
 void CefService::onFrameOpportunity() {
+  // External begin frames are the web compositor's vsync source. CEF does not
+  // acknowledge a begin frame that produces no damage, so an "outstanding"
+  // frame must not suppress the next real Wayland frame opportunity. Doing so
+  // drops autonomous web animations into the 100/250 ms watchdog cadence.
+  m_impl->beginFrameOutstanding = false;
+  m_impl->beginFrameWatchdog.stop();
+  m_impl->flushPointerMotion();
   m_impl->issueExternalBeginFrame(false);
 }
 

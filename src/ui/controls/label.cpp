@@ -50,11 +50,23 @@ Label::Label() {
 }
 
 bool Label::setText(std::string_view text) {
-  if (m_plainText == text) {
+  if (m_plainText == text && m_styledRuns.empty()) {
     return false;
   }
   m_plainText = std::string(text);
+  m_styledRuns.clear();
   m_textNode->setText(m_plainText);
+  m_measureCached = false;
+  return true;
+}
+
+bool Label::setStyledText(std::vector<StyledTextRun> runs) {
+  std::string text;
+  for (const auto& run : runs) text += run.text;
+  if (m_plainText == text && m_styledRuns == runs) return false;
+  m_plainText = std::move(text);
+  m_styledRuns = runs;
+  m_textNode->setStyledRuns(std::move(runs));
   m_measureCached = false;
   return true;
 }
@@ -133,12 +145,19 @@ float Label::maxWidth() const noexcept { return m_userMaxWidth; }
 FontWeight Label::fontWeight() const noexcept { return m_textNode->fontWeight(); }
 
 TextAlign Label::textAlign() const noexcept { return m_textNode->textAlign(); }
+ParagraphDirection Label::paragraphDirection() const noexcept { return m_textNode->paragraphDirection(); }
 
 void Label::setTextAlign(TextAlign align) {
   if (m_textNode->textAlign() == align) {
     return;
   }
   m_textNode->setTextAlign(align);
+  m_measureCached = false;
+}
+
+void Label::setParagraphDirection(ParagraphDirection direction) {
+  if (m_textNode->paragraphDirection() == direction) return;
+  m_textNode->setParagraphDirection(direction);
   m_measureCached = false;
 }
 
@@ -149,14 +168,6 @@ void Label::setEllipsize(TextEllipsize ellipsize) {
     return;
   }
   m_textNode->setEllipsize(ellipsize);
-  m_measureCached = false;
-}
-
-void Label::setUseMarkup(bool markup) {
-  if (m_textNode->useMarkup() == markup) {
-    return;
-  }
-  m_textNode->setUseMarkup(markup);
   m_measureCached = false;
 }
 
@@ -450,7 +461,7 @@ void Label::doArrange(Renderer& renderer, const LayoutRect& rect) {
   constraints.setExactWidth(rect.width);
   // fromArrange=true: do not overwrite the text node's wrap budget here. Arrange's
   // exact width is the label's own (rounded) measured width fed back, not a parent
-  // wrap-intent — feeding it to Pango as maxWidth can trigger sub-pixel ellipsis.
+  // wrap intent; applying it as a hard width can trigger sub-pixel ellipsis.
   const LayoutSize measured = measureWithConstraints(renderer, constraints, true);
   setSize(rect.width, rect.height > 0.0f ? rect.height : measured.height);
 }
@@ -496,6 +507,7 @@ LayoutSize Label::measureWithConstraints(Renderer& renderer, const LayoutConstra
       && m_cachedRenderScale == renderScale
       && m_cachedTextMetricsGeneration == textMetricsGeneration
       && m_cachedTextAlign == align
+      && m_cachedParagraphDirection == m_textNode->paragraphDirection()
       && m_cachedBaselineMode == m_baselineMode
       && m_cachedAutoScroll == m_autoScroll) {
     return LayoutSize{.width = width(), .height = height()};
@@ -518,10 +530,13 @@ LayoutSize Label::measureWithConstraints(Renderer& renderer, const LayoutConstra
     }
   }
 
-  auto metrics = renderer.measureText(
-      m_plainText, m_textNode->fontSize(), fontWeight, measureMaxWidth, effectiveMaxLines, align,
-      m_textNode->fontFamily(), m_textNode->ellipsize(), m_textNode->useMarkup()
-  );
+  auto metrics = m_styledRuns.empty()
+      ? renderer.measureText(
+            m_plainText, m_textNode->fontSize(), fontWeight, measureMaxWidth, effectiveMaxLines, align,
+            m_textNode->fontFamily(), m_textNode->ellipsize(), m_textNode->paragraphDirection())
+      : renderer.measureStyledText(
+            m_styledRuns, m_textNode->fontSize(), fontWeight, measureMaxWidth, effectiveMaxLines, align,
+            m_textNode->fontFamily(), m_textNode->ellipsize(), m_textNode->paragraphDirection());
   // Line breaking is decided once, on the measure pass. A divergent line count
   // on arrange means the wrap budget drifted between phases — the baseline mode
   // would flip between measure and paint (renders as ±1px vertical jitter), so
@@ -680,6 +695,7 @@ LayoutSize Label::measureWithConstraints(Renderer& renderer, const LayoutConstra
   m_cachedTextMetricsGeneration = textMetricsGeneration;
   m_cachedHasConstraintMaxWidth = constraints.hasMaxWidth;
   m_cachedTextAlign = align;
+  m_cachedParagraphDirection = m_textNode->paragraphDirection();
   m_cachedBaselineMode = m_baselineMode;
   m_cachedAutoScroll = m_autoScroll;
   m_measureCached = true;

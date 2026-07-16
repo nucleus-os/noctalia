@@ -1,0 +1,365 @@
+
+
+uniform float2 u_rect_size;
+uniform float2 u_rect_origin;
+uniform float4 u_color;
+uniform float4 u_border_color;
+uniform float u_fill_mode;
+uniform float2 u_gradient_direction;
+uniform float4 u_gradient_stops;
+uniform float4 u_gradient_color0;
+uniform float4 u_gradient_color1;
+uniform float4 u_gradient_color2;
+uniform float4 u_gradient_color3;
+uniform float4 u_corner_shapes; // tl, tr, br, bl: 0 = convex, 1 = concave
+uniform float4 u_logical_inset; // left, top, right, bottom
+uniform float4 u_radii;  // tl, tr, br, bl
+uniform float u_softness;
+uniform float u_no_aa;
+uniform float u_invert_fill;
+uniform float u_border_width;
+uniform float u_outer_shadow;
+uniform float2 u_shadow_cutout_offset;
+uniform float u_shadow_exclusion;
+uniform float2 u_shadow_exclusion_offset;
+uniform float2 u_shadow_exclusion_size;
+uniform float4 u_shadow_exclusion_corner_shapes;
+uniform float4 u_shadow_exclusion_logical_inset;
+uniform float4 u_shadow_exclusion_radii;
+
+// Returns (signed distance, is_corner). is_corner = 1.0 when the fragment lies in
+// the curved-corner quadrant of the active radius (both q components positive).
+float2 rounded_rect_distance_with_corner(float2 point, float2 size, float4 radii) {
+    float2 half_size = size * 0.5;
+    float2 centered = point - half_size;
+    float r = centered.x < 0.0
+        ? (centered.y < 0.0 ? radii.x : radii.w)
+        : (centered.y < 0.0 ? radii.y : radii.z);
+    float2 q = abs(centered) - (half_size - float2(r));
+    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    float is_corner = (r > 0.0 && q.x > 0.0 && q.y > 0.0) ? 1.0 : 0.0;
+    return float2(distance, is_corner);
+}
+
+float rounded_rect_distance(float2 point, float2 size, float4 radii) {
+    return rounded_rect_distance_with_corner(point, size, radii).x;
+}
+
+float circle_extent(float radius, float delta) {
+    return sqrt(max(0.0, radius * radius - delta * delta));
+}
+
+// Returns (signed distance, is_corner). is_corner = 1.0 when the fragment is
+// inside any active corner's r×r axis-aligned band (curved region — concave or
+// convex). Fragments in straight-edge bands return 0.0.
+float2 shape_distance_with_corner(float2 point, float2 size, float4 radii, float4 corner_shapes, float4 logical_inset) {
+    float4 safe_inset = max(logical_inset, float4(0.0));
+    float2 body_min = min(safe_inset.xy, size);
+    float2 body_max = max(body_min, size - safe_inset.zw);
+    float2 body_size = max(body_max - body_min, float2(0.0));
+    float max_radius = max(min(body_size.x, body_size.y) * 0.5, 0.0);
+    float4 r = clamp(radii, float4(0.0), float4(max_radius));
+
+    bool tl_concave = corner_shapes.x > 0.5;
+    bool tr_concave = corner_shapes.y > 0.5;
+    bool br_concave = corner_shapes.z > 0.5;
+    bool bl_concave = corner_shapes.w > 0.5;
+    bool any_concave = tl_concave || tr_concave || br_concave || bl_concave;
+
+    if (!any_concave) {
+        return rounded_rect_distance_with_corner(point - body_min, body_size, r);
+    }
+
+    bool in_corner_box = false;
+    if (r.x > 0.0 && point.x < body_min.x + r.x && point.y < body_min.y + r.x) in_corner_box = true;
+    if (r.y > 0.0 && point.x > body_max.x - r.y && point.y < body_min.y + r.y) in_corner_box = true;
+    if (r.z > 0.0 && point.x > body_max.x - r.z && point.y > body_max.y - r.z) in_corner_box = true;
+    if (r.w > 0.0 && point.x < body_min.x + r.w && point.y > body_max.y - r.w) in_corner_box = true;
+
+    float x = point.x;
+    float y = point.y;
+    float left = body_min.x;
+    float right = body_max.x;
+    float top = body_min.y;
+    float bottom = body_max.y;
+
+    float radius = r.x;
+    if (radius > 0.0 && y < body_min.y + radius) {
+        float sample_y = clamp(y, body_min.y, body_min.y + radius);
+        float dy = sample_y - (body_min.y + radius);
+        float extent = circle_extent(radius, dy);
+        if (tl_concave) {
+            left = min(left, body_min.x - radius + extent);
+        } else {
+            left = max(left, body_min.x + radius - extent);
+        }
+    }
+    if (radius > 0.0 && x < body_min.x + radius) {
+        float sample_x = clamp(x, body_min.x, body_min.x + radius);
+        float dx = sample_x - (body_min.x + radius);
+        float extent = circle_extent(radius, dx);
+        if (tl_concave) {
+            top = min(top, body_min.y - radius + extent);
+        } else {
+            top = max(top, body_min.y + radius - extent);
+        }
+    }
+
+    radius = r.y;
+    if (radius > 0.0 && y < body_min.y + radius) {
+        float sample_y = clamp(y, body_min.y, body_min.y + radius);
+        float dy = sample_y - (body_min.y + radius);
+        float extent = circle_extent(radius, dy);
+        if (tr_concave) {
+            right = max(right, body_max.x + radius - extent);
+        } else {
+            right = min(right, body_max.x - radius + extent);
+        }
+    }
+    if (radius > 0.0 && x > body_max.x - radius) {
+        float sample_x = clamp(x, body_max.x - radius, body_max.x);
+        float dx = sample_x - (body_max.x - radius);
+        float extent = circle_extent(radius, dx);
+        if (tr_concave) {
+            top = min(top, body_min.y - radius + extent);
+        } else {
+            top = max(top, body_min.y + radius - extent);
+        }
+    }
+
+    radius = r.z;
+    if (radius > 0.0 && y > body_max.y - radius) {
+        float sample_y = clamp(y, body_max.y - radius, body_max.y);
+        float dy = sample_y - (body_max.y - radius);
+        float extent = circle_extent(radius, dy);
+        if (br_concave) {
+            right = max(right, body_max.x + radius - extent);
+        } else {
+            right = min(right, body_max.x - radius + extent);
+        }
+    }
+    if (radius > 0.0 && x > body_max.x - radius) {
+        float sample_x = clamp(x, body_max.x - radius, body_max.x);
+        float dx = sample_x - (body_max.x - radius);
+        float extent = circle_extent(radius, dx);
+        if (br_concave) {
+            bottom = max(bottom, body_max.y + radius - extent);
+        } else {
+            bottom = min(bottom, body_max.y - radius + extent);
+        }
+    }
+
+    radius = r.w;
+    if (radius > 0.0 && y > body_max.y - radius) {
+        float sample_y = clamp(y, body_max.y - radius, body_max.y);
+        float dy = sample_y - (body_max.y - radius);
+        float extent = circle_extent(radius, dy);
+        if (bl_concave) {
+            left = min(left, body_min.x - radius + extent);
+        } else {
+            left = max(left, body_min.x + radius - extent);
+        }
+    }
+    if (radius > 0.0 && x < body_min.x + radius) {
+        float sample_x = clamp(x, body_min.x, body_min.x + radius);
+        float dx = sample_x - (body_min.x + radius);
+        float extent = circle_extent(radius, dx);
+        if (bl_concave) {
+            bottom = max(bottom, body_max.y + radius - extent);
+        } else {
+            bottom = min(bottom, body_max.y - radius + extent);
+        }
+    }
+
+    float boundary_distance = max(max(left - x, x - right), max(top - y, y - bottom));
+    float visual_clip = max(max(-point.x, point.x - size.x), max(-point.y, point.y - size.y));
+    // Curve AA only when the curved boundary actually dominates. Where visual_clip wins
+    // (e.g. concave wing along the visual-rect top edge) the boundary is axis-aligned —
+    // snap with the straight-edge window instead.
+    float is_corner = (in_corner_box && boundary_distance > visual_clip) ? 1.0 : 0.0;
+    return float2(max(boundary_distance, visual_clip), is_corner);
+}
+
+float shape_distance(float2 point, float2 size, float4 radii, float4 corner_shapes, float4 logical_inset) {
+    return shape_distance_with_corner(point, size, radii, corner_shapes, logical_inset).x;
+}
+
+float shadow_shape_distance(float2 point, float2 size, float4 radii, float4 corner_shapes, float4 logical_inset) {
+    float distance = shape_distance(point, size, radii, corner_shapes, logical_inset);
+
+    float4 safe_inset = max(logical_inset, float4(0.0));
+    float2 body_min = min(safe_inset.xy, size);
+    float2 body_max = max(body_min, size - safe_inset.zw);
+    float2 body_size = max(body_max - body_min, float2(0.0));
+    float max_radius = max(min(body_size.x, body_size.y) * 0.5, 0.0);
+    float4 r = clamp(radii, float4(0.0), float4(max_radius));
+
+    bool tl_concave = corner_shapes.x > 0.5;
+    bool tr_concave = corner_shapes.y > 0.5;
+    bool br_concave = corner_shapes.z > 0.5;
+    bool bl_concave = corner_shapes.w > 0.5;
+    bool any_concave = tl_concave || tr_concave || br_concave || bl_concave;
+    if (!any_concave) {
+        return distance;
+    }
+
+    float x = point.x;
+    float y = point.y;
+    float left_distance = body_min.x - x;
+    float right_distance = x - body_max.x;
+    float top_distance = body_min.y - y;
+    float bottom_distance = y - body_max.y;
+
+    float radius = r.x;
+    if (!tl_concave && radius > 0.0 && x < body_min.x + radius && y < body_min.y + radius) {
+        float corner_distance = length(point - float2(body_min.x + radius, body_min.y + radius)) - radius;
+        distance = max(max(right_distance, bottom_distance), corner_distance);
+    }
+
+    radius = r.y;
+    if (!tr_concave && radius > 0.0 && x > body_max.x - radius && y < body_min.y + radius) {
+        float corner_distance = length(point - float2(body_max.x - radius, body_min.y + radius)) - radius;
+        distance = max(max(left_distance, bottom_distance), corner_distance);
+    }
+
+    radius = r.z;
+    if (!br_concave && radius > 0.0 && x > body_max.x - radius && y > body_max.y - radius) {
+        float corner_distance = length(point - float2(body_max.x - radius, body_max.y - radius)) - radius;
+        distance = max(max(left_distance, top_distance), corner_distance);
+    }
+
+    radius = r.w;
+    if (!bl_concave && radius > 0.0 && x < body_min.x + radius && y > body_max.y - radius) {
+        float corner_distance = length(point - float2(body_min.x + radius, body_max.y - radius)) - radius;
+        distance = max(max(right_distance, top_distance), corner_distance);
+    }
+
+    float visual_clip = max(max(-point.x, point.x - size.x), max(-point.y, point.y - size.y));
+    return max(distance, visual_clip);
+}
+
+// Pixel-grid-snap window for axis-aligned edges: half-coverage falls exactly on
+// the boundary so an integer-aligned edge produces 100% on the inside pixel and
+// 0% on the outside pixel, with no semi-transparent leakage.
+float coverage_for(float2 distance_with_corner, float aa_curve) {
+    if (u_no_aa == 1) {
+        return 1.0 - step(0.0, distance_with_corner.x);
+    }
+    float lo = mix(-0.5, -aa_curve, distance_with_corner.y);
+    float hi = mix( 0.5,  aa_curve, distance_with_corner.y);
+    return 1.0 - smoothstep(lo, hi, distance_with_corner.x);
+}
+
+float gradient_segment_t(float position, float start, float end) {
+    return clamp((position - start) / max(end - start, 0.0001), 0.0, 1.0);
+}
+
+float4 gradient_fill(float position) {
+    float4 stops = clamp(u_gradient_stops, float4(0.0), float4(1.0));
+    stops.y = max(stops.y, stops.x);
+    stops.z = max(stops.z, stops.y);
+    stops.w = max(stops.w, stops.z);
+
+    float4 c0 = u_gradient_color0;
+    float4 c1 = u_gradient_color1;
+    float4 c2 = u_gradient_color2;
+    float4 c3 = u_gradient_color3;
+
+    if (position <= stops.y) {
+        return mix(c0, c1, gradient_segment_t(position, stops.x, stops.y));
+    }
+    if (position <= stops.z) {
+        return mix(c1, c2, gradient_segment_t(position, stops.y, stops.z));
+    }
+    return mix(c2, c3, gradient_segment_t(position, stops.z, stops.w));
+}
+
+float4 main(float2 fragCoord) {
+    float2 v_pixel = fragCoord - u_rect_origin;
+    float aa = max(u_softness, 0.85);
+    float2 local_point = v_pixel;
+    float2 uv = clamp(local_point / u_rect_size, float2(0.0), float2(1.0));
+
+    float2 outer = shape_distance_with_corner(local_point, u_rect_size, u_radii, u_corner_shapes, u_logical_inset);
+    float outer_distance = outer.x;
+    float outer_coverage = coverage_for(outer, aa);
+    if (u_invert_fill == 1) outer_coverage = 1.0 - outer_coverage;
+
+    if (u_outer_shadow == 1) {
+        float cutout_aa = 0.85;
+        float shadow_distance = shadow_shape_distance(local_point, u_rect_size, u_radii, u_corner_shapes, u_logical_inset);
+        float shadow_outer_coverage = 1.0 - smoothstep(-aa, aa, shadow_distance);
+        float cutout_distance = shape_distance(local_point + u_shadow_cutout_offset, u_rect_size, u_radii, u_corner_shapes, u_logical_inset);
+        float cutout_mask = 1.0 - smoothstep(-cutout_aa, cutout_aa, cutout_distance);
+        float shadow_coverage = shadow_outer_coverage * (1.0 - cutout_mask);
+        if (u_shadow_exclusion == 1 && u_shadow_exclusion_size.x > 0.0 && u_shadow_exclusion_size.y > 0.0) {
+            float exclusion_distance = shape_distance(local_point + u_shadow_exclusion_offset, u_shadow_exclusion_size, u_shadow_exclusion_radii, u_shadow_exclusion_corner_shapes, u_shadow_exclusion_logical_inset);
+            float exclusion_mask = 1.0 - smoothstep(-cutout_aa, cutout_aa, exclusion_distance);
+            shadow_coverage *= 1.0 - exclusion_mask;
+        }
+        float out_alpha = u_color.a * shadow_coverage;
+        if (out_alpha <= 0.0) {
+            return float4(0.0);
+        }
+        return float4(u_color.rgb * out_alpha, out_alpha);
+    }
+
+    float gradient_pos = clamp(dot(uv, u_gradient_direction), 0.0, 1.0);
+    float4 fill_base;
+    if (u_fill_mode == 0) {
+        fill_base = float4(0.0);
+    } else if (u_fill_mode == 1) {
+        fill_base = u_color;
+    } else {
+        fill_base = gradient_fill(gradient_pos);
+    }
+
+    if (u_border_width <= 0.0 || u_border_color.a <= 0.0) {
+        float out_alpha = fill_base.a * outer_coverage;
+        if (out_alpha <= 0.0) {
+            return float4(0.0);
+        }
+        return float4(fill_base.rgb * out_alpha, out_alpha);
+    }
+
+    bool any_concave = u_corner_shapes.x > 0.5 || u_corner_shapes.y > 0.5 || u_corner_shapes.z > 0.5 || u_corner_shapes.w > 0.5;
+    float2 inner;
+    if (any_concave) {
+        inner = float2(outer_distance + u_border_width, outer.y);
+    } else {
+        float4 inner_radii = max(u_radii - float4(u_border_width), float4(0.0));
+        float2 inner_size = max(u_rect_size - float2(u_border_width * 2.0), float2(0.0));
+        float2 inner_point = local_point - float2(u_border_width);
+        float4 inner_inset = max(u_logical_inset - float4(u_border_width), float4(0.0));
+        inner = shape_distance_with_corner(inner_point, inner_size, inner_radii, u_corner_shapes, inner_inset);
+    }
+    float inner_coverage = coverage_for(inner, aa);
+
+    if (fill_base.a <= 0.0) {
+        float ring_coverage = outer_coverage * (1.0 - inner_coverage);
+        float out_alpha = u_border_color.a * ring_coverage;
+        if (out_alpha <= 0.0) {
+            return float4(0.0);
+        }
+        return float4(u_border_color.rgb * out_alpha, out_alpha);
+    }
+
+    // Fill and border occupy disjoint regions: the fill lives where
+    // inner_coverage == 1, the border ring lives where inner_coverage == 0.
+    // Mix between them so a translucent fill never sits on top of a
+    // full-area border backplane (which would mask its opacity).
+    float3 border_pm = u_border_color.rgb * u_border_color.a;
+    float3 fill_pm = fill_base.rgb * fill_base.a;
+
+    float3 interior_rgb = mix(border_pm, fill_pm, inner_coverage);
+    float interior_a = mix(u_border_color.a, fill_base.a, inner_coverage);
+
+    // Apply outer shape mask
+    float out_alpha = interior_a * outer_coverage;
+    if (out_alpha <= 0.0) {
+        return float4(0.0);
+    }
+
+    // Output premultiplied alpha
+    return float4(interior_rgb * outer_coverage, out_alpha);
+}

@@ -1,11 +1,6 @@
 #include "render/backend/graphite_texture_manager.h"
 
 #include "core/log.h"
-#include "render/core/image_decoder.h"
-#include "render/core/image_file_loader.h"
-#include "render/core/image_source_log.h"
-#include "render/graphics_device.h"
-
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
@@ -15,11 +10,17 @@
 #include "include/gpu/GpuTypes.h"
 #include "include/gpu/graphite/BackendTexture.h"
 #include "include/gpu/graphite/Context.h"
+#include "include/gpu/graphite/GraphiteTypes.h"
 #include "include/gpu/graphite/Image.h"
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/vk/VulkanGraphiteTypes.h"
+#include "render/core/image_decoder.h"
+#include "render/core/image_file_loader.h"
+#include "render/core/image_source_log.h"
+#include "render/graphics_device.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -28,6 +29,17 @@
 
 namespace {
   constexpr Logger kLog("texture");
+
+  struct LinearPixel {
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    float a = 0.0f;
+  };
+
+  float decodeSrgb(float value) {
+    return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
+  }
 
   std::uint8_t premultiply(std::uint8_t color, std::uint8_t alpha) {
     return static_cast<std::uint8_t>((static_cast<unsigned>(color) * alpha + 127U) / 255U);
@@ -46,9 +58,7 @@ namespace {
     return result;
   }
 
-  std::vector<std::uint8_t> pixelsToRgba(
-      const std::uint8_t* source, int width, int height, TextureDataFormat format
-  ) {
+  std::vector<std::uint8_t> pixelsToRgba(const std::uint8_t* source, int width, int height, TextureDataFormat format) {
     const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<std::uint8_t> rgba(count * 4U, 255);
     if (source == nullptr) {
@@ -76,9 +86,15 @@ namespace {
     }
     return premultiplyRgba(rgba.data(), width, height);
   }
-}
+} // namespace
 
 struct GraphiteTextureManager::Impl {
+  struct RetiredTexture {
+    GraphicsDevice* graphics = nullptr;
+    skgpu::graphite::BackendTexture backendTexture;
+    sk_sp<SkImage> image;
+  };
+
   struct Entry {
     std::uint32_t generation = 0;
     skgpu::graphite::BackendTexture backendTexture;
@@ -92,6 +108,7 @@ struct GraphiteTextureManager::Impl {
   GraphicsDevice& graphics;
   std::vector<Entry> entries;
   std::vector<std::uint32_t> freeSlots;
+  GraphiteResourceObserverRegistry observers;
 
   explicit Impl(GraphicsDevice& device) : graphics(device) {}
 
@@ -103,24 +120,46 @@ struct GraphiteTextureManager::Impl {
     return entry.image != nullptr && id.generation() == entry.generation ? &entry : nullptr;
   }
 
-  const Entry* lookup(TextureId id) const {
-    return const_cast<Impl*>(this)->lookup(id);
+  const Entry* lookup(TextureId id) const { return const_cast<Impl*>(this)->lookup(id); }
+
+  static void finishRetirement(
+      skgpu::graphite::GpuFinishedContext context, skgpu::CallbackResult /*result*/
+  ) {
+    std::unique_ptr<RetiredTexture> retired(static_cast<RetiredTexture*>(context));
+    // Drop every SkImage reference before releasing the BackendTexture it may
+    // wrap. The callback runs only after the associated recording has finished
+    // (or failed before submission), while the Graphite Context is still alive.
+    retired->image.reset();
+    if (retired->backendTexture.isValid() && retired->graphics != nullptr
+        && retired->graphics->graphiteContext() != nullptr) {
+      retired->graphics->graphiteContext()->deleteBackendTexture(retired->backendTexture);
+    }
   }
 
-  void deleteTexture(Entry& entry) {
-    entry.image.reset();
-    if (entry.backendTexture.isValid() && graphics.graphiteContext() != nullptr) {
-      graphics.graphiteContext()->deleteBackendTexture(entry.backendTexture);
+  void retireTexture(Entry& entry) {
+    if (entry.image == nullptr && !entry.backendTexture.isValid()) {
+      return;
     }
+    auto retired = std::make_unique<RetiredTexture>();
+    retired->graphics = &graphics;
+    retired->backendTexture = entry.backendTexture;
+    retired->image = std::move(entry.image);
     entry.backendTexture = {};
     entry.width = 0;
     entry.height = 0;
     entry.externalSynchronization = nullptr;
+
+    if (graphics.recorder() != nullptr && graphics.graphiteContext() != nullptr) {
+      auto* context = retired.release();
+      graphics.recorder()->addFinishInfo(
+          skgpu::graphite::InsertFinishInfo(context, &Impl::finishRetirement)
+      );
+    } else {
+      finishRetirement(retired.release(), skgpu::CallbackResult::kFailed);
+    }
   }
 
-  TextureHandle upload(
-      const std::uint8_t* premultiplied, int width, int height, TextureFilter filter, bool mipmap
-  ) {
+  TextureHandle upload(const std::uint8_t* premultiplied, int width, int height, TextureFilter filter, bool mipmap) {
     if (premultiplied == nullptr || width <= 0 || height <= 0 || graphics.recorder() == nullptr) {
       return {};
     }
@@ -134,15 +173,14 @@ struct GraphiteTextureManager::Impl {
       return {};
     }
     const bool useMipmaps = mipmap && TextureManager::globalMipmapsEnabled();
-    const SkImageInfo imageInfo = SkImageInfo::Make(
-        width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType, SkColorSpace::MakeSRGB()
-    );
+    const SkImageInfo imageInfo =
+        SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType, nullptr);
     const SkPixmap pixmap(imageInfo, premultiplied, imageInfo.minRowBytes());
 
     skgpu::graphite::VulkanTextureInfo textureInfo;
     textureInfo.fSampleCount = skgpu::graphite::SampleCount::k1;
     textureInfo.fMipmapped = useMipmaps ? skgpu::Mipmapped::kYes : skgpu::Mipmapped::kNo;
-    textureInfo.fFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    textureInfo.fFormat = useMipmaps ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM;
     textureInfo.fImageTiling = VK_IMAGE_TILING_OPTIMAL;
     textureInfo.fImageUsageFlags = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     textureInfo.fSharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -152,23 +190,115 @@ struct GraphiteTextureManager::Impl {
     if (!backend.isValid()) {
       return {};
     }
-    // Static mipmapped images are uploaded through TextureFromImage so Skia
-    // generates the complete mip chain. Dynamic textures stay single-level and
-    // use updateBackendTexture in place.
+    // Static mipmapped images upload a complete public Graphite mip chain.
+    // Generate the complete chain with area filtering in linear light and
+    // retain it as RGBA16F. This avoids encoded-byte averaging and preserves
+    // precision through Graphite's sampling and color conversion.
     sk_sp<SkImage> image;
     if (useMipmaps) {
-      const auto raster = SkImages::RasterFromPixmapCopy(pixmap);
-      image = SkImages::TextureFromImage(
-          graphics.recorder(), raster, SkImage::RequiredProperties{.fMipmapped = true}
-      );
-      graphics.recorder()->deleteBackendTexture(backend);
-      backend = {};
+      int mipCount = 1;
+      for (int mipWidth = width, mipHeight = height; mipWidth > 1 || mipHeight > 1; ++mipCount) {
+        mipWidth = std::max(1, mipWidth / 2);
+        mipHeight = std::max(1, mipHeight / 2);
+      }
+      std::vector<LinearPixel> currentLinear(static_cast<std::size_t>(width * height));
+      for (int index = 0; index < width * height; ++index) {
+        const float alpha = static_cast<float>(premultiplied[index * 4 + 3]) / 255.0f;
+        auto& output = currentLinear[static_cast<std::size_t>(index)];
+        output.a = alpha;
+        if (alpha > 0.0f) {
+          output.r = decodeSrgb(std::clamp(
+              static_cast<float>(premultiplied[index * 4]) / 255.0f / alpha, 0.0f, 1.0f
+          )) * alpha;
+          output.g = decodeSrgb(std::clamp(
+              static_cast<float>(premultiplied[index * 4 + 1]) / 255.0f / alpha, 0.0f, 1.0f
+          )) * alpha;
+          output.b = decodeSrgb(std::clamp(
+              static_cast<float>(premultiplied[index * 4 + 2]) / 255.0f / alpha, 0.0f, 1.0f
+          )) * alpha;
+        }
+      }
+      std::vector<std::vector<_Float16>> mipStorage;
+      std::vector<SkPixmap> mipPixmaps;
+      mipStorage.reserve(static_cast<std::size_t>(mipCount));
+      mipPixmaps.reserve(static_cast<std::size_t>(mipCount));
+      const auto appendLinearLevel = [&](const std::vector<LinearPixel>& pixels, int levelWidth, int levelHeight) {
+        const SkImageInfo linearInfo = SkImageInfo::Make(
+            levelWidth, levelHeight, kRGBA_F16_SkColorType, kPremul_SkAlphaType,
+            SkColorSpace::MakeSRGBLinear()
+        );
+        auto& storage = mipStorage.emplace_back(pixels.size() * 4);
+        for (std::size_t index = 0; index < pixels.size(); ++index) {
+          storage[index * 4] = static_cast<_Float16>(pixels[index].r);
+          storage[index * 4 + 1] = static_cast<_Float16>(pixels[index].g);
+          storage[index * 4 + 2] = static_cast<_Float16>(pixels[index].b);
+          storage[index * 4 + 3] = static_cast<_Float16>(pixels[index].a);
+        }
+        mipPixmaps.emplace_back(linearInfo, storage.data(), linearInfo.minRowBytes());
+      };
+      appendLinearLevel(currentLinear, width, height);
+      int currentWidth = width;
+      int currentHeight = height;
+      for (int level = 1; level < mipCount; ++level) {
+        const int nextWidth = std::max(1, currentWidth / 2);
+        const int nextHeight = std::max(1, currentHeight / 2);
+        std::vector<LinearPixel> nextLinear(static_cast<std::size_t>(nextWidth * nextHeight));
+        for (int y = 0; y < nextHeight; ++y) {
+          const float sourceTop = static_cast<float>(y * currentHeight) / static_cast<float>(nextHeight);
+          const float sourceBottom = static_cast<float>((y + 1) * currentHeight) / static_cast<float>(nextHeight);
+          for (int x = 0; x < nextWidth; ++x) {
+            const float sourceLeft = static_cast<float>(x * currentWidth) / static_cast<float>(nextWidth);
+            const float sourceRight = static_cast<float>((x + 1) * currentWidth) / static_cast<float>(nextWidth);
+            LinearPixel sum;
+            float totalWeight = 0.0f;
+            for (int sourceY = static_cast<int>(std::floor(sourceTop));
+                 sourceY < static_cast<int>(std::ceil(sourceBottom)); ++sourceY) {
+              const float weightY = std::max(
+                  0.0f, std::min(sourceBottom, static_cast<float>(sourceY + 1))
+                      - std::max(sourceTop, static_cast<float>(sourceY))
+              );
+              for (int sourceX = static_cast<int>(std::floor(sourceLeft));
+                   sourceX < static_cast<int>(std::ceil(sourceRight)); ++sourceX) {
+                const float weightX = std::max(
+                    0.0f, std::min(sourceRight, static_cast<float>(sourceX + 1))
+                        - std::max(sourceLeft, static_cast<float>(sourceX))
+                );
+                const float weight = weightX * weightY;
+                const auto& sample = currentLinear[
+                    static_cast<std::size_t>(sourceY * currentWidth + sourceX)
+                ];
+                sum.r += sample.r * weight;
+                sum.g += sample.g * weight;
+                sum.b += sample.b * weight;
+                sum.a += sample.a * weight;
+                totalWeight += weight;
+              }
+            }
+            if (totalWeight > 0.0f) {
+              sum.r /= totalWeight;
+              sum.g /= totalWeight;
+              sum.b /= totalWeight;
+              sum.a /= totalWeight;
+            }
+            nextLinear[static_cast<std::size_t>(y * nextWidth + x)] = sum;
+          }
+        }
+        appendLinearLevel(nextLinear, nextWidth, nextHeight);
+        currentLinear = std::move(nextLinear);
+        currentWidth = nextWidth;
+        currentHeight = nextHeight;
+      }
+      if (graphics.recorder()->updateBackendTexture(backend, mipPixmaps.data(), mipCount)) {
+        image = SkImages::WrapTexture(
+            graphics.recorder(), backend, kPremul_SkAlphaType, SkColorSpace::MakeSRGBLinear()
+        );
+      }
     } else {
       if (!graphics.recorder()->updateBackendTexture(backend, &pixmap, 1)) {
         graphics.recorder()->deleteBackendTexture(backend);
         return {};
       }
-      image = SkImages::WrapTexture(graphics.recorder(), backend, kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
+      image = SkImages::WrapTexture(graphics.recorder(), backend, kPremul_SkAlphaType, nullptr);
     }
     if (image == nullptr) {
       if (backend.isValid()) {
@@ -240,7 +370,12 @@ struct GraphiteTextureManager::Impl {
 
 GraphiteTextureManager::GraphiteTextureManager(GraphicsDevice& graphics) : m_impl(std::make_unique<Impl>(graphics)) {}
 
-GraphiteTextureManager::~GraphiteTextureManager() { cleanup(); }
+GraphiteTextureManager::~GraphiteTextureManager() {
+  if (m_impl != nullptr) {
+    m_impl->observers.notifyDestroying();
+  }
+  cleanup();
+}
 
 TextureHandle GraphiteTextureManager::loadFromFile(const std::string& path, int targetSize, bool mipmap) {
   auto loaded = loadImageFile(path, targetSize);
@@ -251,8 +386,7 @@ TextureHandle GraphiteTextureManager::loadFromFile(const std::string& path, int 
   return loadFromRgba(loaded->rgba.data(), loaded->width, loaded->height, mipmap);
 }
 
-TextureHandle
-GraphiteTextureManager::loadFromEncodedBytes(const std::uint8_t* data, std::size_t size, bool mipmap) {
+TextureHandle GraphiteTextureManager::loadFromEncodedBytes(const std::uint8_t* data, std::size_t size, bool mipmap) {
   auto decoded = decodeRasterImage(data, size);
   if (!decoded) {
     return {};
@@ -271,7 +405,10 @@ TextureHandle GraphiteTextureManager::loadFromRgba(const std::uint8_t* data, int
 TextureHandle GraphiteTextureManager::loadFromRaw(
     const std::uint8_t* data, std::size_t size, int width, int height, int stride, PixmapFormat format, bool mipmap
 ) {
-  if (data == nullptr || width <= 0 || height <= 0 || stride <= 0
+  if (data == nullptr
+      || width <= 0
+      || height <= 0
+      || stride <= 0
       || size < static_cast<std::size_t>(stride) * static_cast<std::size_t>(height)) {
     return {};
   }
@@ -287,16 +424,28 @@ TextureHandle GraphiteTextureManager::loadFromRaw(
         std::memcpy(out, pixel, 4U);
         break;
       case PixmapFormat::BGRA:
-        out[0] = pixel[2]; out[1] = pixel[1]; out[2] = pixel[0]; out[3] = pixel[3];
+        out[0] = pixel[2];
+        out[1] = pixel[1];
+        out[2] = pixel[0];
+        out[3] = pixel[3];
         break;
       case PixmapFormat::ARGB:
-        out[0] = pixel[1]; out[1] = pixel[2]; out[2] = pixel[3]; out[3] = pixel[0];
+        out[0] = pixel[1];
+        out[1] = pixel[2];
+        out[2] = pixel[3];
+        out[3] = pixel[0];
         break;
       case PixmapFormat::RGB:
-        out[0] = pixel[0]; out[1] = pixel[1]; out[2] = pixel[2]; out[3] = 255;
+        out[0] = pixel[0];
+        out[1] = pixel[1];
+        out[2] = pixel[2];
+        out[3] = 255;
         break;
       case PixmapFormat::BGR:
-        out[0] = pixel[2]; out[1] = pixel[1]; out[2] = pixel[0]; out[3] = 255;
+        out[0] = pixel[2];
+        out[1] = pixel[1];
+        out[2] = pixel[0];
+        out[3] = 255;
         break;
       }
     }
@@ -314,9 +463,8 @@ TextureHandle GraphiteTextureManager::loadFromPixels(
   return m_impl->upload(rgba.data(), width, height, filter, mipmap);
 }
 
-TextureHandle GraphiteTextureManager::createEmpty(
-    int width, int height, TextureDataFormat format, TextureFilter filter
-) {
+TextureHandle
+GraphiteTextureManager::createEmpty(int width, int height, TextureDataFormat format, TextureFilter filter) {
   return loadFromPixels(nullptr, width, height, format, filter, false);
 }
 
@@ -324,9 +472,7 @@ TextureHandle GraphiteTextureManager::createBgraSurface(int width, int height) {
   return createEmpty(width, height, TextureDataFormat::Rgba, TextureFilter::Linear);
 }
 
-bool GraphiteTextureManager::updateBgraSurface(
-    TextureHandle& handle, const std::uint8_t* data, int width, int height
-) {
+bool GraphiteTextureManager::updateBgraSurface(TextureHandle& handle, const std::uint8_t* data, int width, int height) {
   if (data == nullptr || width <= 0 || height <= 0) {
     return false;
   }
@@ -349,7 +495,10 @@ bool GraphiteTextureManager::replace(
   }
   auto* entry = m_impl->lookup(handle.id);
   const auto rgba = pixelsToRgba(data, width, height, format);
-  if (entry != nullptr && entry->backendTexture.isValid() && entry->width == width && entry->height == height
+  if (entry != nullptr
+      && entry->backendTexture.isValid()
+      && entry->width == width
+      && entry->height == height
       && !mipmap) {
     const SkImageInfo info = SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
     const SkPixmap pixmap(info, rgba.data(), info.minRowBytes());
@@ -373,8 +522,13 @@ bool GraphiteTextureManager::updateSubImage(
     TextureHandle& handle, const std::uint8_t* data, int x, int y, int width, int height, TextureDataFormat format
 ) {
   auto* entry = m_impl->lookup(handle.id);
-  if (entry == nullptr || !entry->backendTexture.isValid() || data == nullptr || x != 0 || y != 0
-      || width != entry->width || height != entry->height) {
+  if (entry == nullptr
+      || !entry->backendTexture.isValid()
+      || data == nullptr
+      || x != 0
+      || y != 0
+      || width != entry->width
+      || height != entry->height) {
     // Graphite's public upload API updates full backend textures. Current
     // dynamic users already replace their complete graph/audio row; reject a
     // partial update rather than introducing an untracked staging image.
@@ -390,7 +544,7 @@ void GraphiteTextureManager::unload(TextureHandle& handle) {
   auto* entry = m_impl->lookup(handle.id);
   if (entry != nullptr) {
     const std::uint32_t slot = handle.id.slot();
-    m_impl->deleteTexture(*entry);
+    m_impl->retireTexture(*entry);
     entry->generation = 0;
     m_impl->freeSlots.push_back(slot);
   }
@@ -402,7 +556,7 @@ void GraphiteTextureManager::cleanup() {
     return;
   }
   for (auto& entry : m_impl->entries) {
-    m_impl->deleteTexture(entry);
+    m_impl->retireTexture(entry);
     entry.generation = 0;
   }
   m_impl->freeSlots.clear();
@@ -426,20 +580,27 @@ TextureHandle GraphiteTextureManager::adoptExternalImage(
     sk_sp<SkImage> image, int width, int height, TextureFilter filter,
     GraphiteExternalImageSynchronization* synchronization
 ) {
-  return m_impl != nullptr
-      ? m_impl->adopt(std::move(image), width, height, filter, synchronization)
-      : TextureHandle{};
+  return m_impl != nullptr ? m_impl->adopt(std::move(image), width, height, filter, synchronization) : TextureHandle{};
 }
 
-GraphiteExternalImageSynchronization*
-GraphiteTextureManager::externalSynchronization(TextureId id) const noexcept {
+GraphiteExternalImageSynchronization* GraphiteTextureManager::externalSynchronization(TextureId id) const noexcept {
   const auto* entry = m_impl != nullptr ? m_impl->lookup(id) : nullptr;
   return entry != nullptr ? entry->externalSynchronization : nullptr;
 }
 
-bool GraphiteTextureManager::rebindExternalImage(
-    TextureHandle& handle, sk_sp<SkImage> image, int width, int height
-) {
+void GraphiteTextureManager::addObserver(GraphiteTextureManagerObserver& observer) {
+  if (m_impl != nullptr) {
+    m_impl->observers.add(observer);
+  }
+}
+
+void GraphiteTextureManager::removeObserver(GraphiteTextureManagerObserver& observer) noexcept {
+  if (m_impl != nullptr) {
+    m_impl->observers.remove(observer);
+  }
+}
+
+bool GraphiteTextureManager::rebindExternalImage(TextureHandle& handle, sk_sp<SkImage> image, int width, int height) {
   if (m_impl == nullptr || image == nullptr || width <= 0 || height <= 0) {
     return false;
   }
@@ -455,6 +616,4 @@ bool GraphiteTextureManager::rebindExternalImage(
   return true;
 }
 
-void GraphiteTextureManager::invalidateAll() {
-  cleanup();
-}
+void GraphiteTextureManager::invalidateAll() { cleanup(); }

@@ -1,6 +1,7 @@
 #include "render/core/image_file_loader.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <string>
 
 namespace {
@@ -10,6 +11,24 @@ namespace {
       std::fprintf(stderr, "image_file_loader_data_uri_test: %s\n", message);
     }
     return condition;
+  }
+
+  bool checkPixel(
+      const LoadedImageFile& image, int x, int y, std::uint8_t r, std::uint8_t g, std::uint8_t b,
+      std::uint8_t a, const char* message
+  ) {
+    if (x < 0 || y < 0 || x >= image.width || y >= image.height) return check(false, message);
+    const std::size_t offset = static_cast<std::size_t>(y * image.width + x) * 4U;
+    const bool matches = image.rgba[offset] == r && image.rgba[offset + 1] == g
+        && image.rgba[offset + 2] == b && image.rgba[offset + 3] == a;
+    if (!matches) {
+      std::fprintf(
+          stderr, "image_file_loader_data_uri_test: %s: got rgba(%u,%u,%u,%u), expected rgba(%u,%u,%u,%u)\n",
+          message, image.rgba[offset], image.rgba[offset + 1], image.rgba[offset + 2], image.rgba[offset + 3],
+          r, g, b, a
+      );
+    }
+    return matches;
   }
 
 } // namespace
@@ -57,6 +76,35 @@ int main() {
   if (!image) {
     const bool mentionsSeparator = image.error().find("separator") != std::string::npos;
     ok = check(mentionsSeparator, "missing comma failure should mention separator") && ok;
+  }
+
+  // Pixel golden for the SkSVG path. Integer-aligned rectangles avoid
+  // antialiasing ambiguity while covering orientation, transparent clear,
+  // alpha un-premultiplication, intrinsic sizing, and CSS color parsing.
+  const std::string svg =
+      "data:image/svg+xml,"
+      "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4' viewBox='0 0 4 4'>"
+      "<rect x='0' y='0' width='2' height='2' fill='red'/>"
+      "<rect x='2' y='0' width='2' height='2' fill='blue' fill-opacity='0.5'/>"
+      "<rect x='0' y='2' width='2' height='2' fill='lime'/>"
+      "</svg>";
+  image = loadImageFile(svg);
+  ok = check(image.has_value(), image ? "failed to rasterize SVG golden" : image.error().c_str()) && ok;
+  if (image) {
+    ok = check(image->width == 4 && image->height == 4, "SVG intrinsic dimensions should be preserved") && ok;
+    ok = checkPixel(*image, 0, 0, 255, 0, 0, 255, "SVG top-left red pixel drifted") && ok;
+    ok = checkPixel(*image, 3, 0, 0, 0, 255, 128, "SVG translucent blue pixel was not straight RGBA") && ok;
+    ok = checkPixel(*image, 0, 3, 0, 255, 0, 255, "SVG Y orientation is inverted") && ok;
+    ok = checkPixel(*image, 3, 3, 0, 0, 0, 0, "SVG transparent clear pixel drifted") && ok;
+  }
+
+  image = loadImageFile(svg, 8);
+  ok = check(image.has_value(), image ? "failed to scale SVG golden" : image.error().c_str()) && ok;
+  if (image) {
+    ok = check(image->width == 8 && image->height == 8, "SVG target size should scale the container") && ok;
+    ok = checkPixel(*image, 1, 1, 255, 0, 0, 255, "scaled SVG red region drifted") && ok;
+    ok = checkPixel(*image, 7, 1, 0, 0, 255, 128, "scaled SVG alpha/color drifted") && ok;
+    ok = checkPixel(*image, 7, 7, 0, 0, 0, 0, "scaled SVG transparent region drifted") && ok;
   }
 
   return ok ? 0 : 1;

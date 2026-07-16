@@ -1,0 +1,146 @@
+
+
+uniform shader u_source1;
+uniform shader u_source2;
+uniform float u_sourceKind1;
+uniform float u_sourceKind2;
+uniform float4 u_sourceColor1;
+uniform float4 u_sourceColor2;
+uniform float u_progress;
+uniform float u_fillMode;
+uniform float u_imageWidth1;
+uniform float u_imageHeight1;
+uniform float u_imageWidth2;
+uniform float u_imageHeight2;
+uniform float u_screenWidth;
+uniform float u_screenHeight;
+uniform float4 u_fillColor;
+uniform float2 u_spanOffset;
+uniform float2 u_spanMonitorSize;
+uniform float2 u_spanTotalSize;
+
+
+float2 calculateUV(float2 uv, float imgWidth, float imgHeight) {
+    float2 transformedUV = uv;
+
+    if (u_fillMode < 0.5) {
+        // Center
+        float2 screenPixel = uv * float2(u_screenWidth, u_screenHeight);
+        float2 imageOffset = (float2(u_screenWidth, u_screenHeight) - float2(imgWidth, imgHeight)) * 0.5;
+        float2 imagePixel = screenPixel - imageOffset;
+        transformedUV = imagePixel / float2(imgWidth, imgHeight);
+    }
+    else if (u_fillMode < 1.5) {
+        // Crop (fill/cover)
+        float scale = max(u_screenWidth / imgWidth, u_screenHeight / imgHeight);
+        float2 scaledImageSize = float2(imgWidth, imgHeight) * scale;
+        float2 offset = (scaledImageSize - float2(u_screenWidth, u_screenHeight)) / scaledImageSize;
+        transformedUV = uv * (float2(1.0) - offset) + offset * 0.5;
+    }
+    else if (u_fillMode < 2.5) {
+        // Fit (contain)
+        float scale = min(u_screenWidth / imgWidth, u_screenHeight / imgHeight);
+        float2 scaledImageSize = float2(imgWidth, imgHeight) * scale;
+        float2 offset = (float2(u_screenWidth, u_screenHeight) - scaledImageSize) * 0.5;
+        float2 screenPixel = uv * float2(u_screenWidth, u_screenHeight);
+        float2 imagePixel = (screenPixel - offset) / scale;
+        transformedUV = imagePixel / float2(imgWidth, imgHeight);
+    }
+    else if (u_fillMode < 3.5) {
+        // Stretch - no transform
+    }
+    else if (u_fillMode < 4.5) {
+        // Repeat (tile)
+        float2 screenPixel = uv * float2(u_screenWidth, u_screenHeight);
+        transformedUV = screenPixel / float2(imgWidth, imgHeight);
+    }
+    else {
+        // Span: cover-fit the image across the whole multi-monitor desktop and
+        // sample the slice that belongs to this output.
+        if (u_spanTotalSize.x <= 0.0 || u_spanTotalSize.y <= 0.0) {
+            // Span geometry unavailable: behave like Crop.
+            float scale = max(u_screenWidth / imgWidth, u_screenHeight / imgHeight);
+            float2 scaledImageSize = float2(imgWidth, imgHeight) * scale;
+            float2 offset = (scaledImageSize - float2(u_screenWidth, u_screenHeight)) / scaledImageSize;
+            transformedUV = uv * (float2(1.0) - offset) + offset * 0.5;
+        } else {
+            float2 imageSize = float2(imgWidth, imgHeight);
+            float scale = max(u_spanTotalSize.x / imageSize.x, u_spanTotalSize.y / imageSize.y);
+            float2 scaledImageSize = imageSize * scale;
+            float2 desktopPixel = u_spanOffset + uv * u_spanMonitorSize;
+            float2 imagePixel = desktopPixel + (scaledImageSize - u_spanTotalSize) * 0.5;
+            transformedUV = imagePixel / scaledImageSize;
+        }
+    }
+
+    return transformedUV;
+}
+
+float4 sampleWithFillMode1(float2 uv, float imgWidth, float imgHeight) {
+    float2 transformedUV = calculateUV(uv, imgWidth, imgHeight);
+    if (u_fillMode > 3.5 && u_fillMode < 4.5) {
+        return u_source1.eval(fract(transformedUV) * float2(imgWidth, imgHeight));
+    }
+    if (transformedUV.x < 0.0 || transformedUV.x > 1.0 ||
+        transformedUV.y < 0.0 || transformedUV.y > 1.0) {
+        return u_fillColor;
+    }
+    return u_source1.eval(transformedUV * float2(imgWidth, imgHeight));
+}
+
+float4 sampleWithFillMode2(float2 uv, float imgWidth, float imgHeight) {
+    float2 transformedUV = calculateUV(uv, imgWidth, imgHeight);
+    if (u_fillMode > 3.5 && u_fillMode < 4.5) {
+        return u_source2.eval(fract(transformedUV) * float2(imgWidth, imgHeight));
+    }
+    if (transformedUV.x < 0.0 || transformedUV.x > 1.0 ||
+        transformedUV.y < 0.0 || transformedUV.y > 1.0) {
+        return u_fillColor;
+    }
+    return u_source2.eval(transformedUV * float2(imgWidth, imgHeight));
+}
+
+float4 sampleSource1(float2 uv) {
+    return u_sourceKind1 > 0.5 ? u_sourceColor1 : sampleWithFillMode1(uv, u_imageWidth1, u_imageHeight1);
+}
+
+float4 sampleSource2(float2 uv) {
+    return u_sourceKind2 > 0.5 ? u_sourceColor2 : sampleWithFillMode2(uv, u_imageWidth2, u_imageHeight2);
+}
+
+
+uniform float u_direction;
+uniform float u_smoothness;
+
+float4 main(float2 fragCoord) {
+    float2 v_texcoord = fragCoord / float2(u_screenWidth, u_screenHeight);
+    float2 uv = v_texcoord;
+    float4 color1 = sampleSource1(uv);
+    float4 color2 = sampleSource2(uv);
+
+    float mappedSmoothness = mix(0.001, 0.5, u_smoothness * u_smoothness);
+    float extendedProgress = u_progress * (1.0 + 2.0 * mappedSmoothness) - mappedSmoothness;
+    float edge = 0.0;
+    float factor = 0.0;
+
+    if (u_direction < 0.5) {
+        edge = 1.0 - extendedProgress;
+        factor = smoothstep(edge - mappedSmoothness, edge + mappedSmoothness, uv.x);
+        return mix(color1, color2, factor);
+    }
+    else if (u_direction < 1.5) {
+        edge = extendedProgress;
+        factor = smoothstep(edge - mappedSmoothness, edge + mappedSmoothness, uv.x);
+        return mix(color2, color1, factor);
+    }
+    else if (u_direction < 2.5) {
+        edge = 1.0 - extendedProgress;
+        factor = smoothstep(edge - mappedSmoothness, edge + mappedSmoothness, uv.y);
+        return mix(color1, color2, factor);
+    }
+    else {
+        edge = extendedProgress;
+        factor = smoothstep(edge - mappedSmoothness, edge + mappedSmoothness, uv.y);
+        return mix(color2, color1, factor);
+    }
+}

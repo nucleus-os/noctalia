@@ -3016,7 +3016,7 @@ void Bar::prepareFrame(BarInstance& instance, bool needsUpdate, bool needsLayout
     return;
   }
 
-  m_renderContext->makeCurrent(instance.surface->renderTarget());
+  m_renderContext->selectTarget(instance.surface->renderTarget());
 
   if (needsUpdate) {
     UiPhaseScope updatePhase(UiPhase::Update);

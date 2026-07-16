@@ -7,6 +7,7 @@
 #include "ui/style.h"
 
 #include <cstdint>
+#include <charconv>
 #include <md4c.h>
 #include <memory>
 #include <string>
@@ -18,6 +19,12 @@ namespace {
     MarkdownView* view = nullptr;
     float scale = 1.0f;
     std::string textBuf;
+    std::vector<StyledTextRun> styledRuns;
+    unsigned boldDepth = 0;
+    unsigned italicDepth = 0;
+    unsigned monospaceDepth = 0;
+    unsigned underlineDepth = 0;
+    unsigned strikeDepth = 0;
     int headingLevel = 0;
     bool inCodeBlock = false;
     bool inOrderedList = false;
@@ -32,30 +39,72 @@ namespace {
     std::vector<std::size_t> tableColumnWidths;
   };
 
-  void escapeForPango(std::string& out, const char* text, unsigned size) {
-    for (unsigned i = 0; i < size; ++i) {
-      switch (text[i]) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      default:
-        out += text[i];
-        break;
+  void appendStyled(MdContext& ctx, std::string_view text) {
+    if (text.empty()) return;
+    StyledTextRun run{
+        .text = std::string(text),
+        .bold = ctx.boldDepth > 0,
+        .italic = ctx.italicDepth > 0,
+        .monospace = ctx.monospaceDepth > 0,
+        .underline = ctx.underlineDepth > 0,
+        .strikeThrough = ctx.strikeDepth > 0,
+        .color = ctx.underlineDepth > 0 ? std::optional<Color>(colorForRole(ColorRole::Primary)) : std::nullopt,
+    };
+    if (!ctx.styledRuns.empty()) {
+      auto previous = ctx.styledRuns.back();
+      previous.text.clear();
+      auto current = run;
+      current.text.clear();
+      if (previous == current) {
+        ctx.styledRuns.back().text += run.text;
+        ctx.textBuf += run.text;
+        return;
       }
     }
+    ctx.textBuf += run.text;
+    ctx.styledRuns.push_back(std::move(run));
+  }
+
+  std::string decodeEntity(std::string_view entity) {
+    if (entity == "&amp;") return "&";
+    if (entity == "&lt;") return "<";
+    if (entity == "&gt;") return ">";
+    if (entity == "&quot;") return "\"";
+    if (entity == "&apos;") return "'";
+    if (entity.size() < 4 || entity[0] != '&' || entity[1] != '#' || entity.back() != ';') {
+      return std::string(entity);
+    }
+    const bool hexadecimal = entity.size() > 4 && (entity[2] == 'x' || entity[2] == 'X');
+    const auto digits = entity.substr(hexadecimal ? 3 : 2, entity.size() - (hexadecimal ? 4 : 3));
+    std::uint32_t codepoint = 0;
+    const auto result = std::from_chars(digits.data(), digits.data() + digits.size(), codepoint, hexadecimal ? 16 : 10);
+    if (result.ec != std::errc{} || result.ptr != digits.data() + digits.size() || codepoint > 0x10FFFF
+        || (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+      return std::string(entity);
+    }
+    std::string decoded;
+    if (codepoint <= 0x7F) decoded.push_back(static_cast<char>(codepoint));
+    else if (codepoint <= 0x7FF) {
+      decoded.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+      decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint <= 0xFFFF) {
+      decoded.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+      decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+      decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+      decoded.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+      decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+      decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+      decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+    return decoded;
   }
 
   constexpr int kWrapUnlimited = 500;
 
   std::unique_ptr<Label> makeMarkdownLabel(
       const std::string& text, float fontSize, float scale, ColorRole color, FontWeight weight = FontWeight::Normal,
-      bool markup = false, int maxLines = kWrapUnlimited
+      int maxLines = kWrapUnlimited, const std::vector<StyledTextRun>& runs = {}
   ) {
     auto label = ui::label({
         .text = text,
@@ -64,9 +113,7 @@ namespace {
         .color = colorSpecFromRole(color),
         .maxLines = maxLines,
     });
-    if (markup) {
-      label->setUseMarkup(true);
-    }
+    if (!runs.empty()) label->setStyledText(runs);
     return label;
   }
 
@@ -87,7 +134,7 @@ namespace {
     }
     ctx.view->addChild(ui::row({.height = Style::spaceSm * ctx.scale}));
     ctx.view->addChild(
-        makeMarkdownLabel(ctx.textBuf, fontSize, ctx.scale, ColorRole::OnSurface, FontWeight::Bold, false, 1)
+        makeMarkdownLabel(ctx.textBuf, fontSize, ctx.scale, ColorRole::OnSurface, FontWeight::Bold, 1, ctx.styledRuns)
     );
     ctx.view->addChild(ui::separator({.spacing = Style::spaceXs * ctx.scale * 0.5f}));
   }
@@ -97,7 +144,9 @@ namespace {
       return;
     }
     auto label =
-        makeMarkdownLabel(ctx.textBuf, Style::fontSizeBody, ctx.scale, ColorRole::OnSurface, FontWeight::Normal, true);
+        makeMarkdownLabel(
+            ctx.textBuf, Style::fontSizeBody, ctx.scale, ColorRole::OnSurface, FontWeight::Normal,
+            kWrapUnlimited, ctx.styledRuns);
     ctx.view->trackWrappableLabel(label.get());
     ctx.view->addChild(std::move(label));
   }
@@ -195,7 +244,9 @@ namespace {
         makeMarkdownLabel(bullet, Style::fontSizeBody, ctx.scale, ColorRole::OnSurfaceVariant, FontWeight::Normal)
     );
     auto textLabel =
-        makeMarkdownLabel(ctx.textBuf, Style::fontSizeBody, ctx.scale, ColorRole::OnSurface, FontWeight::Normal, true);
+        makeMarkdownLabel(
+            ctx.textBuf, Style::fontSizeBody, ctx.scale, ColorRole::OnSurface, FontWeight::Normal,
+            kWrapUnlimited, ctx.styledRuns);
     ctx.view->trackWrappableLabel(textLabel.get());
     textLabel->setFlexGrow(1.0f);
     row->addChild(std::move(textLabel));
@@ -210,6 +261,7 @@ namespace {
   int onEnterBlock(MD_BLOCKTYPE type, void* detail, void* userdata) {
     auto* ctx = static_cast<MdContext*>(userdata);
     ctx->textBuf.clear();
+    ctx->styledRuns.clear();
     switch (type) {
     case MD_BLOCK_H: {
       const auto* hd = static_cast<const MD_BLOCK_H_DETAIL*>(detail);
@@ -304,6 +356,7 @@ namespace {
     }
     if (!ctx->inTable) {
       ctx->textBuf.clear();
+      ctx->styledRuns.clear();
     }
     return 0;
   }
@@ -315,19 +368,19 @@ namespace {
     }
     switch (type) {
     case MD_SPAN_STRONG:
-      ctx->textBuf += "<b>";
+      ++ctx->boldDepth;
       break;
     case MD_SPAN_EM:
-      ctx->textBuf += "<i>";
+      ++ctx->italicDepth;
       break;
     case MD_SPAN_CODE:
-      ctx->textBuf += "<tt>";
+      ++ctx->monospaceDepth;
       break;
     case MD_SPAN_A:
-      ctx->textBuf += "<u>";
+      ++ctx->underlineDepth;
       break;
     case MD_SPAN_DEL:
-      ctx->textBuf += "<s>";
+      ++ctx->strikeDepth;
       break;
     default:
       break;
@@ -342,19 +395,19 @@ namespace {
     }
     switch (type) {
     case MD_SPAN_STRONG:
-      ctx->textBuf += "</b>";
+      if (ctx->boldDepth > 0) --ctx->boldDepth;
       break;
     case MD_SPAN_EM:
-      ctx->textBuf += "</i>";
+      if (ctx->italicDepth > 0) --ctx->italicDepth;
       break;
     case MD_SPAN_CODE:
-      ctx->textBuf += "</tt>";
+      if (ctx->monospaceDepth > 0) --ctx->monospaceDepth;
       break;
     case MD_SPAN_A:
-      ctx->textBuf += "</u>";
+      if (ctx->underlineDepth > 0) --ctx->underlineDepth;
       break;
     case MD_SPAN_DEL:
-      ctx->textBuf += "</s>";
+      if (ctx->strikeDepth > 0) --ctx->strikeDepth;
       break;
     default:
       break;
@@ -367,25 +420,27 @@ namespace {
     auto& buf = ctx->inTable ? ctx->tableCellBuf : ctx->textBuf;
     switch (type) {
     case MD_TEXT_NORMAL:
-      if (ctx->inCodeBlock) {
-        buf.append(text, size);
-      } else if (ctx->inTable) {
+      if (ctx->inCodeBlock || ctx->inTable) {
         buf.append(text, size);
       } else {
-        escapeForPango(buf, text, size);
+        appendStyled(*ctx, std::string_view(text, size));
       }
       break;
     case MD_TEXT_CODE:
-      buf.append(text, size);
+      if (ctx->inTable || ctx->inCodeBlock) buf.append(text, size);
+      else appendStyled(*ctx, std::string_view(text, size));
       break;
     case MD_TEXT_SOFTBR:
-      buf += ' ';
+      if (ctx->inTable || ctx->inCodeBlock) buf += ' ';
+      else appendStyled(*ctx, " ");
       break;
     case MD_TEXT_BR:
-      buf += '\n';
+      if (ctx->inTable || ctx->inCodeBlock) buf += '\n';
+      else appendStyled(*ctx, "\n");
       break;
     case MD_TEXT_ENTITY:
-      buf.append(text, size);
+      if (ctx->inTable || ctx->inCodeBlock) buf.append(text, size);
+      else appendStyled(*ctx, decodeEntity(std::string_view(text, size)));
       break;
     default:
       buf.append(text, size);
@@ -396,7 +451,14 @@ namespace {
 
 } // namespace
 
+MarkdownView::MarkdownView() {
+  m_paletteConnection = paletteChanged().connect([this] {
+    if (!m_markdown.empty()) setMarkdown(m_markdown, m_scale);
+  });
+}
+
 void MarkdownView::setMarkdown(const std::string& markdown, float scale) {
+  m_markdown = markdown;
   clear();
   m_scale = scale;
   setDirection(FlexDirection::Vertical);

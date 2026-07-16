@@ -1,21 +1,21 @@
 #pragma once
 
 #include "render/core/renderer.h"
-#include "render/text/cairo_glyph_renderer.h"
-#include "render/text/cairo_text_renderer.h"
+#include "render/text/skia_glyph_renderer.h"
+#include "render/text/skparagraph_text_renderer.h"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
-class GlSharedContext;
 class GraphicsDevice;
 class Node;
 class RenderBackend;
 class RenderTarget;
-enum class RenderGraphicsResetStatus;
+enum class RenderDeviceStatus;
 struct Mat3;
 
 class RenderContext : public Renderer {
@@ -26,20 +26,18 @@ public:
   RenderContext(const RenderContext&) = delete;
   RenderContext& operator=(const RenderContext&) = delete;
 
-  void initialize(GlSharedContext& shared);
   void initializeGraphite(GraphicsDevice& graphics);
   void cleanup();
-  void prepareForGraphicsReset();
-  void restoreAfterGraphicsReset(GlSharedContext& shared);
-  void finishGraphicsResetRecovery() noexcept { m_graphicsResetPending = false; }
+  void prepareForGraphicsDeviceRebuild();
+  void resumeAfterGraphicsDeviceRebuild();
 
   void renderScene(RenderTarget& target, Node* sceneRoot);
-  void setGraphicsResetCallback(std::function<void(RenderGraphicsResetStatus)> callback) {
-    m_graphicsResetCallback = std::move(callback);
+  void setDeviceStatusCallback(std::function<void(RenderDeviceStatus)> callback) {
+    m_deviceStatusCallback = std::move(callback);
   }
   // Returns false if the surface could not be made current (e.g. teardown);
   // best-effort callers may ignore it, render paths must skip the frame.
-  bool makeCurrent(RenderTarget& target);
+  bool selectTarget(RenderTarget& target);
   // Sync text/glyph renderer content scale to the given target's
   // buffer-to-logical ratio. Must be called before any measureText /
   // measureGlyph performed on behalf of this target, because those
@@ -63,7 +61,14 @@ public:
   [[nodiscard]] TextMetrics measureText(
       std::string_view text, float fontSize, FontWeight fontWeight = FontWeight::Normal, float maxWidth = 0.0f,
       int maxLines = 0, TextAlign align = TextAlign::Start, std::string_view fontFamily = {},
-      TextEllipsize ellipsize = TextEllipsize::End, bool useMarkup = false
+      TextEllipsize ellipsize = TextEllipsize::End,
+      ParagraphDirection direction = ParagraphDirection::Automatic
+  ) override;
+  [[nodiscard]] TextMetrics measureStyledText(
+      const std::vector<StyledTextRun>& runs, float fontSize, FontWeight fontWeight = FontWeight::Normal,
+      float maxWidth = 0.0f, int maxLines = 0, TextAlign align = TextAlign::Start,
+      std::string_view fontFamily = {}, TextEllipsize ellipsize = TextEllipsize::End,
+      ParagraphDirection direction = ParagraphDirection::Automatic
   ) override;
   [[nodiscard]] TextMetrics measureFont(float fontSize, FontWeight fontWeight) override;
   void measureTextCursorStops(
@@ -80,21 +85,26 @@ public:
   [[nodiscard]] std::uint64_t textMetricsGeneration() const noexcept override { return m_textMetricsGeneration; }
 
 private:
-  bool makeCurrentNoSurface();
-  void handleGraphicsReset(RenderGraphicsResetStatus status);
+  friend class RenderTarget;
+
+  void registerTarget(RenderTarget& target);
+  void unregisterTarget(RenderTarget& target) noexcept;
+  void handleDeviceLoss(RenderDeviceStatus status);
   void renderNode(
       const Node* node, const Mat3& parentTransform, float parentOpacity, float sw, float sh, float bw, float bh,
       float clipLeft, float clipTop, float clipRight, float clipBottom, bool hasClip
   );
 
   std::unique_ptr<RenderBackend> m_backend;
-  CairoTextRenderer m_textRenderer;
-  CairoGlyphRenderer m_glyphRenderer;
+  SkParagraphTextRenderer m_textRenderer;
+  SkiaGlyphRenderer m_glyphRenderer;
   std::string m_textFontFamily = "sans-serif";
   float m_renderScale = 1.0f;
   std::uint64_t m_textMetricsGeneration = 1;
   std::uint64_t m_gpuResourceGeneration = 0;
   bool m_glyphTexturesDirty = false;
-  bool m_graphicsResetPending = false;
-  std::function<void(RenderGraphicsResetStatus)> m_graphicsResetCallback;
+  bool m_deviceLossHandled = false;
+  std::function<void(RenderDeviceStatus)> m_deviceStatusCallback;
+  std::unordered_set<RenderTarget*> m_targets;
+  bool m_targetsSuspended = false;
 };

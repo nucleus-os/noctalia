@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 class Renderer;
 
@@ -40,6 +41,7 @@ public:
   Label();
 
   bool setText(std::string_view text);
+  bool setStyledText(std::vector<StyledTextRun> runs);
   void setFontSize(float size);
   void setFontFamily(std::string family);
   void setColor(const ColorSpec& color);
@@ -50,9 +52,9 @@ public:
   void setMaxLines(int maxLines);
   void setFontWeight(FontWeight fontWeight);
   void setTextAlign(TextAlign align);
+  void setParagraphDirection(ParagraphDirection direction);
   // Which end of an overflowing single line gets the ellipsis (Start keeps the tail, e.g. file paths).
   void setEllipsize(TextEllipsize ellipsize);
-  void setUseMarkup(bool markup);
   // Text uses the resolved font line box; InkCentered centers the current glyph ink.
   void setBaselineMode(LabelBaselineMode mode);
   void setShadow(const Color& color, float offsetX, float offsetY);
@@ -74,6 +76,7 @@ public:
   [[nodiscard]] float maxWidth() const noexcept;
   [[nodiscard]] FontWeight fontWeight() const noexcept;
   [[nodiscard]] TextAlign textAlign() const noexcept;
+  [[nodiscard]] ParagraphDirection paragraphDirection() const noexcept;
   [[nodiscard]] TextEllipsize ellipsize() const noexcept;
   [[nodiscard]] LabelBaselineMode baselineMode() const noexcept { return m_baselineMode; }
   [[nodiscard]] float baselineOffset() const noexcept { return m_baselineOffset; }
@@ -111,9 +114,10 @@ private:
 
   // User-visible text (wire text may duplicate for seamless marquee).
   std::string m_plainText;
+  std::vector<StyledTextRun> m_styledRuns;
 
   // Memoized measure() inputs — lets repeated layout passes with identical
-  // text skip the Pango/fontconfig path entirely.
+  // text skip general-purpose font fallback entirely.
   std::string m_cachedText;
   float m_cachedFontSize = 0.0f;
   float m_cachedMaxWidth = 0.0f;
@@ -124,6 +128,7 @@ private:
   std::uint64_t m_cachedTextMetricsGeneration = 0;
   int m_cachedMaxLines = 0;
   TextAlign m_cachedTextAlign = TextAlign::Start;
+  ParagraphDirection m_cachedParagraphDirection = ParagraphDirection::Automatic;
   LabelBaselineMode m_cachedBaselineMode = LabelBaselineMode::Text;
   FontWeight m_cachedFontWeight = FontWeight::Normal;
   bool m_cachedAutoScroll = false;

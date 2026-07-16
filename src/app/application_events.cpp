@@ -4,20 +4,19 @@
 #include "core/log.h"
 #include "dbus/bluetooth/bluetooth_service.h"
 #include "dbus/network/inetwork_service.h"
+#include "render/backend/graphite_offscreen_golden.h"
+#include "render/backend/graphite_texture_manager.h"
 #include "render/backend/render_backend.h"
 
 #include <algorithm>
-#include <chrono>
+#include <array>
+#include <cstdlib>
 #include <exception>
+#include <string_view>
+#include <vector>
 
 namespace {
   constexpr Logger kLog("app");
-
-  // A reset that outlives this many retries is not a transient GPU hiccup. Back off between
-  // attempts so a dead GPU does not spin the loop, and give up rather than retry forever.
-  constexpr int kMaxGraphicsRecoveryAttempts = 8;
-  constexpr std::chrono::milliseconds kGraphicsRecoveryBaseDelay{250};
-  constexpr std::chrono::milliseconds kGraphicsRecoveryMaxDelay{5000};
 
   std::string_view powerProfileOriginName(PowerProfilesChangeOrigin origin) {
     switch (origin) {
@@ -38,68 +37,10 @@ void Application::onIconThemeChanged() {
   m_notificationToast.requestLayout();
 }
 
-void Application::onGraphicsReset(RenderGraphicsResetStatus status) {
-  (void)status;
-  if (m_graphicsRecoveryScheduled) {
+void Application::onGraphiteDeviceLost(RenderDeviceStatus status) {
+  if (status != RenderDeviceStatus::Lost) {
     return;
   }
-  m_graphicsRecoveryScheduled = true;
-  DeferredCall::callLater([this]() { recoverGraphicsAfterReset(); });
-}
-
-void Application::recoverGraphicsAfterReset() {
-  m_graphicsRecoveryScheduled = false;
-  try {
-    // A robust-context reset invalidates the whole share group. Tear down every
-    // child before replacing the root, and do it outside the render callback.
-    m_lockScreen.prepareForGraphicsReset();
-    m_backdrop.prepareForGraphicsReset();
-    m_thumbnailService.abandonGpuResources();
-    m_sharedTextureCache.abandonGpuResources();
-    m_asyncTextureCache.abandonGpuResources();
-    m_renderContext.prepareForGraphicsReset();
-
-    m_glShared.recreateRootContext();
-    m_renderContext.restoreAfterGraphicsReset(m_glShared);
-    m_backdrop.restoreAfterGraphicsReset();
-
-    m_sharedTextureCache.reloadResidentTextures();
-    m_asyncTextureCache.reloadResidentTextures();
-    m_renderContext.finishGraphicsResetRecovery();
-    m_backdrop.finishGraphicsResetRecovery();
-    m_thumbnailService.invalidateGpuResources(m_renderContext.backend().textureManager());
-    m_wallpaper.onGpuResourcesInvalidated();
-    m_backdrop.onGpuResourcesInvalidated();
-    m_lockScreen.onGpuResourcesInvalidated();
-    m_trayMenu.requestLayout();
-    m_settingsWindow.requestRedraw();
-    m_screenCorners.requestRedraw();
-    requestAllSurfacesRedraw();
-    m_graphicsRecoveryAttempts = 0;
-    kLog.info("graphics context recovery completed");
-  } catch (const std::exception& e) {
-    ++m_graphicsRecoveryAttempts;
-    if (m_graphicsRecoveryAttempts >= kMaxGraphicsRecoveryAttempts) {
-      kLog.error(
-          "graphics context recovery failed after {} attempts; rendering stays disabled: {}",
-          m_graphicsRecoveryAttempts, e.what()
-      );
-      return;
-    }
-
-    const auto delay =
-        std::min(kGraphicsRecoveryBaseDelay * (1 << (m_graphicsRecoveryAttempts - 1)), kGraphicsRecoveryMaxDelay);
-    kLog.warn(
-        "graphics context recovery failed (attempt {}); retrying in {}ms: {}", m_graphicsRecoveryAttempts,
-        delay.count(), e.what()
-    );
-    m_graphicsRecoveryScheduled = true;
-    m_graphicsRecoveryTimer.start(delay, [this]() { recoverGraphicsAfterReset(); });
-  }
-}
-
-void Application::onGraphiteDeviceLost(RenderGraphicsResetStatus status) {
-  (void)status;
   if (m_graphiteDeviceRecoveryScheduled || m_graphiteDeviceRecoveryAttempted) {
     if (m_graphiteDeviceRecoveryAttempted && !m_graphiteDeviceRecoveryScheduled) {
       kLog.error("Graphite device was lost again after the one permitted recovery attempt");
@@ -119,10 +60,42 @@ void Application::rebuildGraphiteDevice() {
   kLog.warn("rebuilding process-wide Vulkan/Graphite device after VK_ERROR_DEVICE_LOST");
 
   const GraphicsDeviceIdentity previousIdentity = m_graphicsDevice.identity();
-  const bool panelSurfaceAttached = m_panelManager.detachGraphiteSurfaceForDeviceRebuild();
+  const bool integrationProbe = [] {
+    const char* value = std::getenv("NOCTALIA_TEST_GRAPHICS_DEVICE_REBUILD");
+    return value != nullptr && std::string_view(value) == "1";
+  }();
+  std::vector<TextureHandle> staleTextureProbes;
   try {
+    if (integrationProbe) {
+      auto& probeTextures = m_renderContext.backend().textureManager();
+      staleTextureProbes.reserve(32);
+      for (std::uint8_t index = 0; index < 32; ++index) {
+        const std::array<std::uint8_t, 4> probePixel{
+            static_cast<std::uint8_t>(index * 7U), static_cast<std::uint8_t>(255U - index * 5U),
+            static_cast<std::uint8_t>(index * 3U), 255
+        };
+        TextureHandle probe = probeTextures.loadFromRgba(probePixel.data(), 1, 1, false);
+        if (!probe.valid()) {
+          throw std::runtime_error("device-recovery gate could not create its texture retirement probes");
+        }
+        staleTextureProbes.push_back(probe);
+        if (index % 2U == 0U) {
+          // Keep the original ID for the post-rebuild stale-generation check,
+          // but retire this allocation before teardown so both queued and
+          // still-live manager resources are covered.
+          TextureHandle retired = probe;
+          probeTextures.unload(retired);
+        }
+      }
+    }
+    m_wallpaper.prepareForGraphicsDeviceRebuild();
+    m_backdrop.prepareForGraphicsDeviceRebuild();
     m_cefService->prepareForGraphicsDeviceRebuild();
-    m_graphiteRenderContext.cleanup();
+    m_sharedTextureCache.abandonGpuResources();
+    m_asyncTextureCache.abandonGpuResources();
+    m_thumbnailService.abandonGpuResources();
+    m_renderContext.prepareForGraphicsDeviceRebuild();
+    m_renderContext.cleanup();
     m_graphicsDevice.rebuild();
     const GraphicsDeviceIdentity rebuiltIdentity = m_graphicsDevice.identity();
     if (rebuiltIdentity.uuid != previousIdentity.uuid) {
@@ -130,11 +103,41 @@ void Application::rebuildGraphiteDevice() {
           "Vulkan recovery selected a different GPU than the running CEF process"
       );
     }
-    m_graphiteRenderContext.initializeGraphite(m_graphicsDevice);
-    m_graphiteRenderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
-    m_graphiteRenderContext.invalidateGpuResourcesNextFrame();
+    m_renderContext.initializeGraphite(m_graphicsDevice);
+    m_renderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
+    auto& textures = m_renderContext.backend().textureManager();
+    m_sharedTextureCache.initialize(textures);
+    m_sharedTextureCache.reloadResidentTextures();
+    m_asyncTextureCache.initialize(textures);
+    m_asyncTextureCache.reloadResidentTextures();
+    (void)m_thumbnailService.uploadPending(textures);
+    if (integrationProbe && !staleTextureProbes.empty()) {
+      auto* graphiteTextures = dynamic_cast<GraphiteTextureManager*>(&textures);
+      if (graphiteTextures == nullptr) {
+        throw std::runtime_error("device recovery did not restore a Graphite texture manager");
+      }
+      for (const TextureHandle& stale : staleTextureProbes) {
+        if (graphiteTextures->image(stale.id) != nullptr) {
+          throw std::runtime_error("device recovery allowed a stale texture generation to resolve");
+        }
+      }
+      constexpr std::array<std::uint8_t, 4> replacementPixel{0, 255, 255, 255};
+      TextureHandle replacement = textures.loadFromRgba(replacementPixel.data(), 1, 1, false);
+      const bool aliasedStale = std::ranges::any_of(staleTextureProbes, [&](const TextureHandle& stale) {
+        return replacement.id == stale.id;
+      });
+      if (!replacement.valid() || aliasedStale) {
+        throw std::runtime_error("device recovery reused a stale texture generation");
+      }
+      textures.unload(replacement);
+      runGraphiteOffscreenGolden(m_graphicsDevice);
+      kLog.info("device-recovery stale-generation and full Graphite golden passed");
+    }
+    m_renderContext.resumeAfterGraphicsDeviceRebuild();
     m_cefService->resumeAfterGraphicsDeviceRebuild(m_graphicsDevice);
-    m_panelManager.reattachGraphiteSurfaceAfterDeviceRebuild(panelSurfaceAttached);
+    m_wallpaper.resumeAfterGraphicsDeviceRebuild();
+    m_backdrop.resumeAfterGraphicsDeviceRebuild();
+    requestAllSurfacesRedraw();
     kLog.info("Vulkan/Graphite device recovery completed; requested a fresh CEF frame");
   } catch (const std::exception& error) {
     kLog.error("Vulkan/Graphite device recovery failed: {}", error.what());

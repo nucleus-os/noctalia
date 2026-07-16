@@ -139,15 +139,15 @@ private:
   bool redoEdit();
   bool restoreFromHistory(std::vector<EditSnapshot>& source, std::vector<EditSnapshot>& target);
   void restoreEditSnapshot(const EditSnapshot& snapshot);
-  [[nodiscard]] std::size_t xToByteOffset(float localX) const;
-  [[nodiscard]] float stopXForByte(std::size_t bytePos) const;
+  [[nodiscard]] std::size_t xToByteOffset(float localX);
+  [[nodiscard]] float stopXForByte(std::size_t bytePos, bool alternate = false) const;
   void syncPasswordGlyphNodes(std::size_t count);
 
   // Multiline mode: geometry comes from the wrapped cursor-stop rects
   // (m_stopRect, parallel to m_stopByte) instead of the 1-D x array.
   [[nodiscard]] bool multilineStopsValid() const noexcept;
   [[nodiscard]] std::size_t stopIndexForByte(std::size_t bytePos) const;
-  [[nodiscard]] std::size_t pointToByteOffset(float localX, float localY) const;
+  [[nodiscard]] std::size_t pointToByteOffset(float localX, float localY);
   [[nodiscard]] std::size_t lineStartForByte(std::size_t bytePos) const;
   [[nodiscard]] std::size_t lineEndForByte(std::size_t bytePos) const;
   [[nodiscard]] std::size_t byteForVerticalMove(std::size_t from, int lineDelta);
@@ -168,8 +168,9 @@ private:
   [[nodiscard]] std::size_t visibleLabelStartByte() const;
   [[nodiscard]] std::size_t visibleLabelEndByte(float contentWidth, std::size_t startByte) const;
 
-  static std::size_t nextCharPos(const std::string& s, std::size_t pos);
-  static std::size_t prevCharPos(const std::string& s, std::size_t pos);
+  [[nodiscard]] std::size_t nextCharPos(std::size_t pos) const;
+  [[nodiscard]] std::size_t prevCharPos(std::size_t pos) const;
+  void refreshGraphemeBreaks();
   static std::string utf32ToUtf8(std::uint32_t codepoint);
 
   RectNode* m_background = nullptr;
@@ -185,6 +186,8 @@ private:
   std::string m_placeholder;
   std::size_t m_cursorPos = 0;
   std::size_t m_selectionAnchor = 0;
+  bool m_cursorAlternate = false;
+  bool m_selectionAnchorAlternate = false;
   std::size_t m_preeditStart = 0;
   std::size_t m_preeditLen = 0;
   std::vector<EditSnapshot> m_undoStack;
@@ -196,6 +199,7 @@ private:
   std::vector<float> m_stopX;
   std::vector<std::size_t> m_stopByte;
   std::vector<TextCursorStop> m_stopRect;
+  std::vector<std::size_t> m_graphemeBreaks{0};
   float m_stopsBuiltForWidth = -1.0f;
   bool m_textMetricsDirty = true;
   float m_cachedLabelY = 0.0f;

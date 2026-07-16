@@ -21,6 +21,22 @@ enum class RenderFrameStatus : std::uint8_t {
   Failed,
 };
 
+[[nodiscard]] constexpr RenderFrameStatus classifyVulkanWsiResult(VkResult result) noexcept {
+  switch (result) {
+  case VK_SUCCESS:
+    return RenderFrameStatus::Presented;
+  case VK_SUBOPTIMAL_KHR:
+  case VK_ERROR_OUT_OF_DATE_KHR:
+    return RenderFrameStatus::RecreateSwapchain;
+  case VK_ERROR_SURFACE_LOST_KHR:
+    return RenderFrameStatus::SurfaceLost;
+  case VK_ERROR_DEVICE_LOST:
+    return RenderFrameStatus::DeviceLost;
+  default:
+    return RenderFrameStatus::Failed;
+  }
+}
+
 // Vulkan/Wayland WSI for one wl_surface. Every surface has an independent
 // FIFO swapchain while drawing and resource allocation share GraphicsDevice's
 // one Graphite recorder.
@@ -42,6 +58,10 @@ public:
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] SkCanvas* beginFrame(RenderFrameStatus& status);
   [[nodiscard]] RenderFrameStatus endFrame(const std::function<void()>& recordingSubmitted = {});
+  // True only for the validation seam which reports device loss after a real,
+  // synchronously completed submit. Such a target must use orderly teardown
+  // rather than abandoning genuinely lost-device synchronization objects.
+  [[nodiscard]] bool deviceLossWasInjected() const noexcept;
   [[nodiscard]] VkFormat format() const noexcept;
   [[nodiscard]] VkExtent2D extent() const noexcept;
 

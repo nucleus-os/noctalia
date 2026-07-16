@@ -6,14 +6,14 @@
 
 #include <cstdint>
 
-class GlSharedContext;
+class GraphicsDevice;
 
 class BackdropSurface : public LayerSurface {
 public:
   using LayerSurface::LayerSurface;
   ~BackdropSurface() override;
 
-  void setSharedGl(GlSharedContext* shared) noexcept { m_shared = shared; }
+  void setGraphicsDevice(GraphicsDevice* graphics) noexcept { m_graphics = graphics; }
   void setBlurIntensity(float v) noexcept;
   void setTintIntensity(float v) noexcept;
   void setTintColor(float r, float g, float b) noexcept;
@@ -38,7 +38,7 @@ private:
   std::uint32_t m_bufW = 0;
   std::uint32_t m_bufH = 0;
 
-  GlSharedContext* m_shared = nullptr;
+  GraphicsDevice* m_graphics = nullptr;
   float m_blurIntensity = 0.5f;
   float m_tintIntensity = 0.3f;
   float m_tintR = 0.0f;

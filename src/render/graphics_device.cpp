@@ -492,14 +492,32 @@ void GraphicsDevice::createGraphite() {
 }
 
 void GraphicsDevice::destroyDeviceObjects() {
-  m_textureManager.reset();
   if (m_device == VK_NULL_HANDLE) {
+    m_textureManager.reset();
     m_graphite.reset();
     return;
   }
   // Teardown and the one-shot device-loss rebuild are the only paths allowed
   // to idle the whole device.
   (void)vkDeviceWaitIdle(m_device);
+  if (m_graphite != nullptr && m_graphite->context != nullptr) {
+    m_graphite->context->checkAsyncWorkCompletion();
+  }
+  // Texture destruction enqueues recorder finish callbacks which drop the
+  // SkImage references and delete their BackendTextures. Drain that retirement
+  // recording explicitly: recorder destruction alone does not guarantee that
+  // unsnapped finish callbacks run before vkDestroyDevice.
+  m_textureManager.reset();
+  if (m_graphite != nullptr && m_graphite->recorder != nullptr && m_graphite->context != nullptr) {
+    auto retirementRecording = m_graphite->recorder->snap();
+    if (retirementRecording != nullptr) {
+      skgpu::graphite::InsertRecordingInfo insertInfo;
+      insertInfo.fRecording = retirementRecording.get();
+      (void)m_graphite->context->insertRecording(insertInfo);
+      (void)m_graphite->context->submit(skgpu::graphite::SyncToCpu::kYes);
+      m_graphite->context->checkAsyncWorkCompletion();
+    }
+  }
   m_graphite.reset();
   vkDestroyDevice(m_device, nullptr);
   m_device = VK_NULL_HANDLE;

@@ -961,7 +961,7 @@ std::unique_ptr<Flex> TestPanel::buildTextLabSection(float scale) {
     row->addChild(
         ui::label({
             .out = &m_fontStatusLabel,
-            .text = "Live font swap rebuilds Pango cache.",
+            .text = "Live font swap rebuilds the paragraph cache.",
             .fontSize = Style::fontSizeCaption * scale,
             .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
         })
@@ -1088,7 +1088,7 @@ std::unique_ptr<Flex> TestPanel::buildTextLabSection(float scale) {
   }
 
   // ── Baseline mode test (cap-only ↔ descender swap). Latin optical mode
-  // ── logical mode follows Pango metrics; ink-centered mode follows visible ink.
+  // ── logical mode follows paragraph metrics; ink-centered mode follows visible ink.
   {
     auto col = makeLabCard();
     col->addChild(makeLabTitle("Baseline mode (logical vs ink-centered)"));

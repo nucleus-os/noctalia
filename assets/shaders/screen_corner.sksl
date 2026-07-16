@@ -1,0 +1,25 @@
+uniform float2 size;
+uniform float2 pixelScale;
+layout(color) uniform float4 color;
+uniform int corner;
+uniform float exponent;
+uniform float softness;
+
+float4 main(float2 local) {
+  float2 center = size;
+  if (corner == 1) {
+    center = float2(0.0, size.y);
+  } else if (corner == 2) {
+    center = float2(0.0, 0.0);
+  } else if (corner == 3) {
+    center = float2(size.x, 0.0);
+  }
+  float2 radius = max(size, float2(1.0));
+  float2 normalized = abs(local - center) / radius;
+  float shape = pow(normalized.x, exponent) + pow(normalized.y, exponent) - 1.0;
+  float scale = max(min(pixelScale.x, pixelScale.y), 1.0);
+  float aa = max(softness / (min(radius.x, radius.y) * scale), 0.0001);
+  float coverage = smoothstep(-aa, aa, shape);
+  half alpha = color.a * half(coverage);
+  return float4(color.rgb * alpha, alpha);
+}

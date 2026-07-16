@@ -377,7 +377,7 @@ namespace {
         return;
       }
 
-      const TextureHandle handle = m_thumbnails->peek(m_thumbnailPath);
+      const TextureHandle handle = m_thumbnails->peek(m_thumbnailPath, renderer.textureManager());
       if (handle.id == 0) {
         m_image->clear(renderer);
         m_image->setVisible(false);
@@ -1274,7 +1274,7 @@ void ClipboardPanel::rebuildPreview(Renderer& renderer, float width, float heigh
       text.resize(kMaxPreviewChars);
     }
 
-    // Expand tabs to 4 spaces once up front; Pango's natural wrapping then
+    // Expand tabs to 4 spaces once up front; paragraph wrapping then
     // handles everything else — newlines become paragraph breaks, each
     // paragraph's leading whitespace stays on its first line, continuations
     // have no indent, and the whole layout ellipsizes at kMaxPreviewLines.

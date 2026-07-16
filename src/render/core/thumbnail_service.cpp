@@ -252,12 +252,6 @@ ThumbnailService::subscribeReady(const std::string& path, ReadyCallback callback
     return {};
   }
 
-  const TextureHandle current = peek(path, targetPx);
-  if (current.id != 0) {
-    callback(path, current);
-    return {};
-  }
-
   const std::uint64_t id = m_nextListenerId++;
   m_readyListeners.emplace(
       id, ReadyListener{.key = RequestKey{.path = path, .targetPx = targetPx}, .callback = std::move(callback)}
@@ -281,20 +275,21 @@ TextureHandle ThumbnailService::acquire(const std::string& path, int targetPx) {
   const RequestKey key{.path = path, .targetPx = targetPx};
   CacheEntry& entry = m_entries[key];
   ++entry.refCount;
-  if (entry.handle.id != 0 || entry.failed) {
-    return entry.handle;
+  if (!entry.handles.empty() || entry.failed) {
+    return entry.handles.empty() ? TextureHandle{} : entry.handles.begin()->second;
   }
 
   enqueueDecodeIfNeeded(key);
   return {};
 }
 
-TextureHandle ThumbnailService::peek(const std::string& path, int targetPx) const {
+TextureHandle ThumbnailService::peek(const std::string& path, TextureManager& textures, int targetPx) const {
   const auto it = m_entries.find(RequestKey{.path = path, .targetPx = targetPx});
   if (it == m_entries.end()) {
     return {};
   }
-  return it->second.handle;
+  const auto handle = it->second.handles.find(&textures);
+  return handle != it->second.handles.end() ? handle->second : TextureHandle{};
 }
 
 void ThumbnailService::release(const std::string& path, int targetPx) {
@@ -313,8 +308,10 @@ void ThumbnailService::release(const std::string& path, int targetPx) {
     return;
   }
 
-  if (entry.handle.id != 0 && m_textureManager != nullptr) {
-    m_textureManager->unload(entry.handle);
+  for (auto& [owner, handle] : entry.handles) {
+    if (owner != nullptr && handle.valid()) {
+      owner->unload(handle);
+    }
   }
   m_entries.erase(it);
 
@@ -336,18 +333,12 @@ void ThumbnailService::enqueueDecodeIfNeeded(const RequestKey& key) {
 }
 
 bool ThumbnailService::uploadPending(TextureManager& textures) {
-  m_textureManager = &textures;
-
   std::deque<DecodedJob> jobs;
   {
     std::scoped_lock lock(m_resultMutex);
     jobs = std::move(m_results);
     m_results.clear();
   }
-  if (jobs.empty()) {
-    return false;
-  }
-
   bool changed = false;
   for (auto& job : jobs) {
     bool dropped = false;
@@ -373,43 +364,42 @@ bool ThumbnailService::uploadPending(TextureManager& textures) {
       continue;
     }
 
-    TextureHandle handle = textures.loadFromRgba(job.rgba.data(), job.width, job.height);
-    if (handle.id == 0) {
-      kLog.warn("failed to upload thumbnail texture for {}", job.key.path);
-      entryIt->second.failed = true;
-      changed = true;
+    entryIt->second.rgba = std::move(job.rgba);
+    entryIt->second.width = job.width;
+    entryIt->second.height = job.height;
+    entryIt->second.failed = false;
+  }
+
+  for (auto& [key, entry] : m_entries) {
+    if (entry.refCount == 0 || entry.failed || entry.rgba.empty() || entry.handles.contains(&textures)) {
       continue;
     }
-
-    if (entryIt->second.handle.id != 0 && m_textureManager != nullptr) {
-      m_textureManager->unload(entryIt->second.handle);
+    TextureHandle handle = textures.loadFromRgba(entry.rgba.data(), entry.width, entry.height);
+    if (handle.id == 0) {
+      kLog.warn("failed to upload thumbnail texture for {}", key.path);
+      continue;
     }
-    entryIt->second.handle = handle;
-    entryIt->second.failed = false;
+    entry.handles.emplace(&textures, handle);
     changed = true;
-    notifyReady(job.key, handle);
+    notifyReady(key, handle);
   }
   return changed;
 }
 
 void ThumbnailService::invalidateGpuResources(TextureManager& textures) {
-  m_textureManager = &textures;
-
-  std::vector<RequestKey> liveKeys;
-  liveKeys.reserve(m_entries.size());
   for (auto& [key, entry] : m_entries) {
-    if (entry.handle.id != 0) {
-      m_textureManager->unload(entry.handle);
-    }
-    entry.handle = {};
-    entry.failed = false;
-    if (entry.refCount > 0) {
-      liveKeys.push_back(key);
+    (void)key;
+    if (auto handle = entry.handles.find(&textures); handle != entry.handles.end()) {
+      textures.unload(handle->second);
+      entry.handles.erase(handle);
     }
   }
+}
 
-  for (const RequestKey& key : liveKeys) {
-    enqueueDecodeIfNeeded(key);
+void ThumbnailService::abandonGpuResources() noexcept {
+  for (auto& [key, entry] : m_entries) {
+    (void)key;
+    entry.handles.clear();
   }
 }
 
@@ -466,8 +456,10 @@ void ThumbnailService::pushResult(DecodedJob job) {
 void ThumbnailService::deleteAllTextures() {
   for (auto& [key, entry] : m_entries) {
     (void)key;
-    if (entry.handle.id != 0 && m_textureManager != nullptr) {
-      m_textureManager->unload(entry.handle);
+    for (auto& [owner, handle] : entry.handles) {
+      if (owner != nullptr && handle.valid()) {
+        owner->unload(handle);
+      }
     }
   }
   m_entries.clear();

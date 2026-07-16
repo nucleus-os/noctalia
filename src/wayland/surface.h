@@ -115,6 +115,10 @@ public:
   void requestLayout();
   void requestRedraw();
   void requestFrameTick();
+  // Request the next compositor frame callback without drawing or attaching a
+  // new buffer. Useful for clocks whose producer may legitimately emit no
+  // damage for a frame.
+  void requestCallbackTick();
   void renderNow();
   void setAnimationManager(AnimationManager* manager) noexcept { m_animationManager = manager; }
   void setSceneRoot(Node* root);

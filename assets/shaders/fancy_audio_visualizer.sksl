@@ -1,0 +1,337 @@
+
+uniform shader u_audio_source;
+uniform float u_texture_width;
+uniform float u_time;
+uniform float u_item_width;
+uniform float u_item_height;
+uniform float4 u_primary_color;
+uniform float4 u_secondary_color;
+uniform float u_sensitivity;
+uniform float u_rotation_speed;
+uniform float u_bar_width;
+uniform float u_ring_opacity;
+uniform float u_corner_radius;
+uniform float u_bloom_intensity;
+uniform float u_mode;
+uniform float u_wave_thickness;
+uniform float u_inner_diameter;
+
+const float TWOPI = 6.28318530718;
+const float PI = 3.14159265359;
+const float NBARS = 32.0;
+const float MAX_VISUAL_RADIUS = 0.95;
+
+bool hasRings() { return u_mode >= 2.0; }
+bool hasBars() { return u_mode == 0.0 || u_mode == 3.0 || u_mode >= 5.0; }
+bool hasWave() { return u_mode == 1.0 || u_mode == 4.0 || u_mode >= 5.0; }
+
+float getAudio(float pos) {
+    return u_audio_source.eval(float2(clamp(pos, 0.0, 1.0) * max(u_texture_width - 1.0, 0.0) + 0.5, 0.5)).r;
+}
+
+float smoothAudio(float pos) {
+    float idx = pos * (NBARS - 1.0);
+    float fracPart = fract(idx);
+    float i0 = floor(idx) / (NBARS - 1.0);
+    float i1 = ceil(idx) / (NBARS - 1.0);
+    return mix(getAudio(i0), getAudio(i1), fracPart) * u_sensitivity;
+}
+
+float getBass() { return smoothAudio(0.05); }
+float getMid() { return smoothAudio(0.3); }
+float getHighMid() { return smoothAudio(0.6); }
+float getTreble() { return smoothAudio(0.9); }
+
+float roundedBoxSDF(float2 center, float2 size, float radius) {
+    float2 q = abs(center) - size + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+}
+
+float catmullAudio(float mirroredPos) {
+    float bandPos = mirroredPos * (NBARS - 1.0);
+    float fband1 = floor(bandPos);
+    float fband0 = max(fband1 - 1.0, 0.0);
+    float fband2 = min(fband1 + 1.0, NBARS - 1.0);
+    float fband3 = min(fband1 + 2.0, NBARS - 1.0);
+
+    float t = fract(bandPos);
+    float p0 = getAudio(fband0 / (NBARS - 1.0)) * u_sensitivity;
+    float p1 = getAudio(fband1 / (NBARS - 1.0)) * u_sensitivity;
+    float p2 = getAudio(fband2 / (NBARS - 1.0)) * u_sensitivity;
+    float p3 = getAudio(fband3 / (NBARS - 1.0)) * u_sensitivity;
+
+    float t2 = t * t;
+    float t3 = t2 * t;
+    float smoothed = 0.5 * (
+        (2.0 * p1) +
+        (-p0 + p2) * t +
+        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    );
+    return max(smoothed, 0.0);
+}
+
+void addRings(inout float4 color, float theta, float d, float iTime, float bass, float mid, float highMid, float treble) {
+    float innerRadius = u_inner_diameter / 2.0;
+
+    if (d < innerRadius * 0.6) {
+        float wave = mid * 0.8;
+        float ripple = sin(d * 25.0 + wave * 15.0 - iTime * 2.0);
+        if (ripple > 0.7) {
+            float intensity = clamp(mid * 0.6, 0.0, 0.4);
+            color = max(color, u_secondary_color * intensity * u_ring_opacity);
+        }
+    }
+
+    float energyRad = innerRadius * 0.65;
+    float energyThickness = 0.015 + clamp(highMid * 0.02, 0.0, 0.03);
+    if (d > energyRad - energyThickness && d < energyRad + energyThickness) {
+        float segmentAngle = theta * 8.0 + highMid * 3.0 + iTime;
+        if (mod(segmentAngle, 1.0) < 0.6) {
+            float alpha = clamp(highMid * 2.0, 0.3, 1.0) * u_ring_opacity;
+            color = max(color, mix(u_primary_color, u_secondary_color, 0.5) * alpha);
+        }
+    }
+
+    float particleRad = innerRadius * 0.75;
+    if (d > particleRad - 0.02 && d < particleRad + 0.02) {
+        float particleAngle = theta + treble * 2.0 + iTime * 0.5;
+        float particleSpacing = TWOPI / 16.0;
+        if (mod(particleAngle, particleSpacing) < 0.15) {
+            float brightness = 0.5 + clamp(treble * 1.5, 0.0, 0.5);
+            color = max(color, u_secondary_color * brightness * u_ring_opacity);
+        }
+    }
+
+    float gridRad = innerRadius * 0.85;
+    if (d > gridRad - 0.012 && d < gridRad + 0.012) {
+        float gridAngle = theta + iTime * u_rotation_speed;
+        float gridDensity = 0.08 + clamp(mid * 0.05, 0.0, 0.1);
+        if (mod(gridAngle, 0.2) < gridDensity) {
+            float4 gridColor = u_primary_color * 0.7 * u_ring_opacity;
+            gridColor.rgb += float3(0.1, 0.15, 0.2) * clamp(mid, 0.0, 0.8);
+            color = max(color, gridColor);
+        }
+    }
+
+    float accentRad = innerRadius * 0.92;
+    float pulse = clamp(bass * 0.08, 0.0, 0.05);
+    if (d > accentRad - pulse - 0.008 && d < accentRad + pulse + 0.015) {
+        float colorShift = clamp(bass * 0.5, 0.0, 1.0);
+        float4 ringColor = mix(u_secondary_color * 0.7, u_primary_color, colorShift);
+        ringColor.a = u_ring_opacity * max(u_primary_color.a, u_secondary_color.a);
+        ringColor.rgb *= 1.0 + bass * 0.3;
+        color = max(color, ringColor);
+    }
+
+    float outerRad = innerRadius + bass * 0.05;
+    if (d > outerRad - 0.008 && d < outerRad + 0.008) {
+        float4 outerColor = u_primary_color * u_ring_opacity;
+        outerColor.rgb += float3(0.2, 0.3, 0.4) * clamp(treble * 0.5, 0.0, 0.3);
+        outerColor.rgb *= 1.0 + bass * 0.4;
+        color = max(color, outerColor);
+    }
+}
+
+float4 computePolarWave(float2 uv, float iTime, float bass, float mid, float highMid, float treble) {
+    float aspect = u_item_width / u_item_height;
+    float2 centered = (uv - 0.5) * 2.0;
+    centered.x *= aspect;
+
+    float theta = atan(centered.y, centered.x);
+    float d = length(centered);
+    float innerRadius = u_inner_diameter / 2.0;
+    float baseRadius = 0.35;
+
+    float4 color = float4(0.0);
+    if (hasRings()) {
+        addRings(color, theta, d, iTime, bass, mid, highMid, treble);
+    }
+
+    if (hasWave()) {
+        float adjustedTheta = theta + PI + iTime * u_rotation_speed * 0.2;
+        float normalizedAngle = mod(adjustedTheta, TWOPI) / TWOPI;
+        float mirroredPos = normalizedAngle < 0.5 ? normalizedAngle * 2.0 : (1.0 - normalizedAngle) * 2.0;
+        float smoothedAudio = catmullAudio(mirroredPos);
+        float waveRadius = min(baseRadius + smoothedAudio * 0.5, MAX_VISUAL_RADIUS);
+
+        if (d >= innerRadius && d <= waveRadius) {
+            float fillFactor = (d - innerRadius) / max(waveRadius - innerRadius, 0.001);
+            float3 fillColor = mix(u_primary_color.rgb * 0.8, u_secondary_color.rgb, fillFactor);
+            fillColor *= 1.0 + bass * 0.3;
+            float fillAlpha = clamp(mix(0.4, 1.0, fillFactor) * u_wave_thickness, 0.0, 1.0);
+            color = max(color, float4(fillColor, fillAlpha * max(u_primary_color.a, u_secondary_color.a)));
+        }
+
+        float edgeThickness = u_wave_thickness * 0.025;
+        float distToEdge = abs(d - waveRadius);
+        if (distToEdge < edgeThickness) {
+            float edgeFactor = 1.0 - smoothstep(0.0, edgeThickness, distToEdge);
+            float3 edgeColor = u_secondary_color.rgb * (1.2 + smoothedAudio * 0.5);
+            if (smoothedAudio > 0.5) {
+                edgeColor += float3(0.3, 0.4, 0.5) * (smoothedAudio - 0.5);
+            }
+            color = max(color, float4(edgeColor, edgeFactor * u_secondary_color.a));
+        }
+    }
+
+    return color;
+}
+
+float4 computeBars(float2 uv, float iTime, float bass, float mid, float highMid, float treble) {
+    float aspect = u_item_width / u_item_height;
+    float2 centered = (uv - 0.5) * 2.0;
+    centered.x *= aspect;
+
+    float theta = atan(centered.y, centered.x);
+    float d = length(centered);
+    float innerRadius = u_inner_diameter / 2.0;
+    float baseRadius = 0.35;
+
+    float4 color = float4(0.0);
+    if (hasRings()) {
+        addRings(color, theta, d, iTime, bass, mid, highMid, treble);
+    }
+
+    if (hasBars() && d > innerRadius) {
+        float section = TWOPI / (NBARS * 2.0);
+        float center = section / 2.0;
+        float adjustedTheta = theta + PI + iTime * u_rotation_speed * 0.2;
+        float m = mod(adjustedTheta, section);
+        float ym = d * sin(center - m);
+        float barW = u_bar_width * 0.015;
+
+        if (abs(ym) < barW) {
+            float circlePos = mod(adjustedTheta, TWOPI) / TWOPI;
+            float mirroredPos = circlePos < 0.5 ? circlePos * 2.0 : (1.0 - circlePos) * 2.0;
+            float v = smoothAudio(mirroredPos);
+            float wave = sin(theta * 3.0 + mid * 5.0) * clamp(mid * 0.03, 0.0, 0.05);
+            v = max(v + wave, 0.0);
+
+            float barStart = innerRadius;
+            float barEnd = min(baseRadius + v * 0.5, MAX_VISUAL_RADIUS);
+            if (d >= barStart && d <= barEnd) {
+                float heightFactor = (d - barStart) / max(barEnd - barStart, 0.001);
+                float3 bottomColor = u_primary_color.rgb * 0.6;
+                float3 middleColor = u_primary_color.rgb;
+                float3 topColor = u_secondary_color.rgb;
+                float3 barColor = heightFactor < 0.5
+                    ? mix(bottomColor, middleColor, heightFactor * 2.0)
+                    : mix(middleColor, topColor, (heightFactor - 0.5) * 2.0);
+
+                barColor *= 1.0 + bass * 0.4;
+                if (heightFactor > 0.85) {
+                    barColor += float3(0.3, 0.4, 0.5) * clamp(treble * 0.8, 0.0, 0.5);
+                }
+
+                float edgeFactor = 1.0 - smoothstep(barW * 0.7, barW, abs(ym));
+                color = max(color, float4(barColor, edgeFactor * max(u_primary_color.a, u_secondary_color.a)));
+            }
+        }
+    }
+
+    return color;
+}
+
+void addBloom(inout float4 color, float2 uv, float iTime, float bass, float mid, float highMid, float treble) {
+    if (u_bloom_intensity <= 0.01 || color.a >= 0.01) {
+        return;
+    }
+
+    float aspect = u_item_width / u_item_height;
+    float2 centered = (uv - 0.5) * 2.0;
+    centered.x *= aspect;
+    float d = length(centered);
+    float theta = atan(centered.y, centered.x);
+
+    float innerRadius = u_inner_diameter / 2.0;
+    float baseRadius = 0.35;
+    float glowAmount = 0.0;
+    float3 glowColor = float3(0.0);
+
+    if (hasRings()) {
+        float outerRad = innerRadius + bass * 0.05;
+        float ringDist = abs(d - outerRad);
+        float ringGlow = exp(-ringDist * 8.0 / u_bloom_intensity) * (1.0 + bass * 0.5);
+        glowColor += u_primary_color.rgb * ringGlow;
+        glowAmount = max(glowAmount, ringGlow);
+
+        float accentRad = innerRadius * 0.92;
+        float accentDist = abs(d - accentRad);
+        float accentGlow = exp(-accentDist * 10.0 / u_bloom_intensity) * (0.7 + bass * 0.3);
+        glowColor += mix(u_secondary_color.rgb, u_primary_color.rgb, 0.5) * accentGlow;
+        glowAmount = max(glowAmount, accentGlow);
+    }
+
+    if ((hasBars() || hasWave()) && d > innerRadius * 0.8) {
+        float adjustedTheta = theta + PI + iTime * u_rotation_speed * 0.2;
+        float circlePos = mod(adjustedTheta, TWOPI) / TWOPI;
+        float mirroredPos = circlePos < 0.5 ? circlePos * 2.0 : (1.0 - circlePos) * 2.0;
+        float v = smoothAudio(mirroredPos);
+
+        if (hasWave()) {
+            float smoothedAudio = catmullAudio(mirroredPos);
+            float waveRadius = min(baseRadius + smoothedAudio * 0.5, MAX_VISUAL_RADIUS);
+            float distToWave = abs(d - waveRadius);
+            float waveGlow = exp(-distToWave * 8.0 / u_bloom_intensity) * smoothedAudio * 2.5;
+            glowColor += mix(u_primary_color.rgb, u_secondary_color.rgb, smoothedAudio) * waveGlow;
+            glowAmount = max(glowAmount, waveGlow);
+        }
+
+        if (hasBars()) {
+            float section = TWOPI / (NBARS * 2.0);
+            float m = mod(adjustedTheta, section);
+            float center = section / 2.0;
+            float barAngleDist = min(abs(m - center), section - abs(m - center));
+            float barEnd = min(baseRadius + v * 0.5, MAX_VISUAL_RADIUS);
+            float radialDist = d < innerRadius ? innerRadius - d : (d > barEnd ? d - barEnd : 0.0);
+            float totalDist = length(float2(barAngleDist * d, radialDist));
+            float barGlow = exp(-totalDist * 15.0 / u_bloom_intensity) * v * 2.0;
+            float heightFactor = clamp((d - innerRadius) / max(barEnd - innerRadius, 0.001), 0.0, 1.0);
+            glowColor += mix(u_primary_color.rgb, u_secondary_color.rgb, heightFactor) * barGlow;
+            glowAmount = max(glowAmount, barGlow);
+        }
+    }
+
+    float bloomMult = u_bloom_intensity * (1.0 + bass * 0.5);
+    color.rgb = min(glowColor * bloomMult, float3(1.5));
+    color.a = min(glowAmount * bloomMult * 0.6 * max(u_primary_color.a, u_secondary_color.a), 0.8);
+}
+
+float4 main(float2 fragCoord) {
+    float2 v_texcoord = fragCoord / float2(u_item_width, u_item_height);
+    float2 uv = v_texcoord;
+    float iTime = sin(u_time * TWOPI / 3600.0) * 1800.0 + 1800.0;
+
+    float bass = getBass();
+    float mid = getMid();
+    float highMid = getHighMid();
+    float treble = getTreble();
+
+    float4 color;
+    if (hasWave() && !hasBars()) {
+        color = computePolarWave(uv, iTime, bass, mid, highMid, treble);
+    } else if (hasBars() && !hasWave()) {
+        color = computeBars(uv, iTime, bass, mid, highMid, treble);
+    } else if (hasWave() && hasBars()) {
+        color = max(computeBars(uv, iTime, bass, mid, highMid, treble), computePolarWave(uv, iTime, bass, mid, highMid, treble));
+    } else {
+        color = computeBars(uv, iTime, bass, mid, highMid, treble);
+    }
+
+    addBloom(color, uv, iTime, bass, mid, highMid, treble);
+
+    float2 fromCenter = (v_texcoord - 0.5) * 2.0;
+    float edgeProximity = max(abs(fromCenter.x), abs(fromCenter.y));
+    float fadeStart = MAX_VISUAL_RADIUS;
+    color *= 1.0 - smoothstep(fadeStart, 1.0, edgeProximity);
+
+    float2 pixelPos = v_texcoord * float2(u_item_width, u_item_height);
+    float2 centerPos = pixelPos - float2(u_item_width, u_item_height) * 0.5;
+    float2 halfSize = float2(u_item_width, u_item_height) * 0.5;
+    float dist = roundedBoxSDF(centerPos, halfSize, u_corner_radius);
+    float cornerMask = 1.0 - smoothstep(-1.0, 0.0, dist);
+
+    float finalAlpha = color.a * cornerMask;
+    return float4(color.rgb * finalAlpha, finalAlpha);
+}

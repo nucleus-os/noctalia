@@ -492,7 +492,7 @@ void OsdOverlay::prepareFrame(Instance& inst, bool needsUpdate, bool needsLayout
     return;
   }
 
-  m_renderContext->makeCurrent(inst.surface->renderTarget());
+  m_renderContext->selectTarget(inst.surface->renderTarget());
 
   const bool needsSceneBuild = inst.sceneRoot == nullptr
       || static_cast<std::uint32_t>(std::round(inst.sceneRoot->width())) != width

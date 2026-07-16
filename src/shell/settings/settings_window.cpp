@@ -567,8 +567,8 @@ void SettingsWindow::prepareFrame(bool /*needsUpdate*/, bool needsLayout) {
   }
 
   SettingsProfileWatch phaseProfileWatch;
-  m_renderContext->makeCurrent(m_surface->renderTarget());
-  logSettingsProfile("prepareFrame makeCurrent", phaseProfileWatch);
+  m_renderContext->selectTarget(m_surface->renderTarget());
+  logSettingsProfile("prepareFrame selectTarget", phaseProfileWatch);
 
   // Rebuild the entire scene only on first build or when something explicitly
   // requested it (config change, nav click, etc.). Pure size changes — which

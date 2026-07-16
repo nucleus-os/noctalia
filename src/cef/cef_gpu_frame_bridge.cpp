@@ -173,6 +173,7 @@ struct CefGpuFrameBridge::Impl {
   CachedImport* pendingImport = nullptr;
   std::int64_t pendingCaptureCounter = -1;
   bool pendingPrepared = false;
+  bool pendingSampled = false;
   CefGpuFrameBridgeStats lifetimeStats;
   std::string error;
   std::mutex mutex;
@@ -334,7 +335,7 @@ struct CefGpuFrameBridge::Impl {
     }
     if (!deviceAbandoned) {
       try {
-        releasePendingDirectFrame(false);
+        releasePendingDirectFrame(pendingSampled);
       } catch (const std::exception& exception) {
         kLog.error("failed to release pending direct CEF frame during cleanup: {}", exception.what());
       }
@@ -344,6 +345,7 @@ struct CefGpuFrameBridge::Impl {
       pendingImport = nullptr;
       pendingCaptureCounter = -1;
       pendingPrepared = false;
+      pendingSampled = false;
     }
     if (releaseFenceFd >= 0) {
       close(releaseFenceFd);
@@ -850,6 +852,7 @@ struct CefGpuFrameBridge::Impl {
     pendingImport = nullptr;
     pendingCaptureCounter = -1;
     pendingPrepared = false;
+    pendingSampled = false;
     if (releaseFenceCallback) {
       releaseFenceCallback(captureCounter, fd);
       close(fd);
@@ -872,7 +875,11 @@ struct CefGpuFrameBridge::Impl {
       }
       // A newer paint can supersede a frame before the scene draws it. It still
       // needs a balanced acquire/release so Viz can recycle it.
-      releasePendingDirectFrame(false);
+      // Keep the displayed DMA-BUF owned by Noctalia until this replacement
+      // is rebound below. The scene may be redrawn for reasons unrelated to a
+      // new CEF paint, so releasing immediately after its first sample would
+      // leave the texture handle pointing at memory CEF is free to rewrite.
+      releasePendingDirectFrame(pendingSampled);
       FrameSlot& slot = acquireFrameSlot();
       CachedImport& source = cachedSource(frame, candidateFormat);
       (void)importAcquireFence(frame, slot.acquireSemaphore);
@@ -880,6 +887,7 @@ struct CefGpuFrameBridge::Impl {
       pendingImport = &source;
       pendingCaptureCounter = frame.captureCounter;
       pendingPrepared = false;
+      pendingSampled = false;
       if (!textureHandle.valid()) {
         textureHandle = textures->adoptExternalImage(
             source.skImage, frame.width, frame.height, TextureFilter::Linear,
@@ -943,17 +951,17 @@ bool CefGpuFrameBridge::prepareForGraphiteSampling() {
 
 void CefGpuFrameBridge::releaseAfterGraphiteSampling() {
   std::scoped_lock lock(m_impl->mutex);
-  try {
-    m_impl->releasePendingDirectFrame(true);
-  } catch (const std::exception& exception) {
-    m_impl->setError(exception.what());
+  if (m_impl->pendingSlot != nullptr) {
+    // Retain ownership of the currently displayed buffer. It is released when
+    // acceptFrame atomically rebinds the texture to its replacement.
+    m_impl->pendingSampled = true;
   }
 }
 
 void CefGpuFrameBridge::discardPendingFrame() {
   std::scoped_lock lock(m_impl->mutex);
   try {
-    m_impl->releasePendingDirectFrame(false);
+    m_impl->releasePendingDirectFrame(m_impl->pendingSampled);
   } catch (const std::exception& exception) {
     m_impl->setError(exception.what());
   }
@@ -966,12 +974,13 @@ void CefGpuFrameBridge::abandonDevice() noexcept {
   m_impl->pendingImport = nullptr;
   m_impl->pendingCaptureCounter = -1;
   m_impl->pendingPrepared = false;
+  m_impl->pendingSampled = false;
 }
 
 void CefGpuFrameBridge::invalidate() {
   std::scoped_lock lock(m_impl->mutex);
   try {
-    m_impl->releasePendingDirectFrame(false);
+    m_impl->releasePendingDirectFrame(m_impl->pendingSampled);
   } catch (const std::exception& exception) {
     m_impl->setError(exception.what());
   }

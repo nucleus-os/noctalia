@@ -210,6 +210,7 @@ namespace ui {
     std::optional<float> maxWidth = std::nullopt;
     std::optional<int> maxLines = std::nullopt;
     std::optional<TextAlign> textAlign = std::nullopt;
+    std::optional<ParagraphDirection> paragraphDirection = std::nullopt;
     std::optional<TextEllipsize> ellipsize = std::nullopt;
     std::optional<LabelBaselineMode> baselineMode = std::nullopt;
     std::optional<bool> autoScroll = std::nullopt;

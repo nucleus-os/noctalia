@@ -1,11 +1,9 @@
 #include "render/core/async_texture_cache.h"
 
 #include "core/log.h"
-#include "render/backend/render_backend.h"
 #include "render/core/image_file_loader.h"
 #include "render/core/image_source_log.h"
 #include "render/core/texture_manager.h"
-#include "render/gl_shared_context.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -62,8 +60,6 @@ void AsyncTextureCache::ReadySubscription::disconnect() {
 }
 
 AsyncTextureCache::AsyncTextureCache() {
-  m_textureManager = createDefaultTextureManager();
-
   m_eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (m_eventFd < 0) {
     kLog.warn("failed to create eventfd; async texture cache notifications will be disabled");
@@ -93,17 +89,15 @@ AsyncTextureCache::~AsyncTextureCache() {
     }
   }
 
-  if (!m_entries.empty()) {
-    makeCurrent();
+  if (!m_entries.empty() && m_textureManager != nullptr) {
     for (auto& [key, entry] : m_entries) {
       (void)key;
       if (entry.handle.id != 0) {
         m_textureManager->unload(entry.handle);
       }
     }
-    m_entries.clear();
   }
-  m_textureManager->cleanup();
+  m_entries.clear();
 
   if (m_eventFd >= 0) {
     ::close(m_eventFd);
@@ -111,7 +105,17 @@ AsyncTextureCache::~AsyncTextureCache() {
   }
 }
 
-void AsyncTextureCache::initialize(GlSharedContext* sharedGl) { m_sharedGl = sharedGl; }
+void AsyncTextureCache::initialize(TextureManager& textures) { m_textureManager = &textures; }
+
+void AsyncTextureCache::abandonGpuResources() noexcept {
+  for (auto& [key, entry] : m_entries) {
+    (void)key;
+    entry.reloadAfterRecovery = entry.handle.id != 0 || entry.refCount > 0;
+    entry.handle = {};
+    entry.failed = false;
+  }
+  m_textureManager = nullptr;
+}
 
 AsyncTextureCache::ReadySubscription
 AsyncTextureCache::subscribeReady(const std::string& path, int targetSize, bool mipmap, TextureReadyCallback callback) {
@@ -238,7 +242,13 @@ void AsyncTextureCache::dispatch(const std::vector<pollfd>& fds, std::size_t sta
     return;
   }
 
-  bool madeCurrent = false;
+  if (m_textureManager == nullptr) {
+    std::scoped_lock lock(m_resultMutex);
+    for (auto it = jobs.rbegin(); it != jobs.rend(); ++it) {
+      m_results.push_front(std::move(*it));
+    }
+    return;
+  }
 
   for (auto& job : jobs) {
     bool dropped = false;
@@ -262,11 +272,6 @@ void AsyncTextureCache::dispatch(const std::vector<pollfd>& fds, std::size_t sta
     if (job.failed || job.rgba.empty() || job.width <= 0 || job.height <= 0) {
       entryIt->second.failed = true;
       continue;
-    }
-
-    if (!madeCurrent) {
-      makeCurrent();
-      madeCurrent = true;
     }
 
     entryIt->second.handle = m_textureManager->loadFromRgba(job.rgba.data(), job.width, job.height, job.key.mipmap);
@@ -297,12 +302,10 @@ void AsyncTextureCache::reloadResidentTextures() {
     return;
   }
 
-  makeCurrent();
-
   std::vector<RequestKey> resident;
   resident.reserve(m_entries.size());
   for (const auto& [key, entry] : m_entries) {
-    if (entry.handle.id != 0 || entry.refCount > 0) {
+    if (entry.handle.id != 0 || entry.refCount > 0 || entry.reloadAfterRecovery) {
       resident.push_back(key);
     }
   }
@@ -319,6 +322,7 @@ void AsyncTextureCache::reloadResidentTextures() {
     }
     entry.handle = {};
     entry.failed = false;
+    entry.reloadAfterRecovery = false;
 
     auto loaded = loadImageFile(key.path, key.targetSize);
     if (!loaded) {
@@ -393,21 +397,6 @@ void AsyncTextureCache::pushResult(DecodedJob job) {
   signalMain();
 }
 
-void AsyncTextureCache::makeCurrent() {
-  if (m_sharedGl != nullptr) {
-    // Uploads are valid on any context in the share group, so if a backend already owns the thread's context
-    // (mid-frame), don't switch away — that would drop its draw surface and break its trailing eglSwapBuffers.
-    if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
-      return;
-    }
-    m_sharedGl->makeCurrentSurfaceless();
-  } else if (m_makeCurrentCallback) {
-    // Non-shared mode: no share group, so uploads must bind RenderContext's own context even if another isolated
-    // context is currently bound on the thread.
-    m_makeCurrentCallback();
-  }
-}
-
 void AsyncTextureCache::touchEntry(Entry& entry) { entry.lastTouch = ++m_touchSerial; }
 
 void AsyncTextureCache::removeReadyListener(std::uint64_t id) { m_readyListeners.erase(id); }
@@ -445,13 +434,8 @@ void AsyncTextureCache::pruneUnusedEntries(std::size_t maxUnusedEntries) {
   std::ranges::sort(unused, [](const It& a, const It& b) { return a->second.lastTouch < b->second.lastTouch; });
 
   const std::size_t toEvict = unused.size() - maxUnusedEntries;
-  bool madeCurrent = false;
   for (std::size_t i = 0; i < toEvict; ++i) {
     if (unused[i]->second.handle.id != 0) {
-      if (!madeCurrent) {
-        makeCurrent();
-        madeCurrent = true;
-      }
       m_textureManager->unload(unused[i]->second.handle);
     }
     m_entries.erase(unused[i]);

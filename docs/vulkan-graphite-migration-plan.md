@@ -67,10 +67,14 @@ is mandatory.
 - Initial Graphite WSI rendering and Vulkan validation have passed.
 - A standalone CEF/Graphite interop spike, CEF helper, and allocator-boundary
   checks exist.
-- A dedicated `CefGpuFrameBridge` implements a bounded DMA-BUF import cache and
-  the persistent Vulkan destination-image design.
-- Vulkan result fault injection exists. Injector callbacks are invoked outside
-  its mutex so one-shot callbacks can safely clear themselves.
+- A dedicated `CefGpuFrameBridge` implements a bounded DMA-BUF import cache,
+  explicit producer/acquire and consumer/release synchronization, and direct
+  Graphite sampling without a persistent copy destination.
+- One-shot Vulkan WSI fault injection exists for acquire/present out-of-date,
+  suboptimal, and surface-lost results. It preserves real acquire/present
+  synchronization whenever the injected result requires a valid image. A
+  synchronization-safe Graphite-submit failure seam drives the full recovery
+  path after completing its test recording.
 - `TextureId` is an opaque 64-bit slot/generation handle.
 - Texture generations are allocated monotonically for the lifetime of the
   process-wide `GraphicsDevice`. They do not wrap; exhaustion fails instead of
@@ -85,7 +89,7 @@ is mandatory.
 
 ### Latest gate results
 
-- The patched CEF m150 build completed and produced the codec-enabled minimal
+- The patched CEF m151 build completed and produced the codec-enabled minimal
   distribution and tarball.
 - The build includes a Chromium process-reaping patch that treats an already
   reaped child (`ECHILD`) as terminated while preserving normal termination
@@ -125,9 +129,10 @@ is mandatory.
 - The production Apple Music panel is now a working Graphite/Vulkan vertical
   slice. It uses its own Graphite render context and Vulkan Wayland swapchain,
   while the rest of the shell continues to use the existing GLES renderer.
-- Production `OnAcceleratedPaint` frames are copied through
-  `CefGpuFrameBridge` into the persistent Vulkan texture and drawn by Graphite;
-  there is no CPU paint or GLES CEF fallback.
+- Production `OnAcceleratedPaint` frames are imported by `CefGpuFrameBridge`,
+  synchronized with CEF's acquire and release fences, and sampled directly by
+  Graphite. There is no full-frame destination copy, CPU paint, or GLES CEF
+  fallback.
 - Apple Music has been verified visually and audibly, including navigation,
   pointer and keyboard input, continuous accelerated-frame repainting, AAC
   playback, and authentication across clean restarts. CEF now sets both
@@ -298,25 +303,83 @@ is mandatory.
 
 ### Important status caveat
 
-The general production Noctalia renderer is still GLES/EGL. Apple Music is the
-first production Graphite/Vulkan surface, but `GraphiteRenderBackend` currently
-implements only the subset needed for that vertical slice. Specialized SkSL
-effects, offscreen rendering, most native UI paths, text migration, and the
-final GLES removal remain incomplete.
+The production shell now has one renderer: Skia Graphite on Vulkan. The main
+shell context, Apple Music, wallpaper, backdrop, panels, bars, dock, popups,
+and overlays all use the process `GraphicsDevice`; the GLES/EGL backend,
+framebuffer, texture manager, shader-program stack, and Wayland-EGL build
+dependencies have been deleted. Text now paints retained Nucleus SkParagraph
+handles directly into the active Graphite canvas, icons use the shared font
+collection and Graphite glyph atlases, and SVGs rasterize through SkSVG. A live
+offscreen Graphite golden now reads pixels back from the production Vulkan
+recorder and covers snapshot/blur/tint composition plus styled Latin text,
+underline decoration, RTL Arabic placement, CJK glyphs, and chromatic color
+emoji. It also verifies static/mipmapped texture upload, orientation,
+transparency, alpha-mask tinting, and same-size dynamic texture replacement
+through the production image draw path, plus decoded SkSVG upload and sampling.
+All 15 runtime effects now execute in this live Vulkan/Graphite gate with
+production uniforms and child textures. CPU-versus-Graphite references now
+cover every animated transition, weather mode, graph, and fancy visualizer at
+fixed intermediate states. Native GPU coverage also
+checks spinner/countdown arcs, audio-spectrum geometry, gradients, transforms,
+offscreen scissoring, explicit blend modes, and color-correct mip minification.
+The gate now also exercises production `BlurCache` orientation and real
+multiline/bidi selection rectangles and caret affinities. That cache probe
+caught and removed a remaining GLES-era vertical source flip which inverted
+lockscreen wallpaper and desktop blur inputs under Graphite.
+
+The runtime-effect family is implemented as 15 standalone `.sksl` assets:
+advanced rectangles, screen corners, graph, fancy audio visualization, five
+weather programs, and six wallpaper transitions. A single immutable startup
+registry compiles every effect and reports asset paths plus SkSL diagnostics on
+failure. Audio-spectrum bars, spinner, and countdown-ring rendering use native
+`SkCanvas` operations because their GLES versions did not require procedural
+fragment shaders. The compile/instantiation test enforces the complete asset
+inventory. A release build, all 45 tests, and a synchronization-validation
+startup smoke pass. The live GPU gate covers advanced rectangles, screen
+corners, graph, fancy audio visualization, five weather shaders, and all six
+wallpaper transitions.
+
+The hard cutover exposed a Skia Graphite Vulkan render-pass dependency gap on
+multi-pass bar and dock frames: a later render pass loaded a color attachment
+whose preceding final layout transition was not synchronized. The Nucleus Skia
+build now supplies paired subpass-to-external and external-to-subpass color
+attachment dependencies. Synchronization validation is clean across the
+3840x2160 wallpaper, 3612x72 bar, and 507x152 dock swapchains at 120 Hz.
+
+Process-wide device recovery now registers every live `RenderTarget` with its
+owning `RenderContext`. A one-shot rebuild suspends every swapchain while
+preserving its Wayland surface, dimensions, and presentation callback; abandons
+shared, asynchronous, and thumbnail handles before the old texture manager is
+destroyed; rebuilds both Graphite contexts; rebinds and reloads CPU-backed
+caches; then recreates every target. The
+`NOCTALIA_TEST_GRAPHICS_DEVICE_REBUILD=1` integration seam completed this full
+cycle under synchronization validation with wallpaper, bar, dock, and backdrop
+targets capable of presenting again at 120 Hz. The gate also caught and fixed
+an instance-resume bug so disabled wallpaper/backdrop configuration remains
+disabled across recovery. It now creates a mixed batch of live and explicitly
+retired textures before teardown, verifies that every old generation is
+unresolvable after rebuilding, rejects aliasing by the first new allocation,
+and reruns the complete offscreen Graphite golden on the replacement recorder.
+This stronger gate exposed unsnapped retirement callbacks leaving a `VkImage`
+and `VkDeviceMemory` alive at `vkDestroyDevice`; device teardown now snaps and
+synchronously drains the retirement recording while the Graphite context and
+Vulkan device are still valid. The repeated gate is clean under object and
+synchronization validation.
 
 ### Immediate next work
 
-1. Run a deliberate release-mode click, scroll, and typing capture so the new
-   compositor callbacks produce statistically useful input-to-visible and
-   queue-present-to-visible percentiles for each input category.
-2. Validate presentation-aware scheduling at 60 Hz, across an output move, and
-   under VRR if available; compare it with the internal-clock escape hatch at
-   identical panel geometry and interaction workload.
-3. Run a longer release-mode Apple Music soak covering navigation, input,
-   playback, close/reopen, resize, fractional scale, FD counts, GPU allocation
-   counts, and Vulkan validation.
-4. Continue the native renderer port by completing Graphite primitives,
-   resource lifetime handling, and offscreen surfaces.
+1. Rebuild and package the cleaned m151 CEF patch stack, then perform a final
+   validation-enabled Apple Music smoke/soak covering authentication,
+   navigation, input, playback, close/reopen, resize, fractional scale, FD
+   stability, and shutdown.
+2. Validate presentation-aware scheduling on additional output refresh rates
+   and across output moves when those environments are available. This is an
+   acceptance test, not a blocker for the renderer port.
+3. Continue the text acceptance matrix with explicit paragraph-direction and
+   per-run color controls. Markdown is now a migrated real consumer of direct
+   structured SkParagraph runs; explicit blend modes, destination-native sRGB
+   controls, and linear-light image minification are covered by the live
+   Graphite golden.
 
 The Tracy build is opt-in and uses the source revision and capture/export tools
 pinned by `nucleus-workspace`. Normal builds remain Tracy-free, and aggregate
@@ -366,6 +429,19 @@ add a CPU or GLES fallback.
 - Update Nix, Guix, distro packaging, developer documentation, and credits.
 - Treat SDK and dependency cache directories strictly as generated output.
 
+Current status (2026-07-16): Meson validates two structured, read-only build
+manifests before configuration. The Nucleus render SDK contract covers exact
+Clang version and target triple, libc++ version and ABI namespace, Skia commit,
+GN arguments hash and required values, feature defines, archive order,
+undeclared archives, system libraries, and every archive checksum. The private
+C++ dependency bundle now has an equivalent JSON contract generated only by
+its bootstrap recipe: exact package/source versions and source checksums,
+compiler/libc++ identity, every installed sdbus-c++/libqalculate/toml++ public
+header, versioned shared libraries, libc++/libc++abi/libunwind linker and
+runtime inputs, and the SONAME symlink topology are all checked. A hermetic
+negative test proves artifact tampering, symlink drift, and compiler-version
+drift fail validation.
+
 Exit criterion: all supported build configurations produce an ABI-compatible,
 relocatable installation from a clean environment.
 
@@ -411,13 +487,22 @@ Presentation behavior must:
   hotplug, and destruction;
 - avoid steady-state `vkQueueWaitIdle` and `vkDeviceWaitIdle`.
 
+Current status (2026-07-16): a process-wide one-shot injector covers acquire
+and present `OUT_OF_DATE`, `SUBOPTIMAL`, and `SURFACE_LOST`. The complete matrix
+passes against live FIFO swapchains with object and synchronization validation.
+The result-to-frame-status policy is constexpr and unit-tested. Surface loss,
+which was previously classified but only logged, now destroys and recreates
+the Wayland `VkSurfaceKHR` and its swapchain immediately; both acquire- and
+present-side injected loss recover successfully.
+
 Exit criterion: representative production surfaces present Graphite frames
 through Vulkan with clean validation and stable frame pacing.
 
 ### Phase 4: implement device-loss recovery
 
-- Replace GL reset classifications with `RenderFrameStatus` and
-  `RenderDeviceStatus`.
+- [x] Replace GL reset classifications with `RenderFrameStatus` and
+  `RenderDeviceStatus::{Ready, Lost}`. The unreachable guilty/innocent/purged
+  context-reset categories and `graphicsResetStatus` query have been removed.
 - Detect and propagate `VK_ERROR_DEVICE_LOST`.
 - Stop further submissions and perform one complete GPU rebuild.
 - Recreate Graphite, the recorder, and all swapchains.
@@ -425,37 +510,110 @@ through Vulkan with clean validation and stable frame pacing.
   allocator.
 - Reload CPU-backed assets and rebuild offscreen caches.
 - Invalidate the CEF destination image and request a fresh accelerated frame.
-- Add fault-injected unit and integration tests for acquire, submit, present,
-  and device loss.
+- [x] Add fault-injected unit and integration tests for acquire and present
+  out-of-date, suboptimal, and surface loss.
+- [x] Add a Graphite-submit failure seam. It synchronously completes a real
+  recording before reporting synthetic device loss, so orderly recovery is
+  tested without lying about in-flight synchronization. The renderer stops all
+  subsequent surface submissions, handles the reset once per context
+  generation, and completes the process-wide rebuild with clean validation.
+- Device rebuild and stale-resource stress are covered by the integration
+  recovery seam.
+
+The Graphite-submit injector now proves the complete production chain:
+`RenderFrameStatus::DeviceLost` is latched as `RenderDeviceStatus::Lost`, the
+`RenderContext` emits its device-status callback once, and the application
+rebuilds the process-wide device, swapchains, caches, wallpaper, and CEF bridge.
+The rebuilt surfaces resume exact 8,333,333 ns presentation feedback with
+Vulkan object and synchronization validation clean.
 
 Exit criterion: an injected device loss either recovers the complete renderer
 once or terminates with a clear error; no stale GPU object remains usable.
 
-### Phase 5: move the CEF bridge into the production panel — functional, performance gate open
+### Phase 5: move the CEF bridge into the production panel — complete
 
-- Replace generic retained DMA-BUF imports with
-  `CefGpuFrameBridge::copyFrame(BorrowedDmabufFrame)`.
+- Use the dedicated `CefGpuFrameBridge` accelerated-frame contract.
 - Validate fourcc, modifier, plane count, offsets, pitches, dimensions, and
   external-memory capabilities in `OnAcceleratedPaint`.
-- Duplicate borrowed FDs only for immediate Vulkan consumption.
+- Duplicate borrowed FDs only when transferring ownership into a Vulkan import.
 - On a cache miss, create a modifier-backed `VkImage` with explicit plane
   layouts and import a duplicate FD through dedicated `VkDeviceMemory`.
 - Retain at most five exact-contract imports in an LRU keyed by DMA-BUF
   device/inode, dimensions, format, modifier, stride, and offset. Evict on
   incompatible reuse, resize churn, or capacity pressure.
-- Acquire the source image from `VK_QUEUE_FAMILY_FOREIGN_EXT`.
-- Copy on the Graphite graphics queue into one persistent Noctalia-owned image.
-- Transition the destination to shader-read layout and wait for the mandatory
-  copy fence before returning from the callback.
-- Retain cached imported images until eviction, invalidation, or bridge teardown;
-  destroy all imports only after their synchronous copy use has completed.
-- Wrap the persistent image directly as a Graphite image.
+- Acquire the source image from `VK_QUEUE_FAMILY_FOREIGN_EXT`, connect the
+  producer semaphore to the Graphite sampling submission, and release it back
+  only after the consumer fence signals.
+- Retain the currently displayed imported image until its replacement is bound,
+  preventing CEF from rewriting memory still referenced by the scene texture.
+- Retain cached imported images until safe eviction, invalidation, or bridge
+  teardown, and wrap each import directly as a Graphite image.
 - Make `OnPaint` an explicit unsupported-path panel error and retain no CPU
   frame.
 - Handle resize, panel reopen, and device recovery.
 
 Exit criterion: the real Apple Music panel uses only accelerated CEF frames and
 Graphite drawing, with stable resources and clean validation.
+
+#### Apple Music renderer-main hitch investigation — concluded
+
+The July 15 Chromium/Perfetto capture established that the remaining visible
+hitches begin before accelerated OSR capture. External begin frames carried the
+correct 8.333 ms interval and continued reaching Chromium. During the largest
+535.7 ms capture gap, Chromium skipped 29 of 31 compositor frames with
+`FrameSkippedReason::kWaitingOnMain`; Viz drawing itself took about 1.5 ms.
+The blocking renderer task lasted 419.9 ms and included a 212.8 ms mouse-move
+handler/hit test plus style, layout, paint, and compositing work. Other measured
+gaps were dominated by the same lifecycle work or by a 147.8 ms microtask
+checkpoint with major garbage collection. The trace contained 57 mouse moves;
+CEF input handling averaged 25.0 ms and reached 212.8 ms, totaling 1.47 seconds
+of renderer-main work during the capture.
+
+The CEF-specific optimization milestone is closed. The investigation produced
+the following decisions and durable changes:
+
+1. Pointer motion is coalesced at the CEF service boundary.
+   - Retain only the newest non-leave motion until the next Wayland frame
+     opportunity and send at most one CEF mouse-move event per opportunity.
+   - Drop repeated integer-pixel coordinates because `CefMouseEvent` truncates
+     logical coordinates to integers.
+   - Send enter promptly. Flush pending motion before mouse buttons and wheel
+     events so hit testing, clicking, dragging, and scrolling observe the
+     correct position. Send leave promptly after discarding pending motion.
+   - Preserve button state, modifier state, click counts, focus, cursor-shape
+     updates, and drag ordering. Never coalesce buttons, keys, or enter/leave.
+   - Add unit coverage for overwrite/coalescing, duplicate suppression,
+     frame-opportunity flush, ordering barriers, detach, and browser teardown.
+2. Follow-up traces confirmed the remaining long tails originate primarily in
+   Apple Music renderer-main style, layout, hit testing, and garbage collection,
+   rather than Noctalia's Vulkan import or presentation work.
+3. A reduced CEF render-scale cap was rejected because native output sharpness
+   and scale correctness are more important than masking site-side work.
+4. Keep the direct zero-copy bridge unchanged. The trace
+   showed no steady import-cache eviction, pool exhaustion, or Viz/GPU stall;
+   changing DMA-BUF synchronization or returning to a full-frame copy would
+   not address renderer-main `kWaitingOnMain` pauses.
+
+Additional opportunities and constraints:
+
+- Do not coalesce smooth-wheel input without new evidence; the traces did not
+  implicate wheel delivery.
+- Temporary CEF tracing hooks and large diagnostic captures are not part of the
+  production contract.
+- Keep the persistent CEF profile and cache configuration. Network caching is
+  unrelated to renderer-main style, layout, hit-test, and garbage-collection
+  stalls observed after the page is loaded.
+- Do not add broad `--disable-frame-rate-limit`, vsync, background-throttling,
+  or forced GPU-raster flags without a trace-supported A/B. GPU/Viz work was
+  short, and those switches do not accelerate DOM style or layout.
+- A narrowly scoped Apple Music CSS/JavaScript override may reduce expensive
+  hover effects, but it is a last resort because it is site-version-dependent
+  and can alter behavior or accessibility.
+
+The exit criterion was met: native-scale authentication and interaction remain
+correct, pointer coalescing reduced input-driven renderer-main pressure, the
+animated-image synchronization fault was fixed, and remaining occasional site
+hitches are outside the bridge/presentation critical path.
 
 ### CEF cache, refresh cadence, and external begin-frame scheduling
 
@@ -466,16 +624,16 @@ same existing CEF directory. These fields are not interchangeable: the root
 path stores installation-wide data and establishes the profile-directory
 boundary, while the non-empty cache path activates the persistent global
 request context. Reusing the existing root avoided a profile relocation and
-preserved the existing Apple Music data. Continue to follow the pinned CEF m150
+preserved the existing Apple Music data. Continue to follow the pinned CEF m151
 [`CefSettings` contract](https://github.com/chromiumembedded/cef/blob/b88780525f76c1c1d67d30b87e3b16bb37955175/include/internal/cef_types.h)
 rather than inferring profile behavior from Chromium's generated command line.
 
-The browser sets `CefBrowserSettings.windowless_frame_rate` to 120. This is
-CEF's maximum internally generated offscreen frame cadence, not the Wayland
-output refresh rate. The active display is 120 Hz, with a nominal 8.333 ms
+The browser updates its maximum windowless frame rate from compositor
+presentation feedback. This is a production cap on offscreen frame cadence,
+not an independent timer. The primary test display is 120 Hz, with a nominal 8.333 ms
 interval, so the former free-running 60 Hz CEF clock could add almost one
 display interval before Chromium began work and could drift out of phase with
-the compositor. CEF m150 accepts any positive frame rate and does not clamp the
+the compositor. CEF m151 accepts any positive frame rate and does not clamp the
 API to 60.
 
 `wl_surface.frame` and presentation feedback have different meanings:
@@ -590,7 +748,7 @@ committing an unchanged buffer forever.
   system.
 - Keep Chromium native Vulkan disabled; its Wayland path has already produced
   unusable external images and Chromium reports the combination as unsupported.
-- Keep Chromium on Ganesh. Chromium m150 disables Graphite by default and
+- Keep Chromium on Ganesh. Chromium m151 disables Graphite by default and
   treats desktop Linux Graphite as unsupported; forcing Graphite would add Dawn
   and place the external-image contract on an unvalidated path.
 - Windowless CEF uses the Alloy runtime on Linux; Chrome runtime is not an
@@ -678,35 +836,127 @@ Use native `SkCanvas` operations for:
 - linear gradients;
 - Gaussian blur and saturation;
 - ordinary borders and shadows;
+- spinner and countdown-ring arcs;
 - explicit disabled, straight-alpha, and premultiplied blend behavior.
 
 Port specialized behavior to cached `SkRuntimeEffect` SkSL:
 
-- concave and inverted advanced rectangles;
-- screen corners;
-- spinner and countdown ring;
-- graph and audio spectrum;
-- fancy audio visualizer;
-- weather and effect nodes;
-- wallpaper transitions with multiple child shaders.
+- concave and inverted advanced rectangles (implemented);
+- screen corners (cached SkRuntimeEffect implemented and startup-validated);
+- graph (implemented) and audio spectrum (implemented with native `SkCanvas`);
+- fancy audio visualizer (implemented);
+- weather and effect nodes (all five programs implemented);
+- wallpaper transitions with multiple child shaders (all six implemented).
 
-Compile runtime effects once during startup. A compilation failure is a named
-startup error, not permission to change or omit the visual behavior.
+Runtime effects are compiled once by the startup registry. A compilation
+failure is a named startup error, not permission to change or omit the visual
+behavior. Every effect now executes through the production Graphite recorder
+in a live Vulkan readback gate; the remaining Phase 6 acceptance work is
+reference-image tolerance coverage for intermediate animated states.
+
+Deterministic raster pixel coverage now executes all six wallpaper transition
+SkSL effects at progress 0, 0.5, and 1 with opaque red/blue sources. It enforces
+exact endpoint dominance, opaque output, and the presence of both sources at
+mid-transition in addition to the existing compile/child-instantiation checks.
+Deterministic structural pixel coverage now also executes advanced rectangles,
+screen corners, graphs, the fancy audio visualizer, and all five weather
+effects with production-equivalent uniforms. It checks rounded/inverted alpha
+geometry, styled colors, transparent regions, graph/visualizer output, and
+weather corner masks. The live GPU gate now mirrors that inventory: it submits
+all 15 effects through Graphite/Vulkan, checks transition endpoints, validates
+advanced-rectangle and screen-corner geometry, confirms each weather program
+produces opaque spatially varying output, and verifies chromatic graph and
+visualizer pixels. Every wallpaper transition is additionally rendered at 50%
+progress by both Skia's CPU raster backend and the production Graphite recorder
+with identical SkSL, children, and uniforms. The full-frame comparison permits
+a mean channel error of 4 and at most 8% boundary pixels diverging by more than
+24, catching source-order, uniform, coordinate, and transition-math drift
+without requiring bit-identical floating-point edges across GPU drivers.
+The six weather modes (including fog's alternate cloud branch), graph, and
+fancy audio visualizer now have equivalent full-frame CPU/Graphite comparisons
+at fixed nonzero animation times using the exact same uploaded 32-sample data
+texture where applicable. Their procedural-noise tolerance is isolated at a
+mean channel error of 8 and at most 16% high-divergence boundary/particle
+pixels. Both sides compare raw premultiplied RGBA bytes, so translucent graph
+fills and visualizer bloom validate the renderer's alpha contract rather than
+accidentally comparing unpremultiplied CPU colors to premultiplied GPU output.
+
+The native-primitive GPU gate exposed that `setScissor` was applied only while
+a swapchain `RenderTarget` was active, silently skipping clips on recorder-owned
+offscreen framebuffers. `GraphiteRenderBackend` now derives the clip conversion
+from the bound framebuffer when drawing offscreen. The live readback verifies
+that transformed gradient content cannot escape that clip, alongside spinner,
+countdown-ring, and audio-spectrum output.
 
 Exit criterion: every renderer primitive and specialized effect has a Graphite
 implementation and a passing golden comparison.
 
 ### Phase 7: replace framebuffer and offscreen rendering
 
-- Replace GL framebuffers with Graphite offscreen `SkSurface` instances.
-- Replace framebuffer caches with surface snapshots.
-- Port `CachedLayer`, blur caches, wallpapers, backdrops, and thumbnails.
-- Track resource retirement through Graphite submission completion.
+- Graphite offscreen framebuffers are implemented as recorder-owned
+  `SkSurface` instances with stable generation-checked `TextureId` values.
+  Surface snapshots are refreshed and rebound only when content changes.
+- Explicit `beginOffscreenFrame`/`endOffscreenFrame` scopes switch between the
+  active swapchain canvas and recorder-owned offscreen canvases. Nested scopes
+  are rejected, and scope exit refreshes the snapshot before another pass can
+  sample it. Graphite preserves top-left coordinates throughout; the old GL
+  framebuffer-binding vocabulary has been removed.
+- `CachedLayer` and blur-cache contracts now work with the Graphite backend.
+  Separable blur uses `SkImageFilters::Blur` with the existing radius-to-sigma
+  behavior, and translucent framebuffer tinting composites instead of clearing.
+- The niri backdrop is the first production offscreen consumer cut over end to
+  end. It now requires the process `GraphicsDevice`, uploads wallpaper images
+  into the shared Graphite texture manager, renders wallpaper -> cached
+  snapshot -> separable blur -> tint, and presents that snapshot through its
+  Vulkan Wayland swapchain. It has no EGL or shared-GL texture fallback.
+- Backdrop swapchains and caches are destroyed before a Vulkan device rebuild
+  and recreated afterward; GLES reset recovery no longer invalidates this
+  Graphite consumer.
+- A validation-enabled live reload created a 3840x2160 BGRA8 FIFO swapchain,
+  presented with exact 8,333,333 ns feedback, and cleanly destroyed the
+  backdrop again with no Vulkan validation messages. The user's original
+  disabled backdrop setting was restored after the gate.
+- The primary per-output wallpaper surface is now also a Graphite scene and
+  Vulkan swapchain consumer. Wallpaper images use a path-keyed, ref-counted
+  Graphite cache shared across output instances, and all six transition effects
+  execute through the startup-compiled SkSL registry. The obsolete GLES bind
+  entry point on `WallpaperRenderer` has been removed.
+- The control-center preview and other thumbnail consumers upload decoded
+  pixels through the shared Graphite texture manager, so no texture crosses a
+  backend or device boundary.
+- Wallpaper surfaces and cached textures join the explicit Vulkan rebuild
+  lifecycle: teardown occurs before device destruction and instances are
+  recreated afterward from persisted paths.
+- A validation-enabled 1.5x-scale live gate presented the 3840x2160 wallpaper,
+  transitioned to another image and back through IPC, opened the control-center
+  preview, and shut down cleanly with exact 8,333,333 ns presentation feedback
+  and no Vulkan validation messages. The original wallpaper configuration was
+  restored afterward.
+- [x] Thumbnail workers remain CPU-only and upload through the shared Graphite
+  texture manager; file-dialog and wallpaper-grid consumers bind those opaque
+  handles through the common image node. Deterministic live pixel coverage now
+  includes transitions, snapshot, blur, tint, orientation, alpha, replacement,
+  SVG sampling, and mip minification.
+- Resource retirement is tracked through Graphite recording completion.
+  `TextureHandle` generations invalidate immediately, while the retired
+  `SkImage` and owned `BackendTexture` are retained by a recorder finish
+  callback until the associated GPU work completes. Frame boundaries poll
+  asynchronous completion without waiting on the CPU; teardown idles the
+  device before destroying the texture manager and Graphite context.
 - Keep asynchronous workers CPU-only.
 - Decode images off-thread and create/upload Graphite images on the main
   recorder.
 - Use mipmapped Graphite images for static assets unless mipmaps are disabled.
 - Never mipmap CEF frames or frequently updated graph/audio textures.
+
+Static mipmapped uploads decode premultiplied sRGB into linear-light float,
+area-filter every level, and upload the complete chain as RGBA16F through
+Graphite's public multi-level texture API. Image and wallpaper sampling requests
+linear mip filtering whenever the `SkImage` owns mip levels. A live 64x64
+black/white checker minified to 8x8 caught the previous encoded-byte averaging
+(127 gray); the corrected path produces a uniform sRGB result near 188 without
+the dark-color precision loss of an 8-bit linear texture. Dynamic, CEF, graph,
+and audio textures remain compact single-level RGBA8 resources.
 
 Exit criterion: all caches and offscreen effects are recorder operations and no
 renderer path requires an auxiliary GL context.
@@ -718,6 +968,18 @@ renderer path requires an auxiliary GL context.
 - Verify orientation, premultiplied alpha, color space, scaling, and mipmap
   behavior.
 - Add raster and SVG golden tests.
+
+Current status (2026-07-16): SVG loading uses SkSVG and returns straight RGBA
+to the shared upload contract. Integer-aligned pixel goldens cover intrinsic
+dimensions, top-left orientation, transparent clearing, translucent color
+un-premultiplication, and target-size scaling. The scaling golden found and
+fixed a production bug where a larger target allocated a larger surface but
+left fixed-size SVG content unscaled in its upper-left corner. Broader raster
+coverage now uploads and samples decoded SVG pixels through Graphite. The live
+image golden also covers orientation, transparency, alpha-mask tinting,
+same-size dynamic replacement, static mip creation and sampling, linear-light
+sRGB minification, and disabled/straight/premultiplied blend results using raw
+premultiplied readback bytes.
 
 Exit criterion: static and dynamic image paths render through Skia/Graphite with
 no Cairo/librsvg renderer dependency.
@@ -746,6 +1008,22 @@ Implementation work:
 - invalidate the shared font collection and affected layout caches when plugin
   fonts change.
 
+Current status (2026-07-16): native tail ellipsis is retained; start and middle
+ellipsis now execute inside the shared Nucleus service using its SkUnicode
+grapheme iterator plus width-based binary search while preserving every
+retained run's styling. Noctalia's duplicate truncation implementation has
+been removed, so other Nucleus consumers receive the same behavior. Focused
+raster tests cover styled suffix retention, styles on both sides of middle
+ellipsis, combining sequences, emoji ZWJ sequences, and the one-line width
+contract. Automatic first-strong
+paragraph direction now uses ICU Unicode bidi properties rather than script
+range guesses. Real font-file coverage primes the shared collection, registers
+the bundled Tabler icon font through Fontconfig, verifies idempotent generation
+tracking, resolves the exact new family, and paints a requested glyph. Nucleus
+now constructs its font manager from a referenced current Fontconfig
+configuration, registration invalidates the shared collection immediately, and
+Noctalia consumes the generation to discard retained fallback paragraphs.
+
 Exit criterion: Nucleus exposes every text-layout capability required by
 Noctalia with coverage for Latin, CJK, Arabic, bidi, combining marks, emoji,
 color fonts, and custom fonts.
@@ -763,6 +1041,62 @@ color fonts, and custom fonts.
   librsvg renderer dependencies after parity.
 - Retain Fontconfig only where family discovery and plugin registration still
   require it.
+
+Current status (2026-07-16): Noctalia caches Nucleus paragraph handles and
+paints them directly into Graphite. Markdown styles are converted to structured
+`TextRunView` values for bold, italic, monospace, underline, and strike-through.
+Markdown now carries those runs directly from md4c through `Label` and
+`TextNode` into SkParagraph; the interim generated-tag parser and its markup
+cache mode have been deleted. Nested styles are retained as run attributes,
+entities are decoded before layout, and headings no longer risk painting style
+tags as literal text. Noctalia also exposes `TextEllipsize::None` and maps it to
+the shared service's native no-ellipsis mode, completing the four-mode API.
+Automatic, forced-LTR, and forced-RTL paragraph direction now travel through
+the renderer, native label builder, and plugin UI-tree contracts. Structured
+runs carry optional colors; plugin-store Markdown links use the live primary
+palette color and rebuild their runs when the palette changes. Run colors obey
+ancestor opacity while text shadows deliberately suppress them and retain the
+uniform requested shadow color. The live Vulkan golden now exercises these
+features through Noctalia's production paragraph adapter rather than only
+through a direct Nucleus service handle.
+The SkParagraph adapter now caches font metrics by quantized size and weight,
+matching the cache contract of the former Cairo/Pango renderer. This fixes a
+control-center regression where every Flex measure/arrange traversal repeated
+font-family resolution: warm tab switches dropped from roughly 1.3--1.5
+seconds for the Home view to below the 5 ms phase-warning threshold, while
+cold Home construction measured about 110 ms before paragraph caches warmed.
+The icon font uses the same shared paragraph/font service, and the executable
+has no direct Cairo, Pango, HarfBuzz, FreeType, or librsvg dependency. The
+markup parser restores nested styles correctly, and styled and plain paragraphs
+cannot alias in the paragraph cache. Start/middle truncation now builds the
+truncated styled runs instead of measuring a truncated string and painting the
+original runs. The release build and all 45 unit tests pass; live Vulkan-
+validation startup is clean. Unicode direction, grapheme boundaries, and
+immediate shared-font-service reuse after invalidation have focused coverage.
+The paint path also has a raster parity probe for retained styled runs, run
+colors, decorations, and transparent output. A live production-recorder golden
+now verifies styled Latin text with underline and strike-through, styled middle
+ellipsis retaining both endpoint runs, RTL Arabic placement, CJK glyphs,
+chromatic Noto Color Emoji output, and transparent pixels after a
+Graphite/Vulkan readback under synchronization validation. Editable text now
+uses the shared SkUnicode extended-grapheme boundaries for caret movement,
+deletion boundaries, selection, and cursor-stop construction, so combining
+sequences and emoji ZWJ families no longer expose internal caret positions.
+The production `Input` control has focused regression coverage for both cases.
+Nucleus now exposes actual per-glyph ink bounds from SkParagraph's extended
+visitor instead of treating selection/advance boxes as ink. Labels and icon
+alignment consume those true bounds. Caret stops retain each shaped
+grapheme's opposite visual edge, so multiline selection uses real SkParagraph
+range geometry for LTR and RTL runs rather than estimating spans between
+neighboring carets. Single-line hit testing no longer assumes logical offsets
+have monotonically increasing x coordinates. Nucleus exposes explicit
+upstream/downstream caret geometry for UTF-16 offsets; Noctalia retains both
+visual positions at bidi and soft-wrap boundaries and preserves the selected
+affinity through pointer hit testing, cursor placement, selection anchors,
+scrolling, and vertical navigation. Focused service and production-adapter
+tests cover a boundary with distinct LTR/RTL carets. Together, the CPU raster
+suite and live GPU golden check chromatic emoji output whenever the packaged
+Noto Color Emoji font is available.
 
 Exit criterion: every text and icon consumer uses SkParagraph/Skia and passes
 the text acceptance matrix.
@@ -786,23 +1120,35 @@ Move all consumers to the shared Graphite device:
 Development may use build-time staging switches. The final production build
 contains one renderer and no runtime fallback.
 
+Current status (2026-07-16): complete. Every production Wayland surface uses
+the shared Graphite/Vulkan render context. The obsolete surfaceless GL-context
+contract has also been removed from texture uploads, offscreen caches,
+wallpaper/backdrop, desktop previews, and lockscreen resource management. The
+temporary second `RenderContext` used to stage the CEF cutover has been removed;
+Apple Music, wallpaper, panels, and the rest of the shell now share the same
+renderer state, Vulkan device, and main-thread Graphite recorder.
+
 Exit criterion: every visible Noctalia surface is rendered and presented by
 Graphite/Vulkan.
 
 ### Phase 12: remove GLES/EGL
 
-- Delete `GlesRenderBackend`, `GlesTextureManager`, and GL framebuffer classes.
-- Delete GLSL program infrastructure and GL extension probes.
-- Delete EGL context, reset, external-texture, and Wayland-EGL code.
-- Remove NDC and GL Y-flip logic.
-- Remove direct EGL, GLES, and `wayland-egl` link dependencies.
-- Remove `[shell].shared_gl_context` through a configuration migration; do not
-  retain it as an ignored option.
-- Confirm CEF is the only component that may load graphics libraries
-  transitively.
+- [x] Delete `GlesRenderBackend`, `GlesTextureManager`, and GL framebuffer classes.
+- [x] Delete GLSL program infrastructure and GL extension probes.
+- [x] Delete EGL context, reset, external-texture, and Wayland-EGL code.
+- [x] Remove NDC and GL Y-flip logic.
+- [x] Replace the obsolete `makeCurrent` target-selection contract with the
+  explicit Vulkan/Graphite `selectTarget` operation, and remove the unused
+  fullscreen `flipY` parameter from the renderer API.
+- [x] Replace `bindFramebuffer`/`bindDefaultFramebuffer` with paired Graphite
+  offscreen frame scopes and reject accidental nesting.
+- [x] Remove direct EGL, GLES, and `wayland-egl` link dependencies.
+- [x] Remove `[shell].shared_gl_context`; do not retain it as an ignored option.
+- [x] Confirm the Noctalia executable has no direct EGL/GLES dependency. CEF
+  may load its own graphics libraries transitively.
 
-Exit criterion: repository and binary inspection find no production GLES/EGL
-renderer code or dependency.
+Exit criterion met: repository and binary inspection find no production
+GLES/EGL renderer code or direct dependency.
 
 ### Phase 13: validation, performance, documentation, and release
 
@@ -851,6 +1197,10 @@ Exit criterion: all final acceptance criteria below pass in a releasable build.
 - Premultiplied transparency and blend modes.
 - Clipping, transforms, blur, shadows, and saturation.
 - Wallpaper transitions and offscreen caches.
+- Production offscreen snapshot, separable blur, tint, premultiplied-alpha,
+  and top-left orientation readback. The opt-in
+  `NOCTALIA_TEST_GRAPHITE_OFFSCREEN_GOLDEN=1` gate passes on the live Vulkan
+  device with synchronization validation enabled.
 - Static mipmaps and dynamic texture updates.
 - Raster images and SVG.
 

@@ -33,7 +33,8 @@ namespace {
   class StubRenderer : public Renderer {
   public:
     TextMetrics measureText(
-        std::string_view text, float fontSize, FontWeight, float, int, TextAlign, std::string_view, TextEllipsize, bool
+        std::string_view text, float fontSize, FontWeight, float, int, TextAlign, std::string_view, TextEllipsize,
+        ParagraphDirection
     ) override {
       return TextMetrics{.width = static_cast<float>(text.size()) * fontSize * 0.5f, .bottom = fontSize};
     }
@@ -81,6 +82,29 @@ int main() {
   bool ok = true;
   StubRenderer renderer;
 
+  // Editable cursor movement follows Unicode extended grapheme clusters, not
+  // individual code points. Neither a combining mark nor a ZWJ emoji family
+  // may expose an internal caret position.
+  {
+    Input input;
+    const std::string combining = "e\xCC\x81";
+    const std::string family =
+        "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7";
+    input.setValue(combining + family);
+    input.moveCaretLeft();
+    ok = expect(
+             input.textInputState().cursor == static_cast<std::int32_t>(combining.size()),
+             "left caret skips the complete ZWJ emoji family"
+         ) && ok;
+    input.moveCaretLeft();
+    ok = expect(input.textInputState().cursor == 0, "left caret skips a base-plus-combining-mark cluster") && ok;
+    input.moveCaretRight();
+    ok = expect(
+             input.textInputState().cursor == static_cast<std::int32_t>(combining.size()),
+             "right caret skips a base-plus-combining-mark cluster"
+         ) && ok;
+  }
+
   // Build: column{ label, box, spacer } reconciled as the host's single child.
   {
     ui::UiTreeReconciler reconciler;
@@ -89,6 +113,7 @@ int main() {
     ui::UiTreeNode tree = makeNode("column");
     tree.props.emplace("gap", 8.0);
     tree.children.push_back(makeLabel("Hello"));
+    tree.children.back().props.emplace("paragraphDirection", std::string("rtl"));
     ui::UiTreeNode box = makeNode("box");
     box.props.emplace("width", 10.0);
     box.props.emplace("height", 4.0);
@@ -105,6 +130,9 @@ int main() {
       ok = expect(column->children().size() == 3, "column has three children") && ok;
       auto* label = dynamic_cast<Label*>(column->children()[0].get());
       ok = expect(label != nullptr && label->text() == "Hello", "label text applied") && ok;
+      ok = expect(
+               label != nullptr && label->paragraphDirection() == ParagraphDirection::Rtl,
+               "explicit paragraph direction applied") && ok;
       ok = expect(dynamic_cast<Box*>(column->children()[1].get()) != nullptr, "second child is a Box") && ok;
       ok = expect(dynamic_cast<Spacer*>(column->children()[2].get()) != nullptr, "third child is a Spacer") && ok;
     }
@@ -113,12 +141,16 @@ int main() {
     Node* labelBefore = column != nullptr ? column->children()[0].get() : nullptr;
     tree.props["gap"] = 4.0;
     tree.children[0].props["text"] = std::string("World");
+    tree.children[0].props["paragraphDirection"] = std::string("ltr");
     ok = expect(!reconciler.reconcile(host, tree, renderer), "prop-only reconcile reports no structure change") && ok;
     if (column != nullptr) {
       ok = expect(column->gap() == 4.0f, "gap updated in place") && ok;
       ok = expect(column->children()[0].get() == labelBefore, "label instance reused") && ok;
       auto* label = dynamic_cast<Label*>(column->children()[0].get());
       ok = expect(label != nullptr && label->text() == "World", "label text updated") && ok;
+      ok = expect(
+               label != nullptr && label->paragraphDirection() == ParagraphDirection::Ltr,
+               "paragraph direction updated in place") && ok;
     }
 
     // Removal: drop to a single child.

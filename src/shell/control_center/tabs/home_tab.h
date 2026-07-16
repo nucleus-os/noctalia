@@ -113,10 +113,7 @@ private:
   // Survives onClose() so the oversized-source warning fires once per session.
   std::string m_sizeCheckedAvatarPath;
 
-  // Two stacked layers: m_wallpaperPlaceholder shows the resident full-screen
-  // wallpaper texture immediately (slightly soft), m_wallpaperBg holds the crisp
-  // card-sized thumbnail and crossfades in over it once decoded.
-  Image* m_wallpaperPlaceholder = nullptr;
+  // The panel owns an independently decoded card-sized thumbnail.
   Image* m_wallpaperBg = nullptr;
   Box* m_wallpaperGradient = nullptr;
   std::string m_loadedWallpaperPath;

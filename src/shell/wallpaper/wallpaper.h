@@ -1,19 +1,20 @@
 #pragma once
 
 #include "config/config_types.h"
+#include "render/core/texture_handle.h"
 #include "ui/signal.h"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 class ConfigService;
 class IpcService;
 class RenderContext;
-class SharedTextureCache;
 class WaylandConnection;
 enum class WallpaperTransitionDirection;
 struct TextureHandle;
@@ -32,9 +33,7 @@ public:
   Wallpaper();
   ~Wallpaper();
 
-  bool initialize(
-      WaylandConnection& wayland, ConfigService* config, RenderContext* renderContext, SharedTextureCache* textureCache
-  );
+  bool initialize(WaylandConnection& wayland, ConfigService* config, RenderContext& renderContext);
   void onOutputChange();
   // Mark an output as driven by an external wallpaper source (e.g. an mpvpaper plugin):
   // its Background surface is torn down so the external surface shows through. Runtime-only
@@ -42,7 +41,8 @@ public:
   void setOutputExternallyManaged(const std::string& connector, bool managed);
   [[nodiscard]] std::vector<WallpaperChange> onStateChange();
   void onSecondTick();
-  void onGpuResourcesInvalidated();
+  void prepareForGraphicsDeviceRebuild();
+  void resumeAfterGraphicsDeviceRebuild();
   void registerIpc(IpcService& ipc);
   // Apply and persist a wallpaper image. nullopt connector targets all connected
   // outputs plus the default. Returns false if the path does not exist or the
@@ -52,7 +52,6 @@ public:
   [[nodiscard]] bool ownsSurface(wl_surface* surface) const noexcept;
   bool onPointerEvent(const PointerEvent& event);
 
-  [[nodiscard]] TextureHandle currentTexture() const;
   [[nodiscard]] std::string currentPath() const;
 
   // Emits whenever the displayed wallpaper (path/texture) changes, including
@@ -104,11 +103,16 @@ private:
   void runQueuedWallpaper(WallpaperInstance& instance);
   void updateRendererState(WallpaperInstance& instance);
   void releaseInstanceTextures(WallpaperInstance& inst);
+  void destroyInstances();
 
   WaylandConnection* m_wayland = nullptr;
   ConfigService* m_config = nullptr;
   RenderContext* m_renderContext = nullptr;
-  SharedTextureCache* m_textureCache = nullptr;
+  struct CachedTexture {
+    TextureHandle handle;
+    int refCount = 0;
+  };
+  std::unordered_map<std::string, CachedTexture> m_textureCache;
   bool m_wallpaperEnabled = false;
   WallpaperConfig m_lastWallpaperConfig{};
   std::int64_t m_lastAutomationSecondStamp = -1;

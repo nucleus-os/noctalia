@@ -397,7 +397,7 @@ void DialogPopupHost::prepareFrame(bool needsUpdate, bool needsLayout) {
     return;
   }
 
-  m_renderContext->makeCurrent(m_surface->renderTarget());
+  m_renderContext->selectTarget(m_surface->renderTarget());
 
   const bool needsSceneBuild = m_sceneRoot == nullptr
       || static_cast<std::uint32_t>(std::round(m_sceneRoot->width())) != width

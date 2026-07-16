@@ -122,7 +122,7 @@ void NoctaliaCefApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) {
   // and the Wayland native-pixmap allocator all use Noctalia's device.
   if (const char* uuid = std::getenv("NOCTALIA_CEF_VULKAN_DEVICE_UUID");
       uuid != nullptr && uuid[0] != '\0') {
-    cmd->AppendSwitchWithValue("noctalia-cef-vulkan-device-uuid", uuid);
+    cmd->AppendSwitchWithValue("cef-vulkan-device-uuid", uuid);
   }
   if (const char* renderNode = std::getenv("NOCTALIA_CEF_DRM_RENDER_NODE");
       renderNode != nullptr && renderNode[0] != '\0') {

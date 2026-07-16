@@ -1,37 +1,35 @@
 #pragma once
 
+#include "render/backend/graphite_runtime_effect.h"
 #include "render/backend/render_backend.h"
 
 #include <optional>
+#include <string>
 #include <vector>
 
 class GraphicsDevice;
+class GraphiteFramebuffer;
 class GraphiteExternalImageSynchronization;
 class SkCanvas;
 
-// Production RenderBackend adapter for the process-wide Vulkan/Graphite
-// device. The first cut-over deliberately covers the ordinary scene
-// primitives used by the CEF panel; specialized effects remain on GLES until
-// their cached SkRuntimeEffect ports land.
+// RenderBackend adapter for the process-wide Vulkan/Graphite device.
 class GraphiteRenderBackend final : public RenderBackend {
 public:
   explicit GraphiteRenderBackend(GraphicsDevice& graphics);
   ~GraphiteRenderBackend() override;
 
-  void initialize(GlSharedContext& shared) override;
   void cleanup() override;
-  bool makeCurrent(RenderTarget& target) override;
-  bool makeCurrentNoSurface() override;
+  bool selectTarget(RenderTarget& target) override;
   bool beginFrame(RenderTarget& target) override;
   void endFrame(RenderTarget& target) override;
-  [[nodiscard]] RenderGraphicsResetStatus graphicsResetStatus() override;
+  [[nodiscard]] RenderDeviceStatus deviceStatus() const noexcept override;
   void invalidateGpuResources() override;
 
   [[nodiscard]] std::unique_ptr<RenderSurfaceTarget> createSurfaceTarget(wl_surface* surface) override;
   [[nodiscard]] std::unique_ptr<RenderFramebuffer>
   createFramebuffer(std::uint32_t width, std::uint32_t height) override;
-  void bindFramebuffer(const RenderFramebuffer& framebuffer) override;
-  void bindDefaultFramebuffer() override;
+  void beginOffscreenFrame(const RenderFramebuffer& framebuffer) override;
+  void endOffscreenFrame() override;
   void setViewport(std::uint32_t width, std::uint32_t height) override;
   void clear(Color color) override;
   void setBlendMode(RenderBlendMode mode) override;
@@ -44,6 +42,8 @@ public:
   ) override;
   void drawImage(const RenderImageDraw& draw) override;
   void drawGlyph(const RenderGlyphDraw& draw) override;
+  void drawParagraph(std::uint64_t handle, float x, float y, const Mat3& transform) override;
+  void drawTintedParagraph(std::uint64_t handle, float x, float y, const Color& color, const Mat3& transform) override;
   void drawSpinner(
       float surfaceWidth, float surfaceHeight, float width, float height, const SpinnerStyle& style,
       const Mat3& transform
@@ -73,7 +73,7 @@ public:
       const GraphStyle& style, const Mat3& transform
   ) override;
   void drawWallpaper(const WallpaperDrawParams& params) override;
-  void drawFullscreenTexture(TextureId texture, bool flipY) override;
+  void drawFullscreenTexture(TextureId texture) override;
   void drawFullscreenTint(Color color) override;
   void drawFramebufferBlur(
       TextureId sourceTexture, std::uint32_t width, std::uint32_t height, float directionX, float directionY,
@@ -86,14 +86,16 @@ private:
   void endDraw();
   [[nodiscard]] bool prepareExternalTexture(TextureId texture);
   void releaseExternalTextures();
-  [[noreturn]] static void unsupported(const char* operation);
 
   GraphicsDevice& m_graphics;
   SkCanvas* m_canvas = nullptr;
+  SkCanvas* m_surfaceCanvas = nullptr;
+  const GraphiteFramebuffer* m_boundFramebuffer = nullptr;
   RenderTarget* m_target = nullptr;
   RenderBlendMode m_blendMode = RenderBlendMode::PremultipliedAlpha;
   std::optional<RenderScissor> m_scissor;
   bool m_frameSaved = false;
   bool m_deviceLost = false;
+  GraphiteRuntimeEffects m_runtimeEffects;
   std::vector<GraphiteExternalImageSynchronization*> m_externalSynchronizations;
 };

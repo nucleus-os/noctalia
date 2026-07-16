@@ -7,7 +7,7 @@
 #include <wayland-client-protocol.h>
 
 BackdropSurface::~BackdropSurface() {
-  m_wallpaperRenderer.makeCurrent();
+  m_wallpaperRenderer.selectTarget();
   m_layer.destroy();
 }
 
@@ -19,10 +19,10 @@ bool BackdropSurface::createWlSurface() {
 
   initializeSurfaceScaleProtocol();
 
-  if (m_shared == nullptr) {
-    throw std::runtime_error("BackdropSurface requires a GlSharedContext");
+  if (m_graphics == nullptr) {
+    throw std::runtime_error("BackdropSurface requires a GraphicsDevice");
   }
-  m_wallpaperRenderer.bind(*m_shared, m_surface);
+  m_wallpaperRenderer.bind(*m_graphics, m_surface);
   return true;
 }
 
@@ -47,13 +47,12 @@ void BackdropSurface::onScaleChanged() {
 }
 
 void BackdropSurface::render() {
-  auto* backend = m_wallpaperRenderer.backend();
-  if (m_surface == nullptr || backend == nullptr) {
+  if (m_surface == nullptr) {
     return;
   }
 
-  m_wallpaperRenderer.makeCurrent();
-  m_layer.resize(*backend, m_bufW, m_bufH);
+  m_wallpaperRenderer.selectTarget();
+  m_layer.resize(*m_wallpaperRenderer.backend(), m_bufW, m_bufH);
 
   if (!m_layer.valid()) {
     return;
@@ -121,18 +120,3 @@ void BackdropSurface::onGpuResourcesInvalidated() {
   m_layer.destroy();
   requestRedraw();
 }
-
-void BackdropSurface::prepareForGraphicsReset() noexcept {
-  m_layer.abandon();
-  m_wallpaperRenderer.prepareForGraphicsReset();
-}
-
-void BackdropSurface::restoreAfterGraphicsReset() {
-  if (m_shared == nullptr) {
-    throw std::runtime_error("BackdropSurface requires a GlSharedContext");
-  }
-  m_wallpaperRenderer.restoreAfterGraphicsReset(*m_shared);
-  m_layer.invalidate();
-}
-
-void BackdropSurface::finishGraphicsResetRecovery() noexcept { m_wallpaperRenderer.finishGraphicsResetRecovery(); }

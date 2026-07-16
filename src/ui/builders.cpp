@@ -404,6 +404,9 @@ namespace ui {
     if (props.textAlign.has_value()) {
       control->setTextAlign(*props.textAlign);
     }
+    if (props.paragraphDirection.has_value()) {
+      control->setParagraphDirection(*props.paragraphDirection);
+    }
     if (props.ellipsize.has_value()) {
       control->setEllipsize(*props.ellipsize);
     }

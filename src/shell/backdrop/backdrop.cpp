@@ -4,7 +4,6 @@
 #include "config/config_service.h"
 #include "core/log.h"
 #include "render/backend/render_backend.h"
-#include "render/core/shared_texture_cache.h"
 #include "shell/backdrop/backdrop_instance.h"
 #include "shell/backdrop/backdrop_surface.h"
 #include "ui/palette.h"
@@ -37,13 +36,10 @@ void Backdrop::destroyInstances() {
   m_instances.clear();
 }
 
-bool Backdrop::initialize(
-    WaylandConnection& wayland, ConfigService* config, SharedTextureCache* textureCache, GlSharedContext* sharedGl
-) {
+bool Backdrop::initialize(WaylandConnection& wayland, ConfigService* config, GraphicsDevice& graphics) {
   m_wayland = &wayland;
   m_config = config;
-  m_textureCache = textureCache;
-  m_sharedGl = sharedGl;
+  m_graphics = &graphics;
 
   // Register reload callback unconditionally so toggling enabled in config works.
   m_config->addReloadCallback([this]() { reload(); }, "backdrop");
@@ -155,12 +151,9 @@ void Backdrop::onGpuResourcesInvalidated() {
       inst->surface->onGpuResourcesInvalidated();
     }
     if (!inst->currentPath.empty()) {
-      if (m_textureCache != nullptr && m_textureCache->shared()) {
-        inst->currentTexture = m_textureCache->peek(inst->currentPath);
-      } else if (inst->surface != nullptr) {
+      if (inst->surface != nullptr) {
         auto* renderer = inst->surface->wallpaperRenderer();
         if (renderer != nullptr && renderer->backend() != nullptr) {
-          renderer->backend()->makeCurrentNoSurface();
           if (inst->currentTexture.id != 0) {
             renderer->backend()->textureManager().unload(inst->currentTexture);
           }
@@ -175,29 +168,14 @@ void Backdrop::onGpuResourcesInvalidated() {
   }
 }
 
-void Backdrop::prepareForGraphicsReset() noexcept {
-  for (auto& inst : m_instances) {
-    if (inst->surface != nullptr) {
-      inst->surface->prepareForGraphicsReset();
-    }
-    inst->currentTexture = {};
-  }
-}
+void Backdrop::prepareForGraphicsDeviceRebuild() { destroyInstances(); }
 
-void Backdrop::restoreAfterGraphicsReset() {
-  for (auto& inst : m_instances) {
-    if (inst->surface != nullptr) {
-      inst->surface->restoreAfterGraphicsReset();
-    }
+void Backdrop::resumeAfterGraphicsDeviceRebuild() {
+  if (!shouldHaveInstances()) {
+    return;
   }
-}
-
-void Backdrop::finishGraphicsResetRecovery() noexcept {
-  for (auto& inst : m_instances) {
-    if (inst->surface != nullptr) {
-      inst->surface->finishGraphicsResetRecovery();
-    }
-  }
+  syncInstances();
+  requestLayout();
 }
 
 void Backdrop::onFontChanged() { requestLayout(); }
@@ -258,7 +236,7 @@ void Backdrop::createInstance(const WaylandOutput& output) {
   };
 
   inst->surface = std::make_unique<BackdropSurface>(*m_wayland, std::move(surfaceConfig));
-  inst->surface->setSharedGl(m_sharedGl);
+  inst->surface->setGraphicsDevice(m_graphics);
   inst->surface->setClickThrough(true);
 
   updateRendererState(*inst);
@@ -290,11 +268,10 @@ void Backdrop::createInstance(const WaylandOutput& output) {
 }
 
 void Backdrop::loadWallpaper(BackdropInstance& inst, const std::string& path) {
-  auto tex = m_textureCache->acquire(path);
-  if (tex.id == 0 && !m_textureCache->shared() && inst.surface != nullptr) {
+  TextureHandle tex;
+  if (inst.surface != nullptr) {
     auto* renderer = inst.surface->wallpaperRenderer();
     if (renderer != nullptr && renderer->backend() != nullptr) {
-      renderer->backend()->makeCurrentNoSurface();
       tex = renderer->backend()->textureManager().loadFromFile(path, 0, true);
     }
   }
@@ -336,12 +313,9 @@ void Backdrop::updateRendererState(BackdropInstance& inst) {
 
 void Backdrop::releaseInstanceTexture(BackdropInstance& inst, bool clearPath) {
   if (inst.currentTexture.id != 0) {
-    if (m_textureCache->shared()) {
-      m_textureCache->release(inst.currentTexture, inst.currentPath);
-    } else if (inst.surface != nullptr) {
+    if (inst.surface != nullptr) {
       auto* renderer = inst.surface->wallpaperRenderer();
       if (renderer != nullptr && renderer->backend() != nullptr) {
-        renderer->backend()->makeCurrentNoSurface();
         renderer->backend()->textureManager().unload(inst.currentTexture);
       }
     }

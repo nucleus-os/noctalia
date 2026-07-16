@@ -8,8 +8,7 @@
 
 struct BackdropInstance;
 class ConfigService;
-class GlSharedContext;
-class SharedTextureCache;
+class GraphicsDevice;
 class WaylandConnection;
 struct WaylandOutput;
 
@@ -18,17 +17,14 @@ public:
   Backdrop();
   ~Backdrop();
 
-  bool initialize(
-      WaylandConnection& wayland, ConfigService* config, SharedTextureCache* textureCache, GlSharedContext* sharedGl
-  );
+  bool initialize(WaylandConnection& wayland, ConfigService* config, GraphicsDevice& graphics);
   void onOutputChange();
   void onFontChanged();
   void onStateChange();
   void onThemeChanged();
   void onGpuResourcesInvalidated();
-  void prepareForGraphicsReset() noexcept;
-  void restoreAfterGraphicsReset();
-  void finishGraphicsResetRecovery() noexcept;
+  void prepareForGraphicsDeviceRebuild();
+  void resumeAfterGraphicsDeviceRebuild();
   void requestLayout();
 
 private:
@@ -45,8 +41,7 @@ private:
 
   WaylandConnection* m_wayland = nullptr;
   ConfigService* m_config = nullptr;
-  SharedTextureCache* m_textureCache = nullptr;
-  GlSharedContext* m_sharedGl = nullptr;
+  GraphicsDevice* m_graphics = nullptr;
   BackdropConfig m_lastBackdropConfig{};
   bool m_lastShouldHaveInstances = false;
   bool m_lastWallpaperEnabled = true;

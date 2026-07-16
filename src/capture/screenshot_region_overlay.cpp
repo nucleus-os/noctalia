@@ -329,8 +329,8 @@ namespace capture {
       return;
     }
 
-    if (!m_renderContext->makeCurrent(inst.surface->renderTarget())) {
-      // The overlay's EGL surface could not be made current (e.g. EGL_BAD_ALLOC when the
+    if (!m_renderContext->selectTarget(inst.surface->renderTarget())) {
+      // The overlay's Vulkan surface could not begin a frame (for example while the
       // driver is out of video memory). Painting would be a no-op, leaving an invisible
       // fullscreen surface that eats input, so tear down and report instead of spinning.
       abortWithError(i18n::tr("bar.screenshot.overlay-alloc-failed"));

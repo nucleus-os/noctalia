@@ -417,7 +417,7 @@ void DesktopWidgetsEditor::createSurface(const WaylandOutput& output) {
     if (m_renderContext == nullptr || rawOverlay->surface == nullptr) {
       return;
     }
-    m_renderContext->makeCurrent(rawOverlay->surface->renderTarget());
+    m_renderContext->selectTarget(rawOverlay->surface->renderTarget());
     for (auto& [id, view] : rawOverlay->views) {
       (void)id;
       if (view.widget != nullptr && view.widget->needsFrameTick()) {
@@ -569,7 +569,7 @@ void DesktopWidgetsEditor::prepareFrame(OverlaySurface& surface, bool needsUpdat
     return;
   }
 
-  m_renderContext->makeCurrent(surface.surface->renderTarget());
+  m_renderContext->selectTarget(surface.surface->renderTarget());
 
   if (surface.sceneRoot == nullptr || surface.sceneRebuildRequested) {
     rebuildScene(surface);
@@ -1908,7 +1908,7 @@ void DesktopWidgetsEditor::startDrag(
 
   if (mode == DragMode::Scale && view->widget != nullptr && m_renderContext != nullptr) {
     if (OverlaySurface* surface = findSurfaceForWidget(widgetId); surface != nullptr && surface->surface != nullptr) {
-      m_renderContext->makeCurrent(surface->surface->renderTarget());
+      m_renderContext->selectTarget(surface->surface->renderTarget());
     }
     applyViewState(*view, *state, true);
     m_drag.intrinsicWidth = view->intrinsicWidth;
@@ -2175,7 +2175,7 @@ void DesktopWidgetsEditor::finishDrag() {
   if (mode == DragMode::Scale && !widgetId.empty()) {
     if (m_renderContext != nullptr) {
       if (OverlaySurface* surface = findSurfaceForWidget(widgetId); surface != nullptr && surface->surface != nullptr) {
-        m_renderContext->makeCurrent(surface->surface->renderTarget());
+        m_renderContext->selectTarget(surface->surface->renderTarget());
       }
     }
     if (DesktopWidgetState* state = findWidgetState(widgetId); state != nullptr) {
@@ -2425,7 +2425,6 @@ void DesktopWidgetsEditor::releaseWallpaperPreview(OverlaySurface& surface) {
       m_textureCache->release(surface.wallpaperPreviewTexture, releasePath);
     }
   } else if (m_renderContext != nullptr) {
-    m_renderContext->backend().makeCurrentNoSurface();
     m_renderContext->textureManager().unload(surface.wallpaperPreviewTexture);
   }
   surface.wallpaperPreviewTexture = {};
@@ -2470,11 +2469,9 @@ void DesktopWidgetsEditor::updateWallpaperPreview(OverlaySurface& surface) {
     if (m_textureCache != nullptr) {
       texture = m_textureCache->acquire(path);
       if (texture.id == 0 && !m_textureCache->shared()) {
-        m_renderContext->backend().makeCurrentNoSurface();
         texture = m_renderContext->textureManager().loadFromFile(path, 0, true);
       }
     } else {
-      m_renderContext->backend().makeCurrentNoSurface();
       texture = m_renderContext->textureManager().loadFromFile(path, 0, true);
     }
   }

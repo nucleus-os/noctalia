@@ -146,7 +146,7 @@ void SelectDropdownPopup::openSelectDropdown(const DropdownRequest& request, Dro
       return;
     }
 
-    self->m_renderContext.makeCurrent(self->m_surface->renderTarget());
+    self->m_renderContext.selectTarget(self->m_surface->renderTarget());
 
     const bool needsSceneBuild = self->m_sceneDirty
         || self->m_sceneRoot == nullptr

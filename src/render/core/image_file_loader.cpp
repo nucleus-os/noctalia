@@ -5,32 +5,28 @@
 
 #include <algorithm>
 #include <array>
-#include <cairo.h>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <stb/stb_image_resize2.h>
 #include <string_view>
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wexpansion-to-defined"
-#include <librsvg/rsvg.h>
-#pragma GCC diagnostic pop
+#include "include/core/SkCanvas.h"
+#include "include/core/SkData.h"
+#include "include/core/SkImageInfo.h"
+#include "include/core/SkStream.h"
+#include "include/core/SkSurface.h"
+#include "modules/svg/include/SkSVGDOM.h"
 
 namespace {
 
-  // Convert a cairo ARGB32 image surface (premultiplied BGRA on little-endian)
-  // into the non-premultiplied RGBA buffer the rest of the pipeline expects.
-  void argb32ToRgba(const unsigned char* src, int srcStride, std::uint8_t* dst, int width, int height) {
+  void premulRgbaToStraight(const unsigned char* src, int srcStride, std::uint8_t* dst, int width, int height) {
     for (int y = 0; y < height; ++y) {
       const auto* row = reinterpret_cast<const std::uint32_t*>(src + (y * srcStride));
       std::uint8_t* outRow = dst + (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4U);
       for (int x = 0; x < width; ++x) {
-        const std::uint32_t pixel = row[x];
-        const auto a = static_cast<std::uint8_t>((pixel >> 24) & 0xFF);
-        auto r = static_cast<std::uint8_t>((pixel >> 16) & 0xFF);
-        auto g = static_cast<std::uint8_t>((pixel >> 8) & 0xFF);
-        auto b = static_cast<std::uint8_t>(pixel & 0xFF);
+        const auto* pixel = reinterpret_cast<const std::uint8_t*>(&row[x]);
+        auto r = pixel[0]; auto g = pixel[1]; auto b = pixel[2]; const auto a = pixel[3];
         if (a != 0 && a != 255) {
           // Un-premultiply, rounding to nearest.
           r = static_cast<std::uint8_t>(std::min(255, ((r * 255) + (a / 2)) / a));
@@ -397,80 +393,34 @@ namespace {
 
   std::expected<LoadedImageFile, std::string>
   rasterizeSvg(const std::vector<std::uint8_t>& fileData, int targetSize, bool centerSquareCrop) {
-    GError* gerror = nullptr;
-    RsvgHandle* handle = rsvg_handle_new_from_data(fileData.data(), fileData.size(), &gerror);
-    if (handle == nullptr) {
-      std::string error = std::string("failed to parse SVG: ") + (gerror != nullptr ? gerror->message : "unknown");
-      if (gerror != nullptr) {
-        g_error_free(gerror);
-      }
-      return std::unexpected(std::move(error));
-    }
-
-    // Determine intrinsic pixel size. Many real-world SVGs (e.g. viewBox-only)
-    // do not advertise pixel dimensions, so fall back to the viewBox or to a
-    // sensible default before computing the render scale.
-    gdouble intrinsicW = 0.0;
-    gdouble intrinsicH = 0.0;
-    gboolean hasIntrinsic = rsvg_handle_get_intrinsic_size_in_pixels(handle, &intrinsicW, &intrinsicH);
-    if (hasIntrinsic == FALSE || intrinsicW <= 0.0 || intrinsicH <= 0.0) {
-      gboolean outHasW = FALSE;
-      RsvgLength outW{};
-      gboolean outHasH = FALSE;
-      RsvgLength outH{};
-      gboolean outHasViewbox = FALSE;
-      RsvgRectangle outViewbox{};
-      rsvg_handle_get_intrinsic_dimensions(handle, &outHasW, &outW, &outHasH, &outH, &outHasViewbox, &outViewbox);
-      if (outHasViewbox == TRUE && outViewbox.width > 0.0 && outViewbox.height > 0.0) {
-        intrinsicW = outViewbox.width;
-        intrinsicH = outViewbox.height;
-      } else {
-        intrinsicW = 512.0;
-        intrinsicH = 512.0;
-      }
-    }
-
-    int width = static_cast<int>(std::round(intrinsicW));
-    int height = static_cast<int>(std::round(intrinsicH));
+    SkMemoryStream stream(fileData.data(), fileData.size(), false);
+    auto dom = SkSVGDOM::MakeFromStream(stream);
+    if (dom == nullptr) return std::unexpected("failed to parse SVG");
+    SkSize intrinsic = dom->containerSize();
+    if (intrinsic.width() <= 0 || intrinsic.height() <= 0) intrinsic = SkSize::Make(512, 512);
+    int width = static_cast<int>(std::round(intrinsic.width()));
+    int height = static_cast<int>(std::round(intrinsic.height()));
     if (targetSize > 0) {
-      const double maxSide = std::max(intrinsicW, intrinsicH);
+      const double maxSide = std::max(intrinsic.width(), intrinsic.height());
       const double scale = static_cast<double>(targetSize) / maxSide;
-      width = std::max(1, static_cast<int>(std::round(intrinsicW * scale)));
-      height = std::max(1, static_cast<int>(std::round(intrinsicH * scale)));
+      width = std::max(1, static_cast<int>(std::round(intrinsic.width() * scale)));
+      height = std::max(1, static_cast<int>(std::round(intrinsic.height() * scale)));
     }
-    if (width <= 0 || height <= 0) {
-      g_object_unref(handle);
-      return std::unexpected("invalid SVG dimensions");
-    }
-
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-      cairo_surface_destroy(surface);
-      g_object_unref(handle);
-      return std::unexpected("failed to create cairo surface");
-    }
-
-    cairo_t* cr = cairo_create(surface);
-    RsvgRectangle viewport{
-        .x = 0.0,
-        .y = 0.0,
-        .width = static_cast<double>(width),
-        .height = static_cast<double>(height),
-    };
-    GError* renderError = nullptr;
-    if (rsvg_handle_render_document(handle, cr, &viewport, &renderError) == FALSE) {
-      std::string error =
-          std::string("failed to render SVG: ") + (renderError != nullptr ? renderError->message : "unknown");
-      if (renderError != nullptr) {
-        g_error_free(renderError);
-      }
-      cairo_destroy(cr);
-      cairo_surface_destroy(surface);
-      g_object_unref(handle);
-      return std::unexpected(std::move(error));
-    }
-    cairo_destroy(cr);
-    cairo_surface_flush(surface);
+    if (width <= 0 || height <= 0) return std::unexpected("invalid SVG dimensions");
+    auto surface = SkSurfaces::Raster(SkImageInfo::Make(width, height, kRGBA_8888_SkColorType, kPremul_SkAlphaType));
+    if (surface == nullptr) return std::unexpected("failed to create Skia SVG surface");
+    // SkSVGDOM::setContainerSize only supplies the outer viewport; an SVG with
+    // explicit pixel width/height still paints at its intrinsic dimensions.
+    // Scale the canvas so targetSize changes the rendered content as well as
+    // the allocation, while preserving the document's aspect ratio.
+    dom->setContainerSize(intrinsic);
+    surface->getCanvas()->clear(SK_ColorTRANSPARENT);
+    surface->getCanvas()->scale(
+        static_cast<float>(width) / intrinsic.width(), static_cast<float>(height) / intrinsic.height()
+    );
+    dom->render(surface->getCanvas());
+    SkPixmap pixels;
+    if (!surface->peekPixels(&pixels)) return std::unexpected("failed to read Skia SVG surface");
 
     LoadedImageFile loaded{
         .rgba = std::vector<std::uint8_t>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U),
@@ -479,13 +429,8 @@ namespace {
         .sourceWidth = width,
         .sourceHeight = height,
     };
-    argb32ToRgba(
-        cairo_image_surface_get_data(surface), cairo_image_surface_get_stride(surface), loaded.rgba.data(), width,
-        height
-    );
-
-    cairo_surface_destroy(surface);
-    g_object_unref(handle);
+    premulRgbaToStraight(static_cast<const unsigned char*>(pixels.addr()), static_cast<int>(pixels.rowBytes()),
+                         loaded.rgba.data(), width, height);
     if (centerSquareCrop) {
       loaded = cropCenterSquare(std::move(loaded));
     }

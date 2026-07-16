@@ -56,10 +56,7 @@ public:
   static PanelManager& instance();
   static PanelManager* current() noexcept;
 
-  void initialize(
-      CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext,
-      RenderContext* graphiteRenderContext = nullptr
-  );
+  void initialize(CompositorPlatform& platform, ConfigService* config, RenderContext* renderContext);
 
   // Optional: invoked from shell UI (e.g. control center) to spawn the standalone settings toplevel.
   void setOpenSettingsWindowCallback(std::function<void(std::string)> callback);
@@ -117,8 +114,6 @@ public:
   [[nodiscard]] std::optional<LayerPopupParentContext> fallbackPopupParentContext() const noexcept;
 
   [[nodiscard]] RenderContext* renderContext() const noexcept { return m_renderContext; }
-  [[nodiscard]] bool detachGraphiteSurfaceForDeviceRebuild();
-  void reattachGraphiteSurfaceAfterDeviceRebuild(bool wasAttached);
   [[nodiscard]] WaylandConnection* wayland() const noexcept;
 
   void setActivePopup(ContextMenuPopup* popup);
@@ -139,6 +134,7 @@ public:
   // update/layout. Used for reactive palette restyling.
   void requestRedraw();
   void requestFrameTick();
+  void requestCallbackTick();
   void close();
   void beginAttachedPopup(wl_surface* surface);
   void endAttachedPopup(wl_surface* surface);
@@ -180,7 +176,6 @@ private:
   CompositorPlatform* m_platform = nullptr;
   ConfigService* m_config = nullptr;
   RenderContext* m_renderContext = nullptr;
-  RenderContext* m_graphiteRenderContext = nullptr;
   std::function<void(std::string)> m_openSettingsWindow;
   std::function<void()> m_closeSettingsWindow;
   std::function<void(std::string)> m_toggleSettingsWindow;

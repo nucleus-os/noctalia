@@ -63,25 +63,28 @@ foreach required : [
   'lib/libc++.so.1',
   'lib/libc++abi.so.1',
   'lib/libunwind.so.1',
-  'share/noctalia-cpp-deps/manifest.txt',
+  'share/noctalia-cpp-deps/manifest.json',
 ]
   if not private_deps_fs.exists(nucleus_cpp_deps_path / required)
     error('Invalid nucleus_cpp_deps_path: missing ' + nucleus_cpp_deps_path / required)
   endif
 endforeach
 private_deps_manifest = run_command(
-  python, '-c',
-  'import pathlib,sys; p=pathlib.Path(sys.argv[1]); s=p.read_text(); required=["compiler=clang-21", "stdlib=libc++", "sdbus-cpp=2.2.1", "libqalculate=5.9.0", "tomlplusplus=3.4.0"]; missing=[x for x in required if x not in s]; print(", ".join(missing)); sys.exit(bool(missing))',
-  nucleus_cpp_deps_path / 'share/noctalia-cpp-deps/manifest.txt',
+  python,
+  files('tools/nucleus-cpp-deps.py'),
+  'validate',
+  '--prefix', nucleus_cpp_deps_path,
+  '--compiler', cpp.cmd_array()[0],
   check: false,
 )
 if private_deps_manifest.returncode() != 0
-  error('Private C++ dependency manifest does not match the Nucleus ABI contract; missing: ' + private_deps_manifest.stdout().strip())
+  error(private_deps_manifest.stderr().strip())
 endif
-message('Private libc++ dependencies: ' + nucleus_cpp_deps_path)
+message(private_deps_manifest.stdout().strip())
 
 nucleus_skia_root = nucleus_render_sdk_path / 'include' / 'skia'
 nucleus_skia_libdir = nucleus_render_sdk_path / 'lib' / 'skia-graphite'
+nucleus_text_root = nucleus_render_sdk_path / 'include' / 'skia-text'
 nucleus_skia_inc = include_directories(
   nucleus_skia_root,
   nucleus_skia_root / 'src',
@@ -91,6 +94,11 @@ nucleus_skia_inc = include_directories(
   nucleus_skia_root / 'third_party' / 'externals' / 'vulkan-headers' / 'include',
   is_system: true,
 )
+nucleus_text_inc = include_directories(nucleus_text_root / 'include', is_system: true)
+nucleus_text_sources = [
+  nucleus_text_root / 'TextRegistry.cpp',
+  nucleus_text_root / 'skia_text_backend.cpp',
+]
 nucleus_skia_cpp_args = [
   '-DNDEBUG',
   '-DSK_GRAPHITE',
@@ -109,8 +117,8 @@ nucleus_skia_link_args = ['-Wl,--start-group']
 foreach archive : nucleus_skia_archives
   nucleus_skia_link_args += [nucleus_skia_libdir / ('lib' + archive + '.a')]
 endforeach
-# CEF owns the process-wide malloc/new shim in CEF-enabled processes. Nucleus
-# Skia is built without PartitionAlloc, and every symbol contributed by its
+# CEF and Nucleus Skia are built without a process-wide allocator shim. Every
+# symbol contributed by the Nucleus static archive group
 # static archive group stays out of the executable's dynamic symbol table so it
 # cannot preempt Chromium's private Skia implementation.
 nucleus_skia_link_args += [
@@ -218,18 +226,7 @@ sdbus_cpp_dep = declare_dependency(
 wayland_client_dep  = dependency('wayland-client')
 wayland_protos_dep  = dependency('wayland-protocols')
 vulkan_dep          = dependency('vulkan', version: '>=1.4')
-#egl_dep             = dependency('egl')
-#glesv2_dep          = dependency('glesv2')
-wayland_egl_dep     = dependency('wayland-egl')
-freetype2_dep       = dependency('freetype2')
 fontconfig_dep      = dependency('fontconfig')
-cairo_dep           = dependency('cairo')
-cairo_ft_dep        = dependency('cairo-ft')
-pango_dep           = dependency('pango')
-pangocairo_dep      = dependency('pangocairo')
-pangoft2_dep        = dependency('pangoft2')
-harfbuzz_dep        = dependency('harfbuzz')
-librsvg_dep         = dependency('librsvg-2.0')
 xkbcommon_dep       = dependency('xkbcommon')
 glib_dep            = dependency('glib-2.0')
 gobject_dep         = dependency('gobject-2.0')
@@ -263,22 +260,6 @@ endif
 
 if jemalloc_option.enabled()
   error('jemalloc is incompatible with CEF allocator boundaries; use -Djemalloc=disabled')
-endif
-
-egl_dep = dependency('egl', required: false)
-gles2_dep = dependency('glesv2', required: false)
-
-
-if not egl_dep.found()
-  egl_dep = dependency('wayland-egl', required: false)
-endif
-
-if not egl_dep.found()
-  egl_dep = dependency('epoxy')
-endif
-
-if not gles2_dep.found()
-  gles2_dep = dependency('epoxy')
 endif
 
 # ── Vendored: dr_wav (single-file WAV decoder) ───────────────────────────────
@@ -655,40 +636,26 @@ _noctalia_sources = files(
   'src/render/animation/animation.cpp',
   'src/render/animation/animation_manager.cpp',
   'src/render/animation/motion_service.cpp',
-  'src/render/backend/gles_framebuffer.cpp',
-  'src/render/backend/gles_render_backend.cpp',
+  'src/render/backend/graphite_framebuffer.cpp',
+  'src/render/backend/graphite_offscreen_golden.cpp',
   'src/render/backend/graphite_render_backend.cpp',
+  'src/render/backend/graphite_runtime_effect.cpp',
   'src/render/backend/graphite_surface_target.cpp',
   'src/render/backend/graphite_texture_manager.cpp',
   'src/render/graphics_device.cpp',
   'src/render/vulkan/vulkan_result.cpp',
-  'src/render/backend/gles_texture_manager.cpp',
-  'src/render/backend/render_backend.cpp',
+  'src/render/vulkan/vulkan_wsi_fault.cpp',
   'src/render/core/async_texture_cache.cpp',
   'src/render/core/color.cpp',
   'src/render/core/image_file_loader.cpp',
-  'src/render/core/shader_program.cpp',
   'src/render/core/stb_image_resize_impl.cpp',
   'src/render/core/thumbnail_service.cpp',
   'src/render/core/image_decoder.cpp',
   'src/render/core/image_encoder.cpp',
-  'src/render/programs/glyph_program.cpp',
-  'src/render/programs/image_program.cpp',
-  'src/render/programs/linear_gradient_program.cpp',
-  'src/render/programs/rect_program.cpp',
-  'src/render/programs/screen_corner_program.cpp',
-  'src/render/programs/countdown_ring_program.cpp',
-  'src/render/programs/spinner_program.cpp',
-  'src/render/programs/audio_spectrum_program.cpp',
-  'src/render/programs/fancy_audio_visualizer_program.cpp',
-  'src/render/programs/effect_program.cpp',
-  'src/render/programs/graph_program.cpp',
-  'src/render/programs/blur_program.cpp',
-  'src/render/programs/wallpaper_program.cpp',
   'src/render/core/blur_cache.cpp',
+  'src/render/text/grapheme_breaks.cpp',
   'src/render/core/cached_layer.cpp',
   'src/render/core/shared_texture_cache.cpp',
-  'src/render/gl_shared_context.cpp',
   'src/render/render_context.cpp',
   'src/render/render_target.cpp',
   'src/render/scene/input_area.cpp',
@@ -696,10 +663,10 @@ _noctalia_sources = files(
   'src/render/scene/fancy_audio_visualizer_node.cpp',
   'src/render/scene/graph_node.cpp',
   'src/render/scene/node.cpp',
-  'src/render/text/cairo_text_renderer.cpp',
+  'src/render/text/skparagraph_text_renderer.cpp',
   'src/render/text/font_registry.cpp',
   'src/render/text/font_weight_catalog.cpp',
-  'src/render/text/cairo_glyph_renderer.cpp',
+  'src/render/text/skia_glyph_renderer.cpp',
   'src/render/wallpaper_renderer.cpp',
   'src/scripting/luau_host.cpp',
   'src/scripting/plugin_catalog.cpp',
@@ -1073,18 +1040,7 @@ _noctalia_deps = [
     sdbus_cpp_dep,
     wayland_client_dep,
     vulkan_dep,
-    egl_dep,
-    gles2_dep,
-    wayland_egl_dep,
-    freetype2_dep,
     fontconfig_dep,
-    cairo_dep,
-    cairo_ft_dep,
-    pango_dep,
-    pangocairo_dep,
-    pangoft2_dep,
-    harfbuzz_dep,
-    librsvg_dep,
     xkbcommon_dep,
     glib_dep,
     gobject_dep,
@@ -1172,9 +1128,9 @@ _noctalia_build_rpath = private_cpp_libdir + ':' + _cef_root / 'Release'
 _noctalia_install_rpath = private_cpp_install_rpath + ':' + _cef_root / 'Release'
 
 noctalia_exe = executable('noctalia',
-  sources: _noctalia_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
+  sources: _noctalia_sources + nucleus_text_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
   dependencies: _noctalia_deps,
-  include_directories: _noctalia_inc,
+  include_directories: [_noctalia_inc, nucleus_text_inc],
   cpp_args: [
     '-Wall', '-Wextra', '-Wno-missing-field-initializers', '-Wpedantic', '-Wconversion', '-Wshadow',
     '-DNOCTALIA_SOURCE_ASSETS_DIR="' + meson.project_source_root() / 'assets' + '"',
@@ -1258,7 +1214,11 @@ texture_handle_test = executable('texture_handle_test',
 test('texture_handle', texture_handle_test, env: private_cpp_test_env)
 
 vulkan_result_test = executable('vulkan_result_test',
-  files('tests/vulkan_result_test.cpp', 'src/render/vulkan/vulkan_result.cpp'),
+  files(
+    'tests/vulkan_result_test.cpp',
+    'src/render/vulkan/vulkan_result.cpp',
+    'src/render/vulkan/vulkan_wsi_fault.cpp',
+  ),
   dependencies: vulkan_dep,
   include_directories: _noctalia_inc,
   build_rpath: private_cpp_libdir,
@@ -1371,6 +1331,64 @@ input_password_mode_test = executable('input_password_mode_test',
 )
 
 test('input_password_mode', input_password_mode_test)
+
+cef_pointer_motion_coalescer_test = executable('cef_pointer_motion_coalescer_test',
+  sources: files('tests/cef_pointer_motion_coalescer_test.cpp'),
+  include_directories: _noctalia_inc,
+)
+
+test('cef_pointer_motion_coalescer', cef_pointer_motion_coalescer_test)
+
+graphite_runtime_effects_test = executable('graphite_runtime_effects_test',
+  sources: files('tests/graphite_runtime_effects_test.cpp'),
+  include_directories: _noctalia_inc,
+  cpp_args: [
+    '-DNOCTALIA_SOURCE_ASSETS_DIR="' + meson.project_source_root() / 'assets' + '"',
+  ] + nucleus_skia_cpp_args,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
+)
+
+test('graphite_runtime_effects', graphite_runtime_effects_test)
+
+graphite_resource_observer_test = executable('graphite_resource_observer_test',
+  sources: files('tests/graphite_resource_observer_test.cpp'),
+  include_directories: _noctalia_inc,
+)
+
+test('graphite_resource_observer', graphite_resource_observer_test)
+
+skparagraph_text_service_test = executable('skparagraph_text_service_test',
+  sources: files(
+    'tests/skparagraph_text_service_test.cpp',
+    'src/render/text/font_registry.cpp',
+    'src/render/text/grapheme_breaks.cpp',
+    'src/core/log.cpp',
+  ) + nucleus_text_sources,
+  include_directories: _noctalia_inc + [nucleus_text_inc],
+  cpp_args: [
+    '-DNOCTALIA_SOURCE_ASSETS_DIR="' + meson.project_source_root() / 'assets' + '"',
+  ] + nucleus_skia_cpp_args,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
+)
+
+test('skparagraph_text_service', skparagraph_text_service_test)
+
+skparagraph_text_renderer_test = executable('skparagraph_text_renderer_test',
+  sources: files(
+    'tests/skparagraph_text_renderer_test.cpp',
+    'src/render/text/skparagraph_text_renderer.cpp',
+    'src/render/text/grapheme_breaks.cpp',
+    'src/render/text/font_registry.cpp',
+    'src/core/log.cpp',
+  ) + nucleus_text_sources,
+  include_directories: _noctalia_inc + [nucleus_text_inc],
+  cpp_args: [
+    '-DNOCTALIA_SOURCE_ASSETS_DIR="' + meson.project_source_root() / 'assets' + '"',
+  ] + nucleus_skia_cpp_args,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
+)
+
+test('skparagraph_text_renderer', skparagraph_text_renderer_test)
 
 log_test = executable('log_test',
   sources: files(
@@ -1624,11 +1642,11 @@ ui_tree_reconciler_test = executable('ui_tree_reconciler_test',
     'src/i18n/i18n.cpp',
     'src/i18n/i18n_service.cpp',
     'src/i18n/language_tag.cpp',
-    'src/render/gl_shared_context.cpp',
     'src/render/scene/node.cpp',
     'src/render/scene/input_area.cpp',
     'src/render/scene/graph_node.cpp',
     'src/render/text/glyph_registry.cpp',
+    'src/render/text/grapheme_breaks.cpp',
     'src/render/animation/animation.cpp',
     'src/render/animation/animation_manager.cpp',
     'src/render/animation/motion_service.cpp',
@@ -1645,22 +1663,20 @@ ui_tree_reconciler_test = executable('ui_tree_reconciler_test',
     'src/theme/fixed_palette.cpp',
     'src/theme/color.cpp',
     'src/theme/contrast.cpp',
-  ) + _protocol_headers + _protocol_sources,
+  ) + _protocol_headers + _protocol_sources + nucleus_text_sources,
   dependencies: [
     wayland_client_dep,
-    cairo_dep,
-    egl_dep,
-    librsvg_dep,
     libwebp_dep,
     nlohmann_dep,
     xkbcommon_dep,
   ],
-  include_directories: _noctalia_inc,
+  include_directories: _noctalia_inc + [nucleus_text_inc],
   cpp_args: [
     '-DNOCTALIA_SOURCE_ASSETS_DIR="' + meson.project_source_root() / 'assets' + '"',
     '-DNOCTALIA_INSTALL_PREFIX="' + get_option('prefix') + '"',
     '-DNOCTALIA_INSTALL_DATADIR="' + get_option('datadir') + '"',
-  ],
+  ] + nucleus_skia_cpp_args,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
 )
 
 test('ui_tree_reconciler', ui_tree_reconciler_test)
@@ -1832,11 +1848,10 @@ image_file_loader_data_uri_test = executable('image_file_loader_data_uri_test',
     'src/render/core/stb_image_resize_impl.cpp',
   ),
   dependencies: [
-    cairo_dep,
-    librsvg_dep,
     libwebp_dep,
   ],
   include_directories: _noctalia_inc,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
 )
 
 test('image_file_loader_data_uri', image_file_loader_data_uri_test)
@@ -1902,6 +1917,12 @@ wayland_toplevels_identity_test = executable('wayland_toplevels_identity_test',
 )
 
 test('wayland_toplevels_identity', wayland_toplevels_identity_test)
+
+test(
+  'nucleus_cpp_deps_contract',
+  python,
+  args: [files('tests/nucleus_cpp_deps_contract_test.py')],
+)
 
 endif # build_tests
 

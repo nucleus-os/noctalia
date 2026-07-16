@@ -10,7 +10,7 @@
 
 struct wl_surface;
 
-class GlSharedContext;
+class GraphicsDevice;
 class RenderBackend;
 class RenderFramebuffer;
 class RenderTarget;
@@ -30,8 +30,8 @@ public:
   WallpaperRenderer(const WallpaperRenderer&) = delete;
   WallpaperRenderer& operator=(const WallpaperRenderer&) = delete;
 
-  void bind(GlSharedContext& shared, wl_surface* surface);
-  void makeCurrent();
+  void bind(GraphicsDevice& graphics, wl_surface* surface);
+  void selectTarget();
   void resize(
       std::uint32_t bufferWidth, std::uint32_t bufferHeight, std::uint32_t logicalWidth, std::uint32_t logicalHeight
   );
@@ -62,6 +62,7 @@ private:
   void tint(RenderFramebuffer& target, Color color, float intensity);
   void blitToSurface(TextureId texture);
   void swapBuffers();
+  [[nodiscard]] bool beginSurfaceFrame();
 
   wl_surface* m_surface = nullptr;
   std::unique_ptr<RenderBackend> m_backend;

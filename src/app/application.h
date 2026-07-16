@@ -26,7 +26,6 @@
 #include "render/core/async_texture_cache.h"
 #include "render/core/shared_texture_cache.h"
 #include "render/core/thumbnail_service.h"
-#include "render/gl_shared_context.h"
 #include "render/graphics_device.h"
 #include "render/render_context.h"
 #include "scripting/plugin_manager.h"
@@ -203,8 +202,7 @@ private:
   bool runShellCommandBlocking(const std::string& command);
   bool runIdleAction(const IdleActionRequest& action);
   void onIconThemeChanged();
-  void onGraphicsReset(RenderGraphicsResetStatus status);
-  void onGraphiteDeviceLost(RenderGraphicsResetStatus status);
+  void onGraphiteDeviceLost(RenderDeviceStatus status);
   void rebuildGraphiteDevice();
   void requestAllSurfacesRedraw();
   void onUpowerStateChangedForHooks();
@@ -290,10 +288,8 @@ private:
   TelemetryService m_telemetryService;
   ScreenTimeService m_screenTimeService;
 
-  GlSharedContext m_glShared;
   SharedTextureCache m_sharedTextureCache;
   RenderContext m_renderContext;
-  RenderContext m_graphiteRenderContext;
   ThumbnailService m_thumbnailService;
   WallpaperScanner m_wallpaperScanner;
   Bar m_bar;

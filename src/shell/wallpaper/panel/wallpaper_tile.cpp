@@ -433,7 +433,7 @@ void WallpaperTile::refreshThumbnail(Renderer& renderer) {
     return;
   }
 
-  const TextureHandle handle = m_thumbnails->peek(m_thumbPath, m_thumbTargetPx);
+  const TextureHandle handle = m_thumbnails->peek(m_thumbPath, renderer.textureManager(), m_thumbTargetPx);
   if (handle.id != 0) {
     m_loadingThumbnail = false;
     m_thumb->setExternalTexture(renderer, handle);

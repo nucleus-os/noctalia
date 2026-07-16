@@ -10,7 +10,6 @@
 #include "render/animation/animation.h"
 #include "render/backend/render_backend.h"
 #include "render/core/render_styles.h"
-#include "render/core/shared_texture_cache.h"
 #include "render/render_context.h"
 #include "shell/wallpaper/wallpaper_instance.h"
 #include "shell/wallpaper/wallpaper_paths.h"
@@ -393,18 +392,7 @@ namespace {
 Wallpaper::Wallpaper() = default;
 
 Wallpaper::~Wallpaper() {
-  for (auto& inst : m_instances) {
-    releaseInstanceTextures(*inst);
-  }
-}
-
-TextureHandle Wallpaper::currentTexture() const {
-  for (const auto& inst : m_instances) {
-    if (inst->currentTexture.id != 0) {
-      return inst->currentTexture;
-    }
-  }
-  return {};
+  destroyInstances();
 }
 
 std::string Wallpaper::currentPath() const {
@@ -451,42 +439,20 @@ bool Wallpaper::onPointerEvent(const PointerEvent& event) {
   return true;
 }
 
-void Wallpaper::onGpuResourcesInvalidated() {
-  for (auto& inst : m_instances) {
-    if (inst->currentSourceKind == WallpaperSourceKind::Image && !inst->currentPath.empty()) {
-      if (m_textureCache != nullptr && m_textureCache->shared()) {
-        inst->currentTexture = m_textureCache->peek(inst->currentPath);
-      } else if (m_renderContext != nullptr) {
-        if (inst->currentTexture.id != 0) {
-          m_renderContext->backend().textureManager().unload(inst->currentTexture);
-        }
-        inst->currentTexture = m_renderContext->backend().textureManager().loadFromFile(inst->currentPath, 0, true);
-      }
-    }
-    if (inst->nextSourceKind == WallpaperSourceKind::Image && !inst->pendingPath.empty()) {
-      if (m_textureCache != nullptr && m_textureCache->shared()) {
-        inst->nextTexture = m_textureCache->peek(inst->pendingPath);
-      } else if (m_renderContext != nullptr) {
-        if (inst->nextTexture.id != 0) {
-          m_renderContext->backend().textureManager().unload(inst->nextTexture);
-        }
-        inst->nextTexture = m_renderContext->backend().textureManager().loadFromFile(inst->pendingPath, 0, true);
-      }
-    }
-    updateRendererState(*inst);
-    if (inst->surface != nullptr) {
-      inst->surface->requestRedraw();
-    }
+void Wallpaper::prepareForGraphicsDeviceRebuild() { destroyInstances(); }
+
+void Wallpaper::resumeAfterGraphicsDeviceRebuild() {
+  if (!m_wallpaperEnabled) {
+    return;
   }
+  syncInstances();
+  m_changed.emit();
 }
 
-bool Wallpaper::initialize(
-    WaylandConnection& wayland, ConfigService* config, RenderContext* renderContext, SharedTextureCache* textureCache
-) {
+bool Wallpaper::initialize(WaylandConnection& wayland, ConfigService* config, RenderContext& renderContext) {
   m_wayland = &wayland;
   m_config = config;
-  m_renderContext = renderContext;
-  m_textureCache = textureCache;
+  m_renderContext = &renderContext;
 
   // Register reload callback unconditionally so toggling enabled in config works.
   m_config->addReloadCallback([this]() { reload(); }, "wallpaper");
@@ -1298,18 +1264,28 @@ void Wallpaper::releaseInstanceTextures(WallpaperInstance& inst) {
   releaseTexture(inst.nextTexture, inst.pendingPath);
 }
 
+void Wallpaper::destroyInstances() {
+  for (auto& inst : m_instances) {
+    releaseInstanceTextures(*inst);
+  }
+  m_instances.clear();
+  m_textureCache.clear();
+}
+
 TextureHandle Wallpaper::acquireTexture(const std::string& path) {
-  if (path.empty() || m_textureCache == nullptr) {
+  if (path.empty() || m_renderContext == nullptr) {
     return {};
   }
-
-  auto handle = m_textureCache->acquire(path);
-  if (handle.id != 0 || m_textureCache->shared() || m_renderContext == nullptr) {
-    return handle;
+  if (auto it = m_textureCache.find(path); it != m_textureCache.end()) {
+    ++it->second.refCount;
+    return it->second.handle;
   }
 
-  m_renderContext->backend().makeCurrentNoSurface();
-  return m_renderContext->textureManager().loadFromFile(path, 0, true);
+  TextureHandle handle = m_renderContext->textureManager().loadFromFile(path, 0, true);
+  if (handle.valid()) {
+    m_textureCache.emplace(path, CachedTexture{.handle = handle, .refCount = 1});
+  }
+  return handle;
 }
 
 void Wallpaper::releaseTexture(TextureHandle& handle, const std::string& path) {
@@ -1317,17 +1293,16 @@ void Wallpaper::releaseTexture(TextureHandle& handle, const std::string& path) {
     return;
   }
 
-  if (m_textureCache != nullptr && m_textureCache->shared()) {
-    m_textureCache->release(handle, path);
+  auto cached = m_textureCache.find(path);
+  if (cached == m_textureCache.end()) {
+    handle = {};
     return;
   }
-
-  if (m_renderContext != nullptr) {
-    m_renderContext->backend().makeCurrentNoSurface();
-    m_renderContext->textureManager().unload(handle);
-    return;
+  --cached->second.refCount;
+  if (cached->second.refCount <= 0 && m_renderContext != nullptr) {
+    m_renderContext->textureManager().unload(cached->second.handle);
+    m_textureCache.erase(cached);
   }
-
   handle = {};
 }
 

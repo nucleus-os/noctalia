@@ -1,18 +1,34 @@
 #pragma once
 
+#include "render/core/color.h"
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <optional>
 #include <vector>
 
 class TextureManager;
 
 enum class TextAlign : std::uint8_t { Start, Center, End };
+enum class ParagraphDirection : std::uint8_t { Automatic, Ltr, Rtl };
 
 // Which end of an overflowing single line is replaced with the ellipsis.
 // Start keeps the tail (useful for file paths: "…/long/mount/point").
-enum class TextEllipsize : std::uint8_t { End, Start, Middle };
+enum class TextEllipsize : std::uint8_t { None, End, Start, Middle };
+
+struct StyledTextRun {
+  std::string text;
+  bool bold = false;
+  bool italic = false;
+  bool monospace = false;
+  bool underline = false;
+  bool strikeThrough = false;
+  std::optional<Color> color;
+  bool operator==(const StyledTextRun&) const = default;
+};
 
 enum class FontWeight : int {
   Thin = 100,
@@ -37,6 +53,14 @@ struct TextCursorStop {
   float x = 0.0f;
   float y = 0.0f;
   float height = 0.0f;
+  // Opposite visual edge of the grapheme beginning at this caret. For RTL
+  // text this is less than x. rangeValid is false for line breaks/end stops.
+  float trailingX = 0.0f;
+  bool rangeValid = false;
+  float alternateX = 0.0f;
+  float alternateY = 0.0f;
+  float alternateHeight = 0.0f;
+  bool alternateValid = false;
 };
 
 struct TextMetrics {
@@ -66,8 +90,19 @@ public:
   [[nodiscard]] virtual TextMetrics measureText(
       std::string_view text, float fontSize, FontWeight fontWeight = FontWeight::Normal, float maxWidth = 0.0f,
       int maxLines = 0, TextAlign align = TextAlign::Start, std::string_view fontFamily = {},
-      TextEllipsize ellipsize = TextEllipsize::End, bool useMarkup = false
+      TextEllipsize ellipsize = TextEllipsize::End,
+      ParagraphDirection direction = ParagraphDirection::Automatic
   ) = 0;
+  [[nodiscard]] virtual TextMetrics measureStyledText(
+      const std::vector<StyledTextRun>& runs, float fontSize, FontWeight fontWeight = FontWeight::Normal,
+      float maxWidth = 0.0f, int maxLines = 0, TextAlign align = TextAlign::Start,
+      std::string_view fontFamily = {}, TextEllipsize ellipsize = TextEllipsize::End,
+      ParagraphDirection direction = ParagraphDirection::Automatic
+  ) {
+    std::string text;
+    for (const auto& run : runs) text += run.text;
+    return measureText(text, fontSize, fontWeight, maxWidth, maxLines, align, fontFamily, ellipsize, direction);
+  }
   [[nodiscard]] virtual TextMetrics measureFont(float fontSize, FontWeight fontWeight = FontWeight::Normal) = 0;
 
   // Canonical "as tall as a line of text" row height: the rounded vertical

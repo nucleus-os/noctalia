@@ -54,6 +54,7 @@
 #include "pipewire/sound_player.h"
 #include "render/animation/motion_service.h"
 #include "render/backend/render_backend.h"
+#include "render/backend/graphite_offscreen_golden.h"
 #include "render/core/texture_manager.h"
 #include "render/text/font_weight_catalog.h"
 #include "scripting/plugin_ipc.h"
@@ -96,6 +97,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -120,23 +122,27 @@ void Application::initUi() {
   // Wiring is complete and outputs are enumerated; build every per-output layer
   // surface once in canonical order. initialize() above only wired dependencies.
   reconcileOutputSurfaces();
+
+  if (const char* rebuild = std::getenv("NOCTALIA_TEST_GRAPHICS_DEVICE_REBUILD");
+      rebuild != nullptr && std::string_view(rebuild) == "1") {
+    DeferredCall::callLater([this]() { onGraphiteDeviceLost(RenderDeviceStatus::Lost); });
+  }
 }
 
 void Application::initUiRenderSurfacesAndSettings() {
 
-  m_renderContext.initialize(m_glShared);
-  m_graphiteRenderContext.initializeGraphite(m_graphicsDevice);
-  m_renderContext.setGraphicsResetCallback([this](RenderGraphicsResetStatus status) { onGraphicsReset(status); });
-  m_graphiteRenderContext.setGraphicsResetCallback(
-      [this](RenderGraphicsResetStatus status) { onGraphiteDeviceLost(status); }
-  );
-  if (!m_glShared.hasSharedContext()) {
-    m_asyncTextureCache.setMakeCurrentCallback([this]() { m_renderContext.backend().makeCurrentNoSurface(); });
+  m_renderContext.initializeGraphite(m_graphicsDevice);
+  if (const char* golden = std::getenv("NOCTALIA_TEST_GRAPHITE_OFFSCREEN_GOLDEN");
+      golden != nullptr && std::string_view(golden) == "1") {
+    runGraphiteOffscreenGolden(m_graphicsDevice);
+    kLog.info("Graphite offscreen text/image/effect/native golden and animated CPU/GPU references passed");
   }
+  m_sharedTextureCache.initialize(m_renderContext.backend().textureManager());
+  m_asyncTextureCache.initialize(m_renderContext.backend().textureManager());
+  m_renderContext.setDeviceStatusCallback([this](RenderDeviceStatus status) { onGraphiteDeviceLost(status); });
   m_renderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
-  m_graphiteRenderContext.setTextFontFamily(m_configService.config().shell.fontFamily);
-  m_wallpaper.initialize(m_wayland, &m_configService, &m_renderContext, &m_sharedTextureCache);
-  m_backdrop.initialize(m_wayland, &m_configService, &m_sharedTextureCache, &m_glShared);
+  m_wallpaper.initialize(m_wayland, &m_configService, m_renderContext);
+  m_backdrop.initialize(m_wayland, &m_configService, m_graphicsDevice);
   m_settingsWindow.initialize(
       m_wayland, &m_configService, &m_renderContext, &m_dependencyService, m_upowerService.get(), &m_idleManager,
       &m_compositorPlatform, m_accountsService.get()
@@ -474,7 +480,7 @@ void Application::initInputDispatch() {
 
 void Application::initPanelManagerAndPanels() {
   // Panel manager must be before bar so widgets can access PanelManager::instance()
-  m_panelManager.initialize(m_compositorPlatform, &m_configService, &m_renderContext, &m_graphiteRenderContext);
+  m_panelManager.initialize(m_compositorPlatform, &m_configService, &m_renderContext);
   m_panelManager.setOpenSettingsWindowCallback([this](std::string context) {
     m_settingsWindow.open(std::move(context));
   });
@@ -948,7 +954,6 @@ void Application::initWidgetControllersAndCallbacks() {
         lastShellFontFamily = newShellFontFamily;
         text::invalidateFontWeightCatalogCache();
         m_renderContext.setTextFontFamily(newShellFontFamily);
-        m_graphiteRenderContext.setTextFontFamily(newShellFontFamily);
         m_bar.requestLayout();
         m_dock.requestLayout();
         m_desktopWidgetsController.requestLayout();

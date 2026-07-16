@@ -208,7 +208,7 @@ void LockscreenWidgetsHost::createInstance(
   widget->setBox(state.boxWidth, state.boxHeight);
 
   if (surface.renderTarget().isReady()) {
-    m_renderContext->makeCurrent(surface.renderTarget());
+    m_renderContext->selectTarget(surface.renderTarget());
     widget->update(*m_renderContext);
     widget->layout(*m_renderContext);
   }
@@ -292,7 +292,7 @@ void LockscreenWidgetsHost::syncSurfaceFrameTick(LockSurface* surfacePtr) {
     if (host->m_renderContext == nullptr) {
       return;
     }
-    host->m_renderContext->makeCurrent(surfacePtr->renderTarget());
+    host->m_renderContext->selectTarget(surfacePtr->renderTarget());
 
     bool needsRedraw = false;
     for (auto& instance : host->m_instances) {
@@ -339,7 +339,7 @@ void LockscreenWidgetsHost::prepareFrame(LockSurface& surface, bool needsUpdate,
     return;
   }
 
-  m_renderContext->makeCurrent(surface.renderTarget());
+  m_renderContext->selectTarget(surface.renderTarget());
 
   const float baseUiScale = m_config != nullptr ? m_config->config().accessibility.uiScale : 1.0f;
   const auto surfaceW = static_cast<float>(surface.width());

@@ -4,7 +4,6 @@
 #include "core/build_info.h"
 #include "core/deferred_call.h"
 #include "core/input/keybind_matcher.h"
-#include "core/log.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "dbus/accounts/accounts_service.h"
 #include "dbus/mpris/mpris_art.h"
@@ -40,8 +39,6 @@
 using namespace control_center;
 
 namespace {
-
-  constexpr Logger kLog("control-center");
 
   constexpr float kHomeAvatarScale = 2.6f;
   // Avatar sources above this size decode noticeably slowly; warn so users understand why.
@@ -216,16 +213,6 @@ std::unique_ptr<Flex> HomeTab::create() {
 
   {
     const float wallpaperRadius = std::max(0.0f, Style::scaledRadiusXl(scale) - Style::borderWidth);
-    userCard->addChild(
-        ui::image({
-            .out = &m_wallpaperPlaceholder,
-            .fit = ImageFit::Cover,
-            .radius = wallpaperRadius,
-            .participatesInLayout = false,
-            .configure = [](Image& image) { image.setZIndex(-2); },
-        })
-    );
-
     userCard->addChild(
         ui::image({
             .out = &m_wallpaperBg,
@@ -967,11 +954,6 @@ void HomeTab::layoutWallpaperBackground(Renderer& renderer) {
   const float ch = std::max(0.0f, m_userCard->height() - bw * 2.0f);
   m_wallpaperBg->setPosition(bw, bw);
   m_wallpaperBg->setSize(cw, ch);
-  if (m_wallpaperPlaceholder != nullptr) {
-    m_wallpaperPlaceholder->setPosition(bw, bw);
-    m_wallpaperPlaceholder->setSize(cw, ch);
-  }
-
   if (m_wallpaperGradient != nullptr) {
     const float radius = std::max(0.0f, Style::scaledRadiusXl(contentScale()) - bw);
     m_wallpaperGradient->setPosition(bw, bw);
@@ -1013,7 +995,7 @@ void HomeTab::ensureWallpaperThumbnail(const std::string& path, int targetPx) {
 }
 
 void HomeTab::syncWallpaperBackground(Renderer& renderer) {
-  if (m_wallpaperBg == nullptr || m_wallpaperPlaceholder == nullptr) {
+  if (m_wallpaperBg == nullptr) {
     return;
   }
 
@@ -1025,7 +1007,6 @@ void HomeTab::syncWallpaperBackground(Renderer& renderer) {
   ensureWallpaperThumbnail(path, targetPx);
 
   if (path.empty()) {
-    m_wallpaperPlaceholder->setVisible(false);
     m_wallpaperBg->setVisible(false);
     cancelCrispFade();
     m_wallpaperBg->setOpacity(0.0f);
@@ -1034,16 +1015,6 @@ void HomeTab::syncWallpaperBackground(Renderer& renderer) {
     m_crispShown = false;
     m_crispNeedsFade = false;
     return;
-  }
-
-  // Instant placeholder: show the resident full-screen wallpaper texture (already
-  // in VRAM, mipmapped) so the correct wallpaper appears with no decode wait.
-  const TextureHandle resident = m_wallpaper != nullptr ? m_wallpaper->currentTexture() : TextureHandle{};
-  if (resident.valid()) {
-    m_wallpaperPlaceholder->setExternalTexture(renderer, resident);
-    m_wallpaperPlaceholder->setVisible(true);
-  } else {
-    m_wallpaperPlaceholder->setVisible(false);
   }
 
   // Reset the crisp layer when the wallpaper identity or target size changes; the
@@ -1063,7 +1034,7 @@ void HomeTab::syncWallpaperBackground(Renderer& renderer) {
   }
 
   (void)m_thumbnails->uploadPending(renderer.textureManager());
-  const TextureHandle crisp = m_thumbnails->peek(path, targetPx);
+  const TextureHandle crisp = m_thumbnails->peek(path, renderer.textureManager(), targetPx);
   if (!crisp.valid()) {
     // Still decoding: keep the placeholder; fade the crisp layer in once it lands.
     m_crispNeedsFade = true;
@@ -1192,7 +1163,6 @@ void HomeTab::onClose() {
   m_crispWorkingSize = 0;
   m_crispShown = false;
   m_crispNeedsFade = false;
-  m_wallpaperPlaceholder = nullptr;
   m_wallpaperBg = nullptr;
   m_wallpaperGradient = nullptr;
   m_mediaTrack = nullptr;

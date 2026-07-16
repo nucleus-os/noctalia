@@ -119,7 +119,7 @@ void FileEntryTile::bind(
 
 void FileEntryTile::refreshThumbnail(Renderer& renderer) {
   if (m_thumbnailEligible && !m_thumbnailPath.empty() && m_thumbnails != nullptr) {
-    const TextureHandle handle = m_thumbnails->peek(m_thumbnailPath);
+    const TextureHandle handle = m_thumbnails->peek(m_thumbnailPath, renderer.textureManager());
     if (handle.id != 0) {
       m_image->setExternalTexture(renderer, handle);
       m_image->setVisible(true);

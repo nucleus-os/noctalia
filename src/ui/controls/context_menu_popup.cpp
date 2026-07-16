@@ -100,7 +100,7 @@ void ContextMenuPopup::open(ContextMenuPopupRequest request) {
       return;
     }
 
-    self->m_renderContext.makeCurrent(self->m_surface->renderTarget());
+    self->m_renderContext.selectTarget(self->m_surface->renderTarget());
 
     const bool needsSceneBuild = self->m_sceneRoot == nullptr
         || static_cast<std::uint32_t>(std::round(self->m_sceneRoot->width())) != width

@@ -1,0 +1,59 @@
+
+
+uniform float u_time;
+uniform float u_item_width;
+uniform float u_item_height;
+uniform float4 u_bg_color;
+uniform float u_radius;
+uniform float u_alternative;
+uniform float u_night;
+uniform float u_cloud_amount;
+uniform float u_intensity;
+uniform float3 u_sky_top;
+uniform float3 u_sky_bottom;
+
+// Literal condition-sky gradient (Option A): light near the top, deeper toward the bottom.
+// NOTE: this is a binary day/night sky. A future enhancement (see weather_tab.cpp
+// weatherEffectForCode) could interpolate a continuous dawn->dusk->night sky from the
+// real sunrise/sunset times, matching Apple Weather more closely.
+float3 computeBase(float2 uv) {
+    return mix(u_sky_top, u_sky_bottom, smoothstep(0.0, 1.0, uv.y));
+}
+
+float roundedBoxSDF(float2 center, float2 size, float radius) {
+    float2 q = abs(center) - size + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
+}
+
+float cornerMask(float2 v_uv) {
+    float2 pixelPos = v_uv * float2(u_item_width, u_item_height);
+    float2 center = pixelPos - float2(u_item_width, u_item_height) * 0.5;
+    float2 halfSize = float2(u_item_width, u_item_height) * 0.5;
+    float dist = roundedBoxSDF(center, halfSize, u_radius);
+    return 1.0 - smoothstep(-1.0, 0.0, dist);
+}
+
+float h11(float n){return fract(sin(n*78.233)*43758.5453);}
+float rainLayer(float2 uv,float t,float cols,float rows,float fall,float len,float slant,float seed){
+  uv.x += uv.y*slant + seed;
+  float xc=uv.x*cols; float colId=floor(xc); float fx=fract(xc)-0.5;
+  float cr=h11(colId*1.7+seed);
+  float y=uv.y*rows - t*fall*(0.55+cr*1.05) + cr*17.0;
+  float rowId=floor(y); float fy=fract(y);
+  float present=step(0.64, h11(colId*3.3+rowId*1.1+seed));
+  float streak=smoothstep(len,0.0,fy)*smoothstep(0.0,0.04,fy);
+  float thin=pow(smoothstep(0.5,0.0,abs(fx)),9.0);
+  return present*streak*thin;
+}
+float4 main(float2 fragCoord){
+  float2 v_uv=fragCoord/float2(u_item_width,u_item_height);
+  float2 uv=v_uv;float aspect=u_item_width/u_item_height;float2 p=float2(uv.x*aspect,uv.y);float t=u_time;
+  float r=rainLayer(p,t,26.0,4.0,2.2,0.60,0.13,0.0)*0.5
+         +rainLayer(p,t,38.0,5.0,2.6,0.62,0.10,7.0)*0.42
+         +rainLayer(p,t,54.0,6.0,3.0,0.66,0.07,15.0)*0.34;
+  r=clamp(r*u_intensity,0.0,1.0);
+  float3 base=computeBase(uv);float rd=mix(1.0,0.82,u_night);
+  float3 col=mix(base,float3(0.90,0.93,1.0),r*0.4*rd);
+  float m=cornerMask(uv);float a=m*u_bg_color.a;
+  return float4(col*a,a);
+}

@@ -49,7 +49,7 @@ std::string ClockWidget::formatTimeText() const {
 
   // Fallback for vertical bars when no explicit vertical_format is configured:
   // stack each whitespace- or colon-separated token on its own line so "21:15"
-  // splits into "21" / "15". Matches Pango's lineBudget (1 + '\n' count) so
+  // splits into "21" / "15". Matches the paragraph line budget (1 + '\n' count) so
   // nothing gets ellipsized unless a single token is wider than the bar.
   auto text = m_timezone.empty() ? formatLocalTime(m_format.c_str()) : formatTimezoneTime(m_format.c_str(), m_timezone);
   std::string out;

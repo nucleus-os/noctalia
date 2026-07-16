@@ -11,7 +11,37 @@ default:
 configure m=mode install_prefix=prefix:
     #!/usr/bin/env bash
     set -euo pipefail
-    args=(--buildtype={{ if m == "release" { "release" } else { "debug" } }} -Dcpp_std={{cpp-std}})
+    toolchain_root="${NUCLEUS_TOOLCHAIN_ROOT:-/opt/nucleus-swift/release-6.4.x/usr}"
+    render_sdk="${NUCLEUS_RENDER_SDK_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/nucleus-native-sdk/render}"
+    cpp_deps="${NUCLEUS_CPP_DEPS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/noctalia-cpp-deps/clang-21-libcxx}"
+    cef_sdk="${CEF_SDK_PATH:-}"
+    if [[ -z "$cef_sdk" ]]; then
+        cef_metadata="${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/cef/dist/latest.json"
+        if [[ -f "$cef_metadata" ]]; then
+            cef_sdk="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dist_dir"])' "$cef_metadata")"
+        fi
+    fi
+    for contract in "$render_sdk/manifest.json" "$cpp_deps/share/noctalia-cpp-deps/manifest.json"; do
+        if [[ ! -f "$contract" ]]; then
+            echo "error: required generated build contract is missing: $contract" >&2
+            echo "run the Nucleus SDK/bootstrap workflow or set the corresponding *_PATH variable" >&2
+            exit 1
+        fi
+    done
+    if [[ -z "$cef_sdk" || ! -f "$cef_sdk/Release/libcef.so" ]]; then
+        echo "error: codec-enabled CEF SDK not found; set CEF_SDK_PATH or generate ~/.cache/nucleus/cef/dist/latest.json" >&2
+        exit 1
+    fi
+    export CC="${CC:-$toolchain_root/bin/clang}"
+    export CXX="${CXX:-$toolchain_root/bin/clang++}"
+    export LD_LIBRARY_PATH="$cpp_deps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    args=(
+        --buildtype={{ if m == "release" { "release" } else { "debug" }}
+        -Dcpp_std={{cpp-std}}
+        -Dnucleus_render_sdk_path="$render_sdk"
+        -Dnucleus_cpp_deps_path="$cpp_deps"
+        -Dcef_sdk_path="$cef_sdk"
+    )
     [[ "{{m}}" == "release" ]] && args+=(-Db_lto=true)
     [[ "{{m}}" == "asan"    ]] && args+=(-Db_sanitize=address,undefined)
     if [[ -d "build-{{m}}" ]]; then

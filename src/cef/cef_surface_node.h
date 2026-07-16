@@ -27,10 +27,9 @@ public:
   // painting until re-attached.
   void detach();
 
-  // Upload the latest browser frame into the image texture. CONTRACT: the
-  // caller must have made the GL context current first (as every other
-  // out-of-renderScene upload in the shell does). Returns true if a new frame
-  // was uploaded.
+  // Adopt the latest browser frame into the image texture. The caller must be
+  // inside the Graphite frame that will sample it. Returns true when a fresh
+  // frame was adopted.
   bool syncTexture(TextureManager& textures);
   [[nodiscard]] InputArea* inputArea() const noexcept { return m_input; }
 
@@ -44,4 +43,5 @@ private:
   CefService& m_service;
   ImageNode* m_image = nullptr;
   InputArea* m_input = nullptr;
+  bool m_attached = false;
 };

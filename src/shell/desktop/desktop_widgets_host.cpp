@@ -265,7 +265,7 @@ void DesktopWidgetsHost::createInstance(const DesktopWidgetState& state, const W
     if (!rawInstance->widget->needsFrameTick()) {
       return;
     }
-    m_renderContext->makeCurrent(rawInstance->surface->renderTarget());
+    m_renderContext->selectTarget(rawInstance->surface->renderTarget());
     rawInstance->widget->onFrameTick(deltaMs, *m_renderContext);
   });
 
@@ -306,7 +306,7 @@ void DesktopWidgetsHost::prepareFrame(DesktopWidgetInstance& instance, bool need
     return;
   }
 
-  m_renderContext->makeCurrent(instance.surface->renderTarget());
+  m_renderContext->selectTarget(instance.surface->renderTarget());
 
   buildScene(instance);
 

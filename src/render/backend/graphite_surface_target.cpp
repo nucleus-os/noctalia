@@ -5,6 +5,7 @@
 #include "core/tracy_latency.h"
 #include "render/graphics_device.h"
 #include "render/vulkan/vulkan_result.h"
+#include "render/vulkan/vulkan_wsi_fault.h"
 
 #include <wayland-client-core.h>
 #include <vulkan/vulkan_wayland.h>
@@ -40,22 +41,6 @@ namespace {
   constexpr Logger kLog("vulkan-wsi");
   constexpr std::size_t kFramesInFlight = 2;
 
-  RenderFrameStatus classifyFrameResult(VkResult result) {
-    switch (result) {
-    case VK_SUCCESS:
-      return RenderFrameStatus::Presented;
-    case VK_SUBOPTIMAL_KHR:
-    case VK_ERROR_OUT_OF_DATE_KHR:
-      return RenderFrameStatus::RecreateSwapchain;
-    case VK_ERROR_SURFACE_LOST_KHR:
-      return RenderFrameStatus::SurfaceLost;
-    case VK_ERROR_DEVICE_LOST:
-      return RenderFrameStatus::DeviceLost;
-    default:
-      return RenderFrameStatus::Failed;
-    }
-  }
-
   VkSurfaceFormatKHR chooseSurfaceFormat(std::span<const VkSurfaceFormatKHR> formats) {
     constexpr VkFormat preferred[] = {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
     for (VkFormat format : preferred) {
@@ -69,6 +54,16 @@ namespace {
     throw std::runtime_error(
         "Wayland surface supports neither B8G8R8A8_UNORM nor R8G8B8A8_UNORM with SRGB_NONLINEAR"
     );
+  }
+
+  const char* surfaceFormatName(VkFormat format) {
+    switch (format) {
+      case VK_FORMAT_B8G8R8A8_SRGB: return "BGRA8_SRGB";
+      case VK_FORMAT_R8G8B8A8_SRGB: return "RGBA8_SRGB";
+      case VK_FORMAT_B8G8R8A8_UNORM: return "BGRA8_UNORM";
+      case VK_FORMAT_R8G8B8A8_UNORM: return "RGBA8_UNORM";
+      default: return "unknown";
+    }
   }
 
   VkExtent2D chooseExtent(
@@ -136,7 +131,9 @@ struct GraphiteSurfaceTarget::Impl {
   std::uint32_t requestedWidth = 0;
   std::uint32_t requestedHeight = 0;
   bool swapchainInvalid = false;
+  bool surfaceInvalid = false;
   bool deviceLost = false;
+  bool injectedDeviceLoss = false;
   SwapchainReason swapchainReason = SwapchainReason::Initial;
   std::uint64_t swapchainsCreated = 0;
   std::list<PresentationFeedback> presentationFeedbacks;
@@ -306,6 +303,43 @@ struct GraphiteSurfaceTarget::Impl {
         .surface = waylandSurface,
     };
     requireVulkan(vkCreateWaylandSurfaceKHR(graphics.instance(), &info, nullptr, &surface), "vkCreateWaylandSurfaceKHR");
+  }
+
+  void recreateSurface() {
+    cancelAllPresentationFeedback();
+    if (generation != nullptr) {
+      destroyGeneration(*generation, !deviceLost);
+      generation.reset();
+    }
+    for (auto& old : retired) {
+      destroyGeneration(*old, !deviceLost);
+    }
+    retired.clear();
+    for (auto& frame : frames) {
+      frame.acquirePending = false;
+      frame.lastImage.reset();
+    }
+    if (surface != VK_NULL_HANDLE) {
+      vkDestroySurfaceKHR(graphics.instance(), surface, nullptr);
+      surface = VK_NULL_HANDLE;
+    }
+    createSurface();
+    swapchainReason = SwapchainReason::Initial;
+    swapchainInvalid = true;
+    surfaceInvalid = false;
+    createSwapchain();
+  }
+
+  bool recoverLostSurface() noexcept {
+    try {
+      recreateSurface();
+      kLog.info("recreated Vulkan Wayland surface after VK_ERROR_SURFACE_LOST_KHR");
+      return true;
+    } catch (const std::exception& error) {
+      surfaceInvalid = true;
+      kLog.error("failed to recreate lost Vulkan Wayland surface: {}", error.what());
+      return false;
+    }
   }
 
   void createFrameSlots() {
@@ -499,7 +533,7 @@ struct GraphiteSurfaceTarget::Impl {
           throw std::runtime_error("Skia rejected a Vulkan swapchain image");
         }
         image.surface = SkSurfaces::WrapBackendTexture(
-            graphics.recorder(), image.backendTexture, nullptr, nullptr, nullptr, nullptr,
+            graphics.recorder(), image.backendTexture, SkColorSpace::MakeSRGB(), nullptr, nullptr, nullptr,
             "Noctalia Wayland swapchain"
         );
         if (image.surface == nullptr) {
@@ -546,7 +580,7 @@ struct GraphiteSurfaceTarget::Impl {
     );
     kLog.info(
         "created FIFO swapchain {}x{} with {} images ({}) reason={}", chosenExtent.width, chosenExtent.height,
-        actualImageCount, chosenFormat.format == VK_FORMAT_B8G8R8A8_UNORM ? "BGRA8" : "RGBA8",
+        actualImageCount, surfaceFormatName(chosenFormat.format),
         static_cast<std::int64_t>(swapchainReason)
     );
   }
@@ -554,6 +588,18 @@ struct GraphiteSurfaceTarget::Impl {
   SkCanvas* begin(RenderFrameStatus& status) {
     NOCTALIA_TRACE_ZONE("Graphite WSI begin frame");
     status = RenderFrameStatus::Deferred;
+    // Completion callbacks retire textures whose handles were invalidated in
+    // earlier frames. Poll before recording new work so their backing images
+    // are released promptly without a CPU wait.
+    if (graphics.graphiteContext() != nullptr) {
+      graphics.graphiteContext()->checkAsyncWorkCompletion();
+    }
+    if (surfaceInvalid) {
+      if (!recoverLostSurface()) {
+        status = RenderFrameStatus::SurfaceLost;
+        return nullptr;
+      }
+    }
     if (generation == nullptr || generation->images.empty() || currentFrame != nullptr) {
       return nullptr;
     }
@@ -571,12 +617,21 @@ struct GraphiteSurfaceTarget::Impl {
     std::uint32_t imageIndex = frame.acquiredImage;
     if (!frame.acquirePending) {
       VkResult acquire = VK_SUCCESS;
-      {
+      const auto injected = takeInjectedVulkanWsiFault(VulkanWsiCall::Acquire);
+      if (injected.has_value()) {
+        kLog.warn("injecting acquire result {}", vulkanResultName(injected->result));
+      }
+      if (injected.has_value() && injected->skipDriverCall) {
+        acquire = injected->result;
+      } else {
         NOCTALIA_TRACE_ZONE("Graphite vkAcquireNextImageKHR");
         acquire = vkAcquireNextImageKHR(
             graphics.device(), generation->swapchain, UINT64_MAX, VK_NULL_HANDLE,
             frame.acquireFence, &imageIndex
         );
+        if (injected.has_value() && acquire == VK_SUCCESS) {
+          acquire = injected->result;
+        }
       }
       if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
         swapchainInvalid = true;
@@ -592,7 +647,13 @@ struct GraphiteSurfaceTarget::Impl {
         swapchainReason = SwapchainReason::AcquireSuboptimal;
         status = RenderFrameStatus::Presented;
       } else {
-        status = classifyFrameResult(acquire);
+        status = classifyVulkanWsiResult(acquire);
+      }
+      if (status == RenderFrameStatus::SurfaceLost) {
+        surfaceInvalid = true;
+        if (recoverLostSurface()) {
+          status = RenderFrameStatus::RecreateSwapchain;
+        }
       }
       if (status != RenderFrameStatus::Presented) {
         return nullptr;
@@ -651,9 +712,16 @@ struct GraphiteSurfaceTarget::Impl {
         return RenderFrameStatus::Failed;
       }
     }
+    const auto submitFault = takeInjectedVulkanWsiFault(VulkanWsiCall::GraphiteSubmit);
+    if (submitFault.has_value()) {
+      kLog.warn("injecting Graphite submit result {}", vulkanResultName(submitFault->result));
+    }
     {
       NOCTALIA_TRACE_ZONE("Graphite submit");
-      if (!graphics.graphiteContext()->submit(skgpu::graphite::SyncToCpu::kNo)) {
+      const bool submitted = graphics.graphiteContext()->submit(
+          submitFault.has_value() ? skgpu::graphite::SyncToCpu::kYes : skgpu::graphite::SyncToCpu::kNo
+      );
+      if (!submitted) {
         currentFrame = nullptr;
         currentImage = nullptr;
         return RenderFrameStatus::DeviceLost;
@@ -661,6 +729,15 @@ struct GraphiteSurfaceTarget::Impl {
     }
     if (recordingSubmitted) {
       recordingSubmitted();
+    }
+    if (submitFault.has_value()) {
+      // The test recording really completed, so its resources can be torn down
+      // normally. Report device loss only after honoring the submission and
+      // external-image completion contracts.
+      currentFrame = nullptr;
+      currentImage = nullptr;
+      injectedDeviceLoss = true;
+      return RenderFrameStatus::DeviceLost;
     }
 
     const VkSwapchainPresentFenceInfoKHR fenceInfo{
@@ -682,9 +759,16 @@ struct GraphiteSurfaceTarget::Impl {
     // commit, rather than to a later frame submitted by another code path.
     PresentationFeedback* presentationFeedback = requestPresentationFeedback();
     VkResult present = VK_SUCCESS;
+    const auto injected = takeInjectedVulkanWsiFault(VulkanWsiCall::Present);
+    if (injected.has_value()) {
+      kLog.warn("injecting present result {}", vulkanResultName(injected->result));
+    }
     {
       NOCTALIA_TRACE_ZONE("Graphite vkQueuePresentKHR");
       present = vkQueuePresentKHR(graphics.graphicsQueue(), &presentInfo);
+    }
+    if (injected.has_value() && present == VK_SUCCESS) {
+      present = injected->result;
     }
     const tracy_latency::PresentationTrace presentationTrace = tracy_latency::presentationSubmitted();
     if (presentationFeedback != nullptr) {
@@ -702,13 +786,16 @@ struct GraphiteSurfaceTarget::Impl {
     currentFrame = nullptr;
     currentImage = nullptr;
     nextFrame = (nextFrame + 1) % kFramesInFlight;
-    const RenderFrameStatus status = classifyFrameResult(present);
+    const RenderFrameStatus status = classifyVulkanWsiResult(present);
     if (present == VK_ERROR_OUT_OF_DATE_KHR) {
       swapchainInvalid = true;
       swapchainReason = SwapchainReason::PresentOutOfDate;
     } else if (present == VK_SUBOPTIMAL_KHR) {
       swapchainInvalid = true;
       swapchainReason = SwapchainReason::PresentSuboptimal;
+    } else if (present == VK_ERROR_SURFACE_LOST_KHR) {
+      surfaceInvalid = true;
+      (void)recoverLostSurface();
     }
     NOCTALIA_TRACE_PLOT("Graphite present result", static_cast<std::int64_t>(present));
     NOCTALIA_TRACE_FRAME("Graphite presented frame");
@@ -832,6 +919,10 @@ SkCanvas* GraphiteSurfaceTarget::beginFrame(RenderFrameStatus& status) {
 
 RenderFrameStatus GraphiteSurfaceTarget::endFrame(const std::function<void()>& recordingSubmitted) {
   return m_impl != nullptr ? m_impl->end(recordingSubmitted) : RenderFrameStatus::Failed;
+}
+
+bool GraphiteSurfaceTarget::deviceLossWasInjected() const noexcept {
+  return m_impl != nullptr && m_impl->injectedDeviceLoss;
 }
 
 VkFormat GraphiteSurfaceTarget::format() const noexcept {

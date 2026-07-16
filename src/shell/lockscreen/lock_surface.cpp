@@ -289,7 +289,6 @@ void LockSurface::setWallpaperPath(std::string wallpaperPath) {
   }
 
   if (m_blurredWallpaperTexture.id != 0 && renderContext() != nullptr) {
-    renderContext()->backend().makeCurrentNoSurface();
     renderContext()->textureManager().unload(m_blurredWallpaperTexture);
     m_blurredWallpaperTexture = {};
   }
@@ -480,7 +479,7 @@ void LockSurface::prepareFrame(bool needsUpdate, bool needsLayout) {
     return;
   }
 
-  renderer->makeCurrent(renderTarget());
+  renderer->selectTarget(renderTarget());
 
   if (m_widgetsHost != nullptr) {
     m_widgetsHost->prepareFrame(*this, needsUpdate, needsLayout);
@@ -722,7 +721,6 @@ void LockSurface::releaseWallpaperTextureRef(const std::string& path) {
     }
     m_textureCache->release(m_wallpaperTexture, releasePath);
   } else if (renderContext() != nullptr) {
-    renderContext()->backend().makeCurrentNoSurface();
     renderContext()->textureManager().unload(m_wallpaperTexture);
     m_wallpaperTexture = {};
   }
@@ -750,7 +748,6 @@ void LockSurface::applyWallpaperTexture() {
       releaseWallpaperTextureRef(m_textureWallpaperPath);
     }
     if (m_blurredWallpaperTexture.id != 0 && renderContext() != nullptr) {
-      renderContext()->backend().makeCurrentNoSurface();
       renderContext()->textureManager().unload(m_blurredWallpaperTexture);
       m_blurredWallpaperTexture = {};
     }
@@ -767,7 +764,6 @@ void LockSurface::applyWallpaperTexture() {
     if (needsReload) {
       newTexture = m_textureCache->acquire(m_wallpaperPath);
       if (newTexture.id == 0 && !m_textureCache->shared() && renderContext() != nullptr) {
-        renderContext()->backend().makeCurrentNoSurface();
         newTexture = renderContext()->textureManager().loadFromFile(m_wallpaperPath, 0, true);
       }
     }
@@ -783,13 +779,12 @@ void LockSurface::applyWallpaperTexture() {
 
       TextureHandle textureToDisplay = m_wallpaperTexture;
       if (m_blurredWallpaperTexture.id != 0 && renderContext() != nullptr) {
-        renderContext()->backend().makeCurrentNoSurface();
         renderContext()->textureManager().unload(m_blurredWallpaperTexture);
         m_blurredWallpaperTexture = {};
       }
       if (m_blurIntensity > 0.0f && renderContext() != nullptr) {
         auto* renderer = renderContext();
-        renderer->makeCurrent(renderTarget());
+        renderer->selectTarget(renderTarget());
         static constexpr int kBlurRounds = 3;
         const float blurRadius = m_blurIntensity * 40.0f;
         const std::uint32_t blurWidth = renderTarget().bufferWidth();
@@ -832,7 +827,6 @@ void LockSurface::releaseCaptureTextures() {
   }
 
   auto& tm = renderContext()->textureManager();
-  renderContext()->backend().makeCurrentNoSurface();
   if (m_blurredWallpaperTexture.id != 0) {
     tm.unload(m_blurredWallpaperTexture);
     m_blurredWallpaperTexture = {};
@@ -866,7 +860,7 @@ void LockSurface::applyBlurredDesktopTexture() {
     return;
   }
 
-  renderer->makeCurrent(renderTarget());
+  renderer->selectTarget(renderTarget());
   auto& tm = renderer->textureManager();
   if (m_captureSourceTexture.id != 0) {
     tm.unload(m_captureSourceTexture);

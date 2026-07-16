@@ -49,11 +49,16 @@ void AppleMusicPanel::onOpen(std::string_view /*context*/) {
 void AppleMusicPanel::onClose() {
   if (m_surface != nullptr) {
     m_surface->detach();
+    m_surface = nullptr;
   }
 }
 
 void AppleMusicPanel::onFrameTick(float /*deltaMs*/) {
   m_service.onFrameOpportunity();
+  // Keep the callback chain alive without redrawing the last imported CEF
+  // buffer. Direct-sampled DMA-BUFs are released after presentation and may be
+  // rewritten by CEF, so only a newly arrived frame may trigger a redraw.
+  PanelManager::instance().requestCallbackTick();
 }
 
 void AppleMusicPanel::onPresentation(const SurfacePresentationFeedback& feedback) {

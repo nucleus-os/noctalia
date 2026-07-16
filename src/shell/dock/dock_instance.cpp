@@ -95,7 +95,7 @@ namespace shell::dock {
       return;
     }
 
-    deps.renderContext.makeCurrent(instance.surface->renderTarget());
+    deps.renderContext.selectTarget(instance.surface->renderTarget());
 
     bool needsModelRebuild = false;
     if (needsUpdate || instance.sceneRoot == nullptr) {

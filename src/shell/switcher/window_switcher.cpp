@@ -1016,7 +1016,7 @@ void WindowSwitcher::prepareFrame(Instance& instance, bool /*needsUpdate*/, bool
     return;
   }
 
-  m_renderContext->makeCurrent(instance.surface->renderTarget());
+  m_renderContext->selectTarget(instance.surface->renderTarget());
 
   const auto metrics = computeSwitcherGridMetrics(
       static_cast<float>(width), static_cast<float>(height), instance.uiLayoutScale, m_windows.size()

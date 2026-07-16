@@ -41,7 +41,7 @@ private:
   Signal<>::ScopedConnection m_paletteConn;
 
   // Memoized measure() inputs — lets repeated layout passes with identical
-  // glyph + size skip the Pango/fontconfig path entirely.
+  // glyph + size use the dedicated icon-font path.
   char32_t m_cachedCodepoint = 0;
   float m_cachedFontSize = 0.0f;
   float m_cachedLogicalFontSize = 0.0f;
