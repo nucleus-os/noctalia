@@ -553,24 +553,24 @@ void Application::initStyleThemeAndWayland() {
     throw std::runtime_error("failed to connect to Wayland display");
   }
 
-  // CEF owns process-wide allocator entry points. Establish that runtime
-  // before Vulkan/validation creates worker-thread TLS, matching the order
-  // proven by the standalone interop gate. Browser creation remains lazy.
+  // Select the compositor-presenting Vulkan device before CEF starts any GPU
+  // process. Child processes receive this identity on their command line and
+  // must never race ahead using Chromium's default adapter selection.
+  m_graphicsDevice.initialize(
+      m_wayland.display(),
+      {.cefExternalMemory = true, .validation = vulkanValidationRequested()},
+      m_wayland.presentation(), m_wayland.presentationClockId()
+  );
+  publishCefGraphicsDevice(m_graphicsDevice);
   if (!m_cefService->initialize()) {
-    throw std::runtime_error("failed to initialize the CEF runtime before Vulkan");
+    throw std::runtime_error("failed to initialize CEF on the selected Vulkan device");
   }
   // Chromium installs process signal handlers during CefInitialize. Restore
   // the shell's cooperative shutdown handlers afterwards so SIGTERM/SIGINT
   // breaks the poll loop and lets CEF close before Graphite/Vulkan teardown.
   std::signal(SIGTERM, signal_handler);
   std::signal(SIGINT, signal_handler);
-  m_graphicsDevice.initialize(
-      m_wayland.display(),
-      {.cefExternalMemory = true, .validation = vulkanValidationRequested()},
-      m_wayland.presentation(), m_wayland.presentationClockId()
-  );
   m_cefService->attachGraphicsDevice(m_graphicsDevice);
-  publishCefGraphicsDevice(m_graphicsDevice);
 
   m_compositorPlatform.initialize();
   m_screenTimeService.initialize(&m_wayland);

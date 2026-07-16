@@ -118,12 +118,8 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
 }
 
 void NoctaliaCefApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) {
-  // GraphicsDevice is initialized after CefInitialize so CEF can establish
-  // its process-wide allocator before Vulkan creates any worker-thread TLS.
-  // Chromium's zygote has already inherited its environment by then, but CEF
-  // still gives us the final command line for each child. Forward the selected
-  // compositor GPU explicitly so ANGLE, native Vulkan, and the Wayland native
-  // pixmap allocator all use the same device as Noctalia.
+  // Forward the compositor-selected GPU explicitly so ANGLE, native Vulkan,
+  // and the Wayland native-pixmap allocator all use Noctalia's device.
   if (const char* uuid = std::getenv("NOCTALIA_CEF_VULKAN_DEVICE_UUID");
       uuid != nullptr && uuid[0] != '\0') {
     cmd->AppendSwitchWithValue("noctalia-cef-vulkan-device-uuid", uuid);
