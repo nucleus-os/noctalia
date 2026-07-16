@@ -32,6 +32,7 @@ public:
   // frame was adopted.
   bool syncTexture(TextureManager& textures);
   [[nodiscard]] InputArea* inputArea() const noexcept { return m_input; }
+  void setCornerRadius(float radius);
 
 protected:
   void doLayout(Renderer& renderer) override;

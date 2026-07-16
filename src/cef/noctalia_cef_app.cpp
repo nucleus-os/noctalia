@@ -8,6 +8,40 @@
 
 namespace {
 
+constexpr std::string_view kAppleMusicTransparentThemeScript = R"JS(
+(() => {
+  const id = 'noctalia-apple-music-transparent-theme-v1';
+  const install = () => {
+    const root = document.documentElement;
+    if (!root) return false;
+    let style = document.getElementById(id);
+    if (!style) {
+      style = document.createElement('style');
+      style.id = id;
+      root.appendChild(style);
+    }
+    style.textContent = `
+      :root, html, body {
+        background-color: transparent !important;
+        background-image: none !important;
+      }
+      nav.navigation {
+        background-color: rgba(38, 38, 40, 0.28) !important;
+        -webkit-backdrop-filter: saturate(2.2) blur(24px) !important;
+        backdrop-filter: saturate(2.2) blur(24px) !important;
+      }
+    `;
+    root.dataset.noctaliaTransparentTheme = 'v1';
+    return true;
+  };
+  if (!install()) {
+    new MutationObserver((_, observer) => {
+      if (install()) observer.disconnect();
+    }).observe(document, {childList: true, subtree: true});
+  }
+})();
+)JS";
+
 void appendCommaSeparatedSwitchValue(
     const CefRefPtr<CefCommandLine>& commandLine, const char* switchName, const char* value
 ) {
@@ -91,6 +125,7 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
   // It is irrelevant to this embedded browser, so keep field trials from
   // enabling it in the browser process.
   appendCommaSeparatedSwitchValue(cmd, "disable-features", "ImmersiveReadAnything");
+  appendCommaSeparatedSwitchValue(cmd, "enable-features", "OverlayScrollbar");
   // GPU compositing remains enabled: production OSR requires shared textures.
   // Keep ANGLE on Vulkan so CEF allocates exportable native pixmaps instead of
   // taking its GL framebuffer path, which cannot back accelerated OSR on the
@@ -113,7 +148,7 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
   const char* nativeVulkan = std::getenv("NOCTALIA_CEF_NATIVE_VULKAN");
   if (std::strcmp(angleBackend, "vulkan") == 0
       && nativeVulkan != nullptr && std::strcmp(nativeVulkan, "1") == 0) {
-    cmd->AppendSwitchWithValue("enable-features", "Vulkan");
+    appendCommaSeparatedSwitchValue(cmd, "enable-features", "Vulkan");
   }
 }
 
@@ -133,5 +168,17 @@ void NoctaliaCefApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) {
 void NoctaliaCefApp::OnScheduleMessagePumpWork(std::int64_t delayMs) {
   if (m_scheduleWork) {
     m_scheduleWork(delayMs);
+  }
+}
+
+void NoctaliaCefApp::OnContextCreated(
+    CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> /*context*/
+) {
+  if (!frame->IsMain()) {
+    return;
+  }
+  const std::string url = frame->GetURL().ToString();
+  if (url.starts_with("https://music.apple.com/")) {
+    frame->ExecuteJavaScript(std::string(kAppleMusicTransparentThemeScript), frame->GetURL(), 0);
   }
 }

@@ -107,6 +107,9 @@ nucleus_skia_cpp_args = [
   '-DSK_GAMMA_APPLY_TO_A8',
   '-DSK_ALLOW_STATIC_GLOBAL_INITIALIZERS=1',
 ]
+# No allocator archives: CEF builds with `use_allocator_shim=false` and the
+# Nucleus render SDK with `skia_use_partition_alloc=false`, so nothing installs a
+# process-wide shim and the whole process allocates through the system malloc.
 nucleus_skia_archives = [
   'skia', 'skshaper', 'skparagraph', 'skunicode_core', 'skunicode_icu',
   'svg', 'skcms', 'skresources', 'freetype2', 'harfbuzz', 'icu',
@@ -117,10 +120,10 @@ nucleus_skia_link_args = ['-Wl,--start-group']
 foreach archive : nucleus_skia_archives
   nucleus_skia_link_args += [nucleus_skia_libdir / ('lib' + archive + '.a')]
 endforeach
-# CEF and Nucleus Skia are built without a process-wide allocator shim. Every
-# symbol contributed by the Nucleus static archive group
-# static archive group stays out of the executable's dynamic symbol table so it
-# cannot preempt Chromium's private Skia implementation.
+# Nucleus Skia and CEF's private Chromium Skia are two different Skia builds in
+# one process. Every symbol the Nucleus static archive group contributes stays
+# out of the executable's dynamic symbol table so it cannot preempt Chromium's
+# copy.
 nucleus_skia_link_args += [
   '-Wl,--end-group',
   '-Wl,--exclude-libs,ALL',
@@ -248,19 +251,6 @@ nlohmann_dep        = dependency('nlohmann_json')
 tomlplusplus_dep = declare_dependency(include_directories: private_cpp_inc)
 pam_dep             = cc.find_library('pam')
 dl_dep              = cpp.find_library('dl', required: false)
-
-jemalloc_option = get_option('jemalloc')
-is_glibc = cpp.get_define('__GLIBC__', prefix: '#include <features.h>') != ''
-jemalloc_deps = []
-jemalloc_cpp_args = []
-
-if jemalloc_option.enabled() and not is_glibc
-  error('jemalloc support requires glibc')
-endif
-
-if jemalloc_option.enabled()
-  error('jemalloc is incompatible with CEF allocator boundaries; use -Djemalloc=disabled')
-endif
 
 # ── Vendored: dr_wav (single-file WAV decoder) ───────────────────────────────
 _drwav_lib = static_library('dr_wav',
@@ -1061,7 +1051,7 @@ _noctalia_deps = [
     md4c_dep,
     libwebp_dep,
     luau_dep,
-  ] + jemalloc_deps + (dl_dep.found() ? [dl_dep] : [])
+  ] + (dl_dep.found() ? [dl_dep] : [])
 
 _cef_root = get_option('cef_sdk_path')
 if _cef_root == ''
@@ -1137,7 +1127,7 @@ noctalia_exe = executable('noctalia',
     '-DNOCTALIA_INSTALL_PREFIX="' + get_option('prefix') + '"',
     '-DNOCTALIA_INSTALL_DATADIR="' + get_option('datadir') + '"',
     '-DNOCTALIA_VERSION="' + meson.project_version() + '"',
-  ] + jemalloc_cpp_args + nucleus_skia_cpp_args,
+  ] + nucleus_skia_cpp_args,
   link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
   build_rpath: _noctalia_build_rpath,
   install_rpath: _noctalia_install_rpath,

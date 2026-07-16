@@ -35,8 +35,11 @@ is mandatory.
   APIs. It does not link `NucleusSkiaGraphiteBridge`.
 - CEF may retain its private Chromium Skia. Noctalia's Nucleus Skia symbols are
   hidden from dynamic symbol interposition at the executable boundary.
-- CEF is a required build and runtime dependency and owns the process allocator
-  boundary. Nucleus Skia is built with `skia_use_partition_alloc=false`.
+- CEF is a required build and runtime dependency. No component installs a
+  process-wide allocator shim: CEF is built with `use_allocator_shim=false` and
+  `enable_backup_ref_ptr_support=false`, and Nucleus Skia with
+  `skia_use_partition_alloc=false`. The whole process allocates through the
+  system malloc, so there is no allocator boundary to maintain.
 - Vulkan is linked directly through `libvulkan`. Volk is not used.
 - Skia's `VulkanAMDMemoryAllocator` is the sole allocator for Graphite-owned
   resources.
@@ -115,17 +118,20 @@ is mandatory.
   stabilized at one descriptor, and Vulkan validation remained clean.
 - The standalone CEF/Graphite interop gate is closed. Production integration
   and longer release-candidate soak testing remain.
-- Production now constructs CEF before its application-owned `GraphicsDevice`,
-  selects the compositor-presenting RTX 4070 Ti, initializes native Graphite,
-  and publishes the selected Vulkan UUID and DRM render node to CEF children.
+- Production initializes its application-owned `GraphicsDevice` before
+  `CefInitialize`: it selects the compositor-presenting RTX 4070 Ti, initializes
+  native Graphite, and publishes the selected Vulkan UUID and DRM render node to
+  CEF children, which must never race ahead on Chromium's default adapter
+  selection. `GraphicsDevice` is declared before `CefService` so reverse member
+  destruction shuts CEF down before Vulkan/Graphite teardown.
 - A validation-enabled production startup and Apple Music panel run succeeded:
   CEF created the browser, loaded Apple Music with HTTP 200, and delivered the
   first accelerated DMA-BUF frame at the panel's 1.5x fractional scale. Vulkan
   validation reported no VUID errors.
 - `setAcceleratedEnabled()` now permits the renderer capability probe after
   process-wide `CefInitialize`; the contract freezes only after browser
-  creation. This preserves allocator-first startup without suppressing the
-  required accelerated browser path.
+  creation. This keeps the required accelerated browser path available without
+  constraining startup order.
 - The production Apple Music panel is now a working Graphite/Vulkan vertical
   slice. It uses its own Graphite render context and Vulkan Wayland swapchain,
   while the rest of the shell continues to use the existing GLES renderer.
@@ -782,7 +788,7 @@ committing an unchanged buffer forever.
    idle CPU/GPU use, breaking AAC/Widevine playback, destabilizing DMA-BUF
    lifetime, or introducing Vulkan validation errors.
 
-### Apple Music transparent-background integration — planned after CEF performance stabilization
+### Apple Music transparent-background integration — implemented, broad visual acceptance pending
 
 Make Apple Music visually participate in Noctalia's panel theme instead of
 painting a full opaque webpage background.
@@ -822,6 +828,38 @@ Verification:
 Exit criterion: Noctalia's panel color and blur show through the intended page
 regions with readable controls, correct alpha, stable performance, and no
 change to Apple Music behavior.
+
+Current status (2026-07-16): the windowless browser explicitly requests a
+transparent background, and the renderer process installs a versioned
+Apple Music stylesheet when the main-frame V8 context is created. A live CSS
+audit of the authenticated home page found that `html` was already transparent
+and `body` was the only full-viewport opaque structural layer, so the retained
+override is deliberately limited to the root and body background rather than
+depending on generated Svelte class names. Artwork and localized surfaces are
+untouched. The navigation glass retains Apple's `saturate(2.2)` treatment but
+uses a lighter 0.28 tint and 24px blur so Noctalia's backdrop remains visible,
+matching the visual weight of the playback glass more closely. Chromium's
+Linux `OverlayScrollbar` feature lets navigation and main-content thumbs float
+without consuming layout width. CEF pointer motion carries held-button flags so
+windowless overlay thumbs receive valid drag sequences.
+
+Live pixel validation confirms that Noctalia's existing panel fill and niri
+blur show through the CEF texture with premultiplied edges intact. Chromium's
+CSS `backdrop-filter` can only sample pixels in Chromium's own render tree; it
+cannot directly sample compositor content behind the exported DMA-BUF. Thus
+niri supplies the external backdrop blur, while Apple's translucent glass and
+any internal Chromium backdrop filtering compose above it. Remaining work is
+the broad navigation/modal/light-theme acceptance matrix listed above.
+
+The Apple Music panel opts out of the standard decorated-panel content inset.
+Its CEF texture fills the panel body and is clipped by Graphite to the same
+rounded outer radius, while Noctalia retains ownership of the background,
+compositor blur region, border, shadow, and rounded Wayland input region.
+The detached Apple Music background inherits the resolved opacity of the bar
+that opened it, including per-output overrides. This makes its outer glass
+sheet match an attached main panel while its transparent CEF texture fills the
+body. Both attached and detached panels use the same niri blur rule and
+ext-background-effect path.
 
 ### Phase 6: implement the production `GraphiteRenderBackend`
 

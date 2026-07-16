@@ -215,10 +215,16 @@ namespace {
     return panelCardOpacityForTransparencyMode(mode, panelBackgroundOpacity);
   }
 
-  float resolveDetachedPanelBackgroundOpacity(ConfigService* configService) {
+  float resolveDetachedPanelBackgroundOpacity(
+      ConfigService* configService, const Panel* panel = nullptr, CompositorPlatform* platform = nullptr,
+      wl_output* output = nullptr, std::string_view sourceBarName = {}
+  ) {
     const auto mode =
         configService != nullptr ? configService->config().shell.panel.transparencyMode : PanelTransparencyMode::Solid;
-    return detachedPanelBackgroundOpacityForTransparencyMode(mode);
+    const float resolved = panel != nullptr && panel->detachedBackgroundInheritsSourceBarOpacity()
+        ? resolvePanelBarConfig(configService, platform, output, sourceBarName).backgroundOpacity
+        : detachedPanelBackgroundOpacityForTransparencyMode(mode);
+    return panel != nullptr ? std::clamp(panel->detachedBackgroundOpacity(resolved), 0.0f, 1.0f) : resolved;
   }
 
   // Floating screen position for a built-in panel (one of kPanelPositions).
@@ -2057,7 +2063,10 @@ void PanelManager::onConfigReloaded() {
     applyDetachedReveal(m_detachedRevealProgress);
   }
   const float panelBackgroundOpacity =
-      m_attachedToBar ? m_attachedBackgroundOpacity : resolveDetachedPanelBackgroundOpacity(m_config);
+      m_attachedToBar ? m_attachedBackgroundOpacity
+                      : resolveDetachedPanelBackgroundOpacity(
+                            m_config, m_activePanel, m_platform, m_output, m_sourceBarName
+                        );
   m_activePanel->setPanelCardOpacity(resolvePanelCardOpacity(m_config, panelBackgroundOpacity));
   m_activePanel->setPanelBordersEnabled(m_config->config().shell.panel.borders);
   if (!m_attachedToBar && m_bgNode != nullptr) {
@@ -2171,7 +2180,10 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
         bg->setRadii(Radii{radius, radius, radius, radius});
         // Fill (opacity-dependent) is applied via applyAttachedDecorationStyle() below.
       } else {
-        bg->setFill(colorSpecFromRole(ColorRole::Surface, resolveDetachedPanelBackgroundOpacity(m_config)));
+        bg->setFill(colorSpecFromRole(
+            ColorRole::Surface,
+            resolveDetachedPanelBackgroundOpacity(m_config, m_activePanel, m_platform, m_output, m_sourceBarName)
+        ));
       }
       m_bgNode = sceneParent->addChild(std::move(bg));
     }
@@ -2186,7 +2198,10 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
     m_contentNode = contentWrapper.get();
     m_activePanel->setAnimationManager(&m_animations);
     const float panelBackgroundOpacity =
-        m_attachedToBar ? m_attachedBackgroundOpacity : resolveDetachedPanelBackgroundOpacity(m_config);
+        m_attachedToBar ? m_attachedBackgroundOpacity
+                        : resolveDetachedPanelBackgroundOpacity(
+                              m_config, m_activePanel, m_platform, m_output, m_sourceBarName
+                          );
     m_activePanel->setPanelCardOpacity(resolvePanelCardOpacity(m_config, panelBackgroundOpacity));
     m_activePanel->setPanelBordersEnabled(m_config->config().shell.panel.borders);
     m_activePanel->create();
@@ -2293,7 +2308,8 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
     m_panelShadowNode->setSize(bgW, bgH);
     if (!m_attachedToBar && panelShadow) {
       const float shadowRadius = Style::scaledRadiusXl(m_activePanel->contentScale());
-      const float panelBackgroundOpacity = resolveDetachedPanelBackgroundOpacity(m_config);
+      const float panelBackgroundOpacity =
+          resolveDetachedPanelBackgroundOpacity(m_config, m_activePanel, m_platform, m_output, m_sourceBarName);
       m_panelShadowNode->setStyle(
           shell::surface_shadow::style(
               shadowConfig, panelBackgroundOpacity,
@@ -2340,7 +2356,8 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
     applyAttachedDecorationStyle();
   }
 
-  const float kPadding = hasDecoration ? m_activePanel->contentScale() * Style::panelPadding : 0.0f;
+  const float kPadding =
+      m_activePanel->usesContentPadding() ? m_activePanel->contentScale() * Style::panelPadding : 0.0f;
   m_contentWidth = panelW - kPadding * 2.0f;
   m_contentHeight = panelH - kPadding * 2.0f;
   {

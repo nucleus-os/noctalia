@@ -128,8 +128,7 @@ sudo pacman -S meson ninja cmake clang just \
   libpipewire wireplumber polkit \
   pam curl libwebp libxml2 \
   md4c \
-  nlohmann-json stb \
-  jemalloc
+  nlohmann-json stb
 ```
 
 ### Fedora
@@ -143,8 +142,7 @@ sudo dnf install meson ninja-build cmake clang just \
   pipewire-devel wireplumber-devel \
   pam-devel polkit-devel libcurl-devel libwebp-devel \
   libxml2-devel md4c-devel \
-  json-devel stb_image_resize2-devel stb_image_write-devel \
-  jemalloc-devel
+  json-devel stb_image_resize2-devel stb_image_write-devel
 ```
 
 ### openSUSE Tumbleweed / Slowroll
@@ -158,8 +156,7 @@ sudo zypper install meson ninja cmake clang just \
   pipewire-devel wireplumber-devel \
   pam-devel polkit-devel libcurl-devel libwebp-devel \
   libxml2-devel md4c-devel \
-  nlohmann_json-devel stb-devel \
-  jemalloc-devel
+  nlohmann_json-devel stb-devel
 ```
 
 ### Debian / Ubuntu
@@ -174,8 +171,7 @@ sudo apt install meson ninja-build cmake clang just \
   libpam0g-dev libpolkit-agent-1-dev libpolkit-gobject-1-dev \
   libcurl4-openssl-dev libwebp-dev libxml2-dev \
   libmd4c-dev \
-  nlohmann-json3-dev libstb-dev \
-  libjemalloc-dev
+  nlohmann-json3-dev libstb-dev
 ```
 
 ### Void Linux
@@ -188,7 +184,7 @@ sudo xbps-install meson ninja pkg-config git \
   libcurl-devel pam-devel libwebp-devel \
   basu-devel libmd4c-devel \
   json-c++ stb \
-  polkit-devel libxml2-devel jemalloc-devel
+  polkit-devel libxml2-devel
 ```
 
 Vendored dependencies, with no system package needed: `Wuffs`,
@@ -211,8 +207,6 @@ and daemon into separate packages, make sure you have both installed.
 `ddcutil` is an optional dependency used for controlling monitor brightness.
 
 `wtype` is an optional dependency used for clipboard auto-paste.
-
-`jemalloc` is disabled: it is incompatible with the mandatory CEF allocator boundary.
 
 Sanitizer runtime packages are only needed for ASan/UBSan builds configured with `just configure asan`.
 

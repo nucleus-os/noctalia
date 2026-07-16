@@ -17,6 +17,8 @@ public:
 
   [[nodiscard]] float preferredWidth() const override { return scaled(1120.0f); }
   [[nodiscard]] float preferredHeight() const override { return scaled(720.0f); }
+  [[nodiscard]] bool usesContentPadding() const noexcept override { return false; }
+  [[nodiscard]] bool detachedBackgroundInheritsSourceBarOpacity() const noexcept override { return true; }
   [[nodiscard]] LayerShellLayer layer() const override { return LayerShellLayer::Overlay; }
   [[nodiscard]] LayerShellKeyboard keyboardMode() const override { return LayerShellKeyboard::Exclusive; }
   [[nodiscard]] InputArea* initialFocusArea() const override;

@@ -47,7 +47,7 @@ jobs:
             libqalculate libxml2 \
             md4c tomlplusplus \
             nlohmann-json stb \
-            jemalloc just clang
+            just clang
 
       - uses: actions/checkout@v4
 

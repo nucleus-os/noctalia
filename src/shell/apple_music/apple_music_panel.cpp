@@ -6,6 +6,7 @@
 #include "core/tracy_latency.h"
 #include "render/core/renderer.h"
 #include "shell/panel/panel_manager.h"
+#include "ui/style.h"
 
 #include <memory>
 
@@ -75,6 +76,7 @@ void AppleMusicPanel::doLayout(Renderer& renderer, float width, float height) {
   }
   m_surface->setPosition(0.0f, 0.0f);
   m_surface->setSize(width, height);
+  m_surface->setCornerRadius(Style::scaledRadiusXl(contentScale()));
   m_surface->layout(renderer);
 }
 

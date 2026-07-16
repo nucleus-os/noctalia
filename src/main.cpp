@@ -22,11 +22,7 @@
 #include <unistd.h>
 
 #ifdef __GLIBC__
-#ifdef NOCTALIA_USE_JEMALLOC
-#include <jemalloc/jemalloc.h>
-#else
 #include <malloc.h>
-#endif
 #endif
 
 namespace {
@@ -257,13 +253,9 @@ namespace {
 
 } // namespace
 
-#ifdef NOCTALIA_USE_JEMALLOC
-const char* malloc_conf = "narenas:2,dirty_decay_ms:1000,muzzy_decay_ms:5000,lg_tcache_max:12";
-#endif
-
 int main(int argc, char* argv[]) {
 
-#if defined(__GLIBC__) && !defined(NOCTALIA_USE_JEMALLOC)
+#ifdef __GLIBC__
   mallopt(M_ARENA_MAX, 2);
 #endif
 

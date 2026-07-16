@@ -41,6 +41,12 @@ CefSurfaceNode::~CefSurfaceNode() {
   detach();
 }
 
+void CefSurfaceNode::setCornerRadius(float radius) {
+  if (m_image != nullptr) {
+    m_image->setRadius(radius);
+  }
+}
+
 void CefSurfaceNode::wireInput() {
   m_input->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT, BTN_MIDDLE, BTN_RIGHT}));
   m_input->setFocusable(true);

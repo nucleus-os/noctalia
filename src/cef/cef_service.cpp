@@ -81,6 +81,16 @@ std::uint32_t cefModifiersFromKeyMod(std::uint32_t mods) {
   return flags;
 }
 
+std::uint32_t cefButtonFlag(int button) {
+  if (button == 1) {
+    return EVENTFLAG_MIDDLE_MOUSE_BUTTON;
+  }
+  if (button == 2) {
+    return EVENTFLAG_RIGHT_MOUSE_BUTTON;
+  }
+  return EVENTFLAG_LEFT_MOUSE_BUTTON;
+}
+
 // XKB keysym -> Windows virtual-key code for the non-printable keys the browser
 // needs for navigation/editing. Printable keys ride in on the CHAR event.
 int windowsKeyCodeFromSym(std::uint32_t sym) {
@@ -189,6 +199,7 @@ struct CefService::Impl {
   bool textureChanged = false;
   std::uint64_t supersededReadyFrames = 0;
   CefPointerMotionCoalescer pointerMotion;
+  std::uint32_t pointerButtonFlags = 0;
 
   std::function<void(std::int64_t)> scheduleWork;
   std::function<void()> frameReady;
@@ -307,7 +318,7 @@ struct CefService::Impl {
     CefMouseEvent event;
     event.x = motion->x;
     event.y = motion->y;
-    event.modifiers = cefModifiersFromKeyMod(motion->modifiers);
+    event.modifiers = cefModifiersFromKeyMod(motion->modifiers) | pointerButtonFlags;
     tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerMove);
     browser->GetHost()->SendMouseMoveEvent(event, false);
   }
@@ -666,6 +677,7 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   windowInfo.external_begin_frame_enabled = 1;
   CefBrowserSettings browserSettings;
   browserSettings.windowless_frame_rate = kCefWindowlessFrameRate;
+  browserSettings.background_color = CefColorSetARGB(0, 0, 0, 0);
 
   const std::string url = m_impl->pendingUrl.empty() ? std::string("about:blank") : m_impl->pendingUrl;
   if (!CefBrowserHost::CreateBrowser(windowInfo, m_impl->client, url, browserSettings, nullptr, nullptr)) {
@@ -734,7 +746,7 @@ void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool l
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
-  event.modifiers = cefModifiersFromKeyMod(modifiers);
+  event.modifiers = cefModifiersFromKeyMod(modifiers) | m_impl->pointerButtonFlags;
   tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerMove);
   m_impl->browser->GetHost()->SendMouseMoveEvent(event, true);
   m_impl->issueExternalBeginFrame(false);
@@ -752,10 +764,16 @@ void CefService::sendMouseButton(
     return;
   }
   m_impl->flushPointerMotion();
+  const std::uint32_t buttonFlag = cefButtonFlag(button);
+  if (pressed) {
+    m_impl->pointerButtonFlags |= buttonFlag;
+  } else {
+    m_impl->pointerButtonFlags &= ~buttonFlag;
+  }
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
-  event.modifiers = cefModifiersFromKeyMod(modifiers);
+  event.modifiers = cefModifiersFromKeyMod(modifiers) | m_impl->pointerButtonFlags;
   cef_mouse_button_type_t type = MBT_LEFT;
   if (button == 1) {
     type = MBT_MIDDLE;
@@ -777,7 +795,7 @@ void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, st
   CefMouseEvent event;
   event.x = static_cast<int>(x);
   event.y = static_cast<int>(y);
-  event.modifiers = cefModifiersFromKeyMod(modifiers);
+  event.modifiers = cefModifiersFromKeyMod(modifiers) | m_impl->pointerButtonFlags;
   tracy_latency::inputForwardedToCef(tracy_latency::InputKind::PointerWheel);
   m_impl->browser->GetHost()->SendMouseWheelEvent(event, static_cast<int>(deltaX), static_cast<int>(deltaY));
   m_impl->issueExternalBeginFrame(true);

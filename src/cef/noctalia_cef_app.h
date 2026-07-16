@@ -18,7 +18,7 @@
 // subprocesses (the helper binary constructs one too). In the browser process
 // CefService installs a schedule-work callback so CEF's external message pump
 // can be driven from noctalia's poll loop instead of a busy timer.
-class NoctaliaCefApp : public CefApp, public CefBrowserProcessHandler {
+class NoctaliaCefApp : public CefApp, public CefBrowserProcessHandler, public CefRenderProcessHandler {
 public:
   using ScheduleWorkCallback = std::function<void(std::int64_t delayMs)>;
 
@@ -27,12 +27,18 @@ public:
 
   // CefApp
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
   void OnBeforeCommandLineProcessing(const CefString& processType, CefRefPtr<CefCommandLine> cmd) override;
 
   // CefBrowserProcessHandler — may fire on any CEF thread; the callback marshals
   // to the main loop.
   void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) override;
   void OnScheduleMessagePumpWork(std::int64_t delayMs) override;
+
+  // CefRenderProcessHandler
+  void OnContextCreated(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context
+  ) override;
 
 private:
   ScheduleWorkCallback m_scheduleWork;

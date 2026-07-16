@@ -59,6 +59,10 @@ public:
   [[nodiscard]] virtual bool fillsWidth() const noexcept { return false; }
   [[nodiscard]] virtual bool fillsHeight() const noexcept { return false; }
   [[nodiscard]] virtual bool hasDecoration() const { return true; }
+  // Most decorated panels inset their content from the background edge. Media
+  // surfaces can opt out and provide their own rounded clipping for a
+  // full-bleed presentation while retaining the panel decoration and shadow.
+  [[nodiscard]] virtual bool usesContentPadding() const noexcept { return hasDecoration(); }
   [[nodiscard]] virtual LayerShellLayer layer() const { return LayerShellLayer::Top; }
   [[nodiscard]] virtual LayerShellKeyboard keyboardMode() const { return LayerShellKeyboard::OnDemand; }
   [[nodiscard]] virtual InputArea* initialFocusArea() const { return nullptr; }
@@ -83,6 +87,13 @@ public:
   // a fixed alpha for legibility (e.g. wallpaper thumbnails).
   [[nodiscard]] virtual bool inheritsBarBackgroundOpacity() const noexcept { return true; }
   [[nodiscard]] virtual float attachedBackgroundOpacityOverride() const noexcept { return 1.0f; }
+  // Floating panels normally resolve their outer fill from the panel transparency
+  // mode. A panel opened from a bar may instead request the source bar's resolved
+  // opacity so its detached sheet matches attached panel glass.
+  [[nodiscard]] virtual bool detachedBackgroundInheritsSourceBarOpacity() const noexcept { return false; }
+  // Customize the resolved fill for detached panels. The input already
+  // reflects either the source bar or the user's solid/soft/glass mode.
+  [[nodiscard]] virtual float detachedBackgroundOpacity(float resolved) const noexcept { return resolved; }
   [[nodiscard]] virtual bool wantsCloseAnimation() const noexcept { return true; }
 
   [[nodiscard]] Node* root() const noexcept { return m_root ? m_root.get() : m_rootPtr; }

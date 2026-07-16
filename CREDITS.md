@@ -36,7 +36,6 @@ Linked dynamically at runtime when required or enabled:
 - **[libxml2](https://gitlab.gnome.org/GNOME/libxml2)** — XML parser used to read CalDAV responses (MIT)
 - **[polkit](https://gitlab.freedesktop.org/polkit/polkit)** (`polkit-agent`, `polkit-gobject`) — Authentication agent
 - **[Linux-PAM](https://github.com/linux-pam/linux-pam)** — Lockscreen authentication
-- **[jemalloc](https://jemalloc.net/)** — Optional memory allocator used on glibc builds when detected
 
 ## Vendored Libraries
 

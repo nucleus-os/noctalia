@@ -33,7 +33,6 @@
   nlohmann_json,
   tomlplusplus,
   wireplumber,
-  jemalloc,
   makeWrapper,
   git,
   autoAddDriverRunpath,
@@ -73,7 +72,6 @@ stdenv.mkDerivation {
     ninja
     pkg-config
     wayland-scanner
-    jemalloc
     makeWrapper
   ]
   ++ lib.optional cudaSupport autoAddDriverRunpath;
