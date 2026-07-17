@@ -589,20 +589,6 @@ public:
     return true; // we render the cursor via the Wayland cursor-shape protocol
   }
 
-  bool OnConsoleMessage(
-      CefRefPtr<CefBrowser> /*browser*/, cef_log_severity_t /*level*/, const CefString& message,
-      const CefString& source, int line
-  ) override {
-    const std::string text = message.ToString();
-    if (!text.starts_with("[Noctalia]")) {
-      return false;
-    }
-    kLog.warn(
-        "CEF theme compatibility warning: {} ({}:{})", text, source.ToString(), line
-    );
-    return true;
-  }
-
   // CefLifeSpanHandler
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();

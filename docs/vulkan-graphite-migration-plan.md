@@ -833,7 +833,7 @@ Exit criterion: Noctalia's panel color and blur show through the intended page
 regions with readable controls, correct alpha, stable performance, and no
 change to Apple Music behavior.
 
-Current status (2026-07-16): the windowless browser explicitly requests a
+Current status (updated 2026-07-17): the windowless browser explicitly requests a
 transparent background, and the renderer process installs a versioned
 Apple Music stylesheet when the main-frame V8 context is created. A live CSS
 audit of the authenticated home page found that `html` was already transparent
@@ -842,32 +842,72 @@ override is deliberately limited to the root and body background rather than
 depending on generated Svelte class names. Artwork and localized surfaces are
 untouched. The navigation glass retains Apple's `saturate(2.2)` treatment but
 uses a lighter 0.28 tint and 24px blur so Noctalia's backdrop remains visible,
-matching the visual weight of the playback glass more closely. Apple's current
-stylesheet assigns navigation, the header, and sticky content chrome the same
-`--z-web-chrome` stack level. The override raises navigation by one local level
-(still below contextual menus and modals) and retains Apple's compositing
-structure by applying the tint and backdrop filter directly to the navigation
-element. An earlier negative-z pseudo-element implementation was removed
-because it established a different backdrop root: raster artwork could remain
-in the filter input while independently composited text escaped it and was
-only dimmed by the tint. Apple's floating player has a related native stacking
-problem: it defaults to `--z-web-chrome - 1`, below sticky headers and text at
-`--z-web-chrome`. The override places both semantic glass surfaces one level
-above page chrome, while contextual menus and modals remain higher, so all page
-content participates in their backdrop filters. A bounded startup observer
-marks the expected navigation and player targets and warns if Apple removes
-either; it disconnects once resolved and performs no steady-state DOM work. Chromium's
-Linux `OverlayScrollbar` feature lets navigation and main-content thumbs float
+matching the visual weight of the playback glass more closely. The tint and
+filter remain directly on Apple's navigation element without changing its
+stacking order. The discarded navigation/player z-index overrides and earlier
+negative-z pseudo-element implementation were removed because stacking was not
+the cause of the sharp-text result and changing Apple's chrome ordering could
+interfere with sticky content, contextual menus, and modals.
+
+The later transparent/opaque Chrome reproduction established that stacking was
+not the root cause. On a transparent root, Viz initializes the backdrop-filter
+save-layer with filtered prior content and restores it over the unchanged prior
+content with source-over composition. A blurred text glyph is partially
+transparent, so the original sharp glyph remains visible below it; opaque
+artwork's filtered result covers its original. The transparent output's alpha
+channel contains the sharp text silhouettes, confirming that this happens
+inside Chromium's final composition rather than in Graphite sampling, Vulkan
+synchronization, or niri. The same reproduction on an opaque root blurs both.
+
+The principled correction is an embedder-only Viz flattening policy on
+`SkiaOutputDeviceOffscreenExport`. For a transparent exported root, a
+backdrop-initialized Skia layer records the exact transformed backdrop path.
+After taking the backdrop snapshot and immediately before the normal
+`kSrcOver` restore, Skia clears the prior device only inside that path. This
+consumes the sharp copy without applying `kSrc` to foreground-filter expansion
+or changing element-opacity semantics. The path is preserved through Skia
+recording and SKP serialization, and Viz intersects it with the render-pass
+visible rect and draw region. The existing output-surface capability channel
+is sufficient; do not add another Mojo field, schema, version check, or
+runtime probe. Default Chromium rendering remains source-over and
+standards-compatible. Focused Skia and transparent-root Viz tests cover the
+bounded clear, deferred recording, sparse alpha, opaque content, and untouched
+pixels outside the backdrop bounds before rebuilding CEF.
+
+The player/navigation z-index changes and target-discovery diagnostics from
+the discarded stacking hypothesis are removed. Retain the transparent root,
+intentional navigation tint/filter, overlay scrollbar styling, and
+pointer-drag correction. Chromium's Linux
+`OverlayScrollbar` feature lets navigation and main-content thumbs float
 without consuming layout width. CEF pointer motion carries held-button flags so
 windowless overlay thumbs receive valid drag sequences.
+
+Runtime status (2026-07-17): the bounded backdrop-replacement implementation
+passed its focused Skia and Viz tests, the official PGO/ThinLTO CEF m151 build
+and package completed, and Noctalia rebuilt against that distribution with all
+49 Meson tests passing. A live release startup selected the compositor Vulkan
+device, initialized Graphite, received presentation feedback at 8.333333 ms,
+created the Apple Music browser at 120 fps, received an accelerated DMA-BUF
+frame, and loaded the authenticated Apple Music Home page with HTTP 200.
+Broad visual checking of player/navigation glass, scrolling, menus, modals, and
+light theme remains the final human acceptance matrix rather than an
+implementation prerequisite.
 
 Live pixel validation confirms that Noctalia's existing panel fill and niri
 blur show through the CEF texture with premultiplied edges intact. Chromium's
 CSS `backdrop-filter` can only sample pixels in Chromium's own render tree; it
 cannot directly sample compositor content behind the exported DMA-BUF. Thus
-niri supplies the external backdrop blur, while Apple's translucent glass and
-any internal Chromium backdrop filtering compose above it. Remaining work is
-the broad navigation/modal/light-theme acceptance matrix listed above.
+niri supplies the external backdrop blur, while Chromium filters its internal
+page content for Apple's translucent glass above it. A single premultiplied
+RGBA frame is sufficient for this division because niri's already-blurred host
+backdrop is smooth relative to Apple's CSS blur kernel; the compositing
+equivalence is exact for a locally constant host and has only a small
+covariance error for a slowly varying one. A fully generic solution for an
+arbitrary high-frequency host backdrop would require feeding synchronized host
+pixels into Viz or exporting a layered effect graph. That larger compositor
+protocol is unnecessary for the current visual goal. Remaining work is
+validating the bounded Viz composition fix and the broad
+navigation/modal/light-theme acceptance matrix listed above.
 
 The Apple Music panel opts out of the standard decorated-panel content inset.
 Its CEF texture fills the panel body and is clipped by Graphite to the same

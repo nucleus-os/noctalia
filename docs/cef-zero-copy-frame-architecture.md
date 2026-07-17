@@ -681,10 +681,108 @@ The exported image is the final aggregated root pass, after Chromium has
 composited renderer content, popups, transforms, opacity, masks, color
 conversion, CSS filters, and backdrop filters. This is why the design changes
 the root output device instead of exporting a transient internal render pass.
-Apple Music's transparent body and CSS backdrop blur therefore see the same
-page content they do in Chromium's final root composition; Noctalia's
-compositor blur remains visible through pixels Chromium outputs with
-transparency.
+Noctalia's compositor blur remains visible through pixels Chromium outputs
+with transparency.
+
+There is an important transparent-root qualification. Chromium implements the
+Filter Effects draft literally: it copies the existing backdrop into a saved
+layer, filters that copy, draws the element into the layer, and restores the
+layer over the original backdrop with source-over composition. In
+`SkiaRenderer::PrepareCanvasForRPDQ`, a backdrop-filtered render-pass draw quad
+therefore uses `SkBlendMode::kSrcOver`; Skia's
+`SkCanvasPriv::ScaledBackdropLayer` initializes the saved layer from the
+filtered prior device.
+
+That is visually stable when the page backdrop is opaque because the filtered
+copy is also opaque and covers the original. It is not a useful flattened
+representation for a transparent embedded root. Sparse content such as text
+produces a partially transparent blurred copy, and source-over leaves the
+original sharp glyphs visible underneath it. Opaque artwork produces an opaque
+filtered result and does cover its original, explaining the observed
+"artwork blurs, text only dims" split. Alpha-channel inspection of a minimal
+transparent Chrome reproduction contains the sharp glyph silhouettes, ruling
+out LCD text rasterization, Wayland, niri, and DMA-BUF transport as the cause.
+The same page on an opaque root blurs both text and artwork.
+
+This is intentional web-platform behavior rather than a missing synchronization
+edge. Chromium's WPTs explicitly test the source-over rule, and changing it
+globally would change CSS semantics. The export path instead needs an opt-in
+flattening policy for content that will be composed over an external backdrop:
+
+1. Add one internal boolean to `OutputSurface::Capabilities`, set directly by
+   `SkiaOutputDeviceOffscreenExport`. Do not add it to the offscreen Mojo
+   protocol and do not add version or capability negotiation.
+2. Extend Skia's backdrop-initialized `SaveLayerRec` with an optional
+   local-coordinate replacement path. Skia snapshots and filters the prior
+   device as usual, then clears the prior device only within that path
+   immediately before restoring the layer with the existing `kSrcOver` paint.
+   Preserve the path through deferred recording and SKP serialization.
+3. In `SkiaRenderer::PrepareCanvasForRPDQ`, set that path only when the export
+   capability is enabled and the aggregated root is transparent. Build it from
+   the exact transformed `backdrop_filter_bounds`, intersected with the
+   render-pass visible rect and draw region. Do not use the broader
+   `filter_bounds`, which may include foreground-filter expansion.
+4. Apply the policy to every backdrop-filtered render pass contributing to
+   that transparent exported root, including nested render passes. Keep the
+   existing rounded clips, masks, element opacity, and filter output behavior.
+5. Leave every ordinary on-screen, capture, software, opaque-root, and
+   non-exported output surface on the standards-defined `kSrcOver` path.
+
+Clearing the bounded prior destination removes the original unfiltered page
+pixels only where they were copied into the backdrop layer; the normally
+restored filtered premultiplied result then takes their place. This is safer
+than changing the whole layer restore to `kSrc`: foreground-filter output may
+extend beyond the backdrop border box, rounded antialiased edges need coverage
+on both the clear and restore, and element opacity still belongs to the
+existing restore paint. Fully transparent gaps remain transparent for
+Noctalia/niri, while Chromium page content behind Apple Music's player and
+navigation glass no longer survives as a sharp second copy. The operation adds
+one bounded clear draw but no extra render pass, backdrop copy, readback, or
+cross-queue synchronization.
+
+The focused Viz test should construct a transparent root with both an opaque
+image-like block and sparse glyph-like shapes behind a translucent rounded
+backdrop-filter render pass. It must verify that:
+
+- default Viz output retains the standards-defined source-over result;
+- the offscreen-export policy removes the original sharp alpha silhouettes;
+- opaque-root output is unchanged;
+- nested backdrop filters, element opacity, rounded clipping, masks, and
+  partial damage do not clear pixels outside their filter bounds.
+
+Implementation status (2026-07-17): the bounded replacement path is implemented
+and preserved through immediate drawing, deferred Skia recording, and SKP
+serialization. Focused Skia tests and all 15 backdrop-filter Viz pixel-test
+variants pass (with the existing software-only skip), including Ganesh/GL and
+Graphite/Dawn coverage. The official PGO/ThinLTO CEF package rebuilt
+successfully, Noctalia rebuilt with all 49 tests passing, and a live run
+received an accelerated frame and loaded authenticated Apple Music Home.
+
+The Apple Music z-index changes introduced while sharp text was incorrectly
+suspected to be above the player have been removed, along with their target
+probes and logging. The retained stylesheet contains only the transparent
+document background and intentional navigation tint/filter styling. After the
+Viz test passes and CEF is rebuilt, verify the player and navigation over
+static text, scrolling text, animated artwork, menus, and modal surfaces.
+
+This policy is the principled solution for Noctalia's current composition
+model: niri owns the external panel blur, while Chromium owns filtering of its
+page content. One premultiplied RGBA frame is sufficient for that division. If
+the host backdrop is locally constant across Chromium's CSS blur kernel,
+filtering premultiplied page content and later compositing it over the host is
+exactly equivalent to filtering their combination. Niri has already
+low-passed the desktop, so the host backdrop is smooth at this scale and the
+remaining covariance error should be visually negligible.
+
+An exact generic implementation for an arbitrary high-frequency future host
+backdrop would still require either feeding that synchronized backdrop into
+Viz before Chromium applies CSS filters or exporting Chromium's ordered
+render/effect graph so the host compositor can evaluate backdrop filters after
+composition. The former creates a frame-cycle with niri's compositor-owned
+blur; the latter is effectively a layered compositor protocol rather than an
+image export. Neither is justified for the Apple Music panel while niri
+already supplies the desired smooth external blur. Keep them as theoretical
+boundaries, not follow-on implementation work.
 
 The callback contract presents one canonical top-left image. The output device
 must make the Skia surface origin and exported metadata agree; Noctalia does
@@ -701,7 +799,7 @@ the same source region belong in the same patch.
    official PGO/ThinLTO build produced an obvious interactive improvement; do
    not delay the architectural work for another baseline capture.
 2. **Add the generic Viz transport.** Implemented in
-   `0007-viz-offscreen-output-transport.patch`: embedder-neutral frame,
+   `0001-viz-offscreen-output-transport.patch`: embedder-neutral frame,
    release, metadata, error, and endpoint Mojo types; an opt-in compositor
    hook; paired endpoint validation; and ownership carried through the root
    frame sink into the Skia output-surface lifetime. Focused Viz tests prove
