@@ -880,7 +880,12 @@ intentional navigation tint/filter, overlay scrollbar styling, and
 pointer-drag correction. Chromium's Linux
 `OverlayScrollbar` feature lets navigation and main-content thumbs float
 without consuming layout width. CEF pointer motion carries held-button flags so
-windowless overlay thumbs receive valid drag sequences.
+windowless overlay thumbs receive valid drag sequences. Newly queued motion
+also wakes one compositor callback even after no-damage idle suppression; that
+callback forwards the newest coalesced position before issuing an urgent begin
+frame. Live repeated thumb dragging confirms this prevents drag updates from
+freezing until button release, without changing wheel behavior or replacing
+compositor-paced input coalescing.
 
 Runtime status (2026-07-17): the bounded backdrop-replacement implementation
 passed its focused Skia and Viz tests, the official PGO/ThinLTO CEF m151 build

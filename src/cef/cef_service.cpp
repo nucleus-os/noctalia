@@ -277,6 +277,17 @@ struct CefService::Impl {
     }
   }
 
+  void armPointerMotionOpportunity() {
+    // Pointer motion is normally drained by the compositor-paced frame
+    // callback. Unlike animation demand, new input must also wake that callback
+    // after repeated no-damage acknowledgements have idled the CEF scheduler.
+    // The callback forwards the newest coalesced position before requesting
+    // the urgent external begin frame.
+    if (attached && browser != nullptr && frameOpportunity) {
+      frameOpportunity();
+    }
+  }
+
   void submitExternalBeginFrame(const CefExternalFrameScheduler::Request& request) {
     if (!attached || browser == nullptr || request.generation != frameScheduler.generation()) {
       frameScheduler.abandon(request.id);
@@ -927,7 +938,9 @@ void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool l
     return;
   }
   if (!leaving) {
-    m_impl->pointerMotion.queue({static_cast<int>(x), static_cast<int>(y), modifiers});
+    if (m_impl->pointerMotion.queue({static_cast<int>(x), static_cast<int>(y), modifiers})) {
+      m_impl->armPointerMotionOpportunity();
+    }
     return;
   }
   m_impl->pointerMotion.reset();

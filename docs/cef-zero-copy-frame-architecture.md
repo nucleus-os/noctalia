@@ -96,6 +96,14 @@ chain alive. The fourth consecutive no-damage acknowledgment stops it; input,
 navigation, resize, renderer recovery, or a damage-producing idle probe arms
 one callback and restarts the compositor-paced chain.
 
+Pointer motion is still coalesced to the newest integer-pixel position, but
+queueing a new position independently arms one callback tick. This input wake
+edge is required even when no-damage suppression says animation has no current
+demand: the callback forwards the position before requesting an urgent begin
+frame. Without it, an overlay-scrollbar drag can retain its newest position
+until button release, while wheel input appears correct because wheel events
+flush pointer motion immediately.
+
 Graphite recording, texture rebinding, Vulkan queue submission, and CEF frame
 acceptance all occur on the main thread. Background workers remain CPU-only.
 
