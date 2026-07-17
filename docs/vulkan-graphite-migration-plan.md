@@ -293,12 +293,12 @@ is mandatory.
   its valid acquired image once before rebuilding, avoiding abandonment of the
   image and reuse of a signaled acquire fence.
 - Compositor-paced OSR scheduling is wired from the Apple Music panel's
-  `wl_surface.frame` callback into `CefService`. A painted frame commits through
-  Graphite and the compositor's next frame opportunity advances Chromium.
-  Latency-sensitive input wakes immediately, duplicate requests coalesce, and
-  a bounded watchdog handles CEF's unacknowledged no-damage case before backing
-  off to slow idle probes. The watchdog is not the active frame clock. CEF's
-  internal clock and the former predictive presentation timer were removed.
+  `wl_surface.frame` callback into `CefService`. The original paint-inferred
+  completion was replaced by CEF's real `BeginFrameAck`: latency-sensitive
+  input wakes immediately, duplicate opportunities coalesce, and exact
+  presentation timing reaches Chromium in nanoseconds. No-damage
+  acknowledgments back off to slow idle probes. The long watchdog only detects
+  a broken acknowledgment contract and is not an active frame clock.
 - The July 15 validation gate reported a constant 8,333,333 ns interval with
   exact clock conversion, loaded the authenticated Apple Music home page at
   HTTP 200, and produced no Vulkan VUID or synchronization diagnostics. After
@@ -703,16 +703,19 @@ frame can begin just after one CEF tick and finish just after a compositor
 deadline, losing two opportunities.
 
 Setting `CefWindowInfo.external_begin_frame_enabled=1` transfers control of
-that clock to Noctalia through `CefBrowserHost::SendExternalBeginFrame()`.
-This allows ongoing Chromium work to follow Wayland's actual cadence instead
-of an unrelated timer. The intended pipeline is:
+that clock to Noctalia. The custom
+`CefBrowserHost::SendExternalBeginFrameWithTiming()` contract supplies the
+relative compositor deadline and exact nanosecond interval, then reports the
+matching Chromium `BeginFrameAck`. This allows ongoing Chromium work to follow
+Wayland's actual cadence instead of an unrelated timer. The pipeline is:
 
 ```text
 Wayland frame opportunity / predicted presentation phase
-    -> issue one external CEF begin frame
+    -> issue one timed external CEF begin frame
     -> Chromium runs JS, layout, raster, and compositing
+    -> the matching BeginFrameAck releases the scheduler request
     -> OnAcceleratedPaint supplies a borrowed DMA-BUF
-    -> copy into the persistent Noctalia Vulkan image
+    -> Graphite directly samples the retained imported DMA-BUF
     -> mark the Graphite surface dirty
     -> render and commit the newest image
     -> presentation feedback reports when it became visible
@@ -720,9 +723,10 @@ Wayland frame opportunity / predicted presentation phase
 
 Latency-sensitive input is special: a pointer button or key event should issue
 an immediate begin frame rather than waiting for the next Wayland callback.
-Subsequent requests must be coalesced while a begin frame or accelerated paint
-is in flight. If Chromium misses a target, do not queue historical web frames;
-present the newest completed frame at the next opportunity.
+Subsequent requests are coalesced while a begin frame is in flight. Accelerated
+paint is not an acknowledgment and does not mutate scheduler state. If
+Chromium misses a target, historical opportunities are discarded and the
+newest request is recomputed against the next presentation phase.
 
 Do not send external begin frames unconditionally at 120 Hz. Even without new
 pixels, a begin frame can advance JavaScript animation callbacks, style/layout,
@@ -741,11 +745,10 @@ Use an adaptive policy:
 - stop completely while the browser is hidden with `WasHidden(true)`;
 - treat audio playback alone as insufficient reason to raster at 120 Hz.
 
-There is a feedback-loop edge case: Wayland frame callbacks normally follow a
-surface commit, but CEF may produce no new image and therefore give Noctalia no
-reason to commit. The implementation needs a bounded adaptive timer or explicit
-active-animation state to restart or sustain CEF when necessary without
-committing an unchanged buffer forever.
+Four consecutive acknowledgments with no damage suppress full-rate work. A
+slow idle probe advances Chromium once every 250 ms so autonomous animation can
+restart without committing an unchanged buffer forever. A separate two-second
+acknowledgment watchdog is recovery-only and cannot become a frame clock.
 
 #### Backend constraints during this work
 
@@ -779,8 +782,8 @@ committing an unchanged buffer forever.
 4. Per-surface cadence tracking without a hard-coded 60/120 Hz output:
    implemented; fixed 120 Hz is validated and multi-rate/VRR remains a live
    acceptance test.
-5. Presentation-aware external begin-frame scheduling: implemented as the
-   default, with the internal scheduler retained only as a diagnostic A/B.
+5. Presentation-aware external begin-frame scheduling: implemented as the only
+   path, with real Chromium acknowledgments and no diagnostic fallback clock.
 6. Immediate input wakeup, single-in-flight coalescing, activity bursts,
    adaptive no-damage backoff, and hidden-panel suspension: implemented.
 7. Keep the change only if deliberate interaction and soak captures lower or

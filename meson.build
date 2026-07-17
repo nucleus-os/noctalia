@@ -1077,6 +1077,24 @@ foreach _required : [
   endif
 endforeach
 
+_cef_grep = find_program('grep')
+foreach _contract : [
+    ['include/cef_browser.h', 'SendExternalBeginFrameWithTiming'],
+    ['include/cef_browser.h', 'SetAcceleratedPaintReleaseFence'],
+    ['include/internal/cef_types.h', 'deadline_delta_ns'],
+    ['include/internal/cef_types_osr.h', 'capture_counter'],
+    ['include/internal/cef_types_linux.h', 'acquire_fence_fd'],
+]
+  _contract_check = run_command(
+      _cef_grep, '-Fq', _contract[1], _cef_root / _contract[0],
+      check: false,
+  )
+  if _contract_check.returncode() != 0
+    error('CEF SDK does not provide the required Vulkan OSR contract: '
+          + _contract[1] + ' in ' + _cef_root / _contract[0])
+  endif
+endforeach
+
 _cef_inc = include_directories(_cef_root, is_system: true)
 _cef_wrapper_find = run_command(
     find_program('find'),
@@ -1117,6 +1135,21 @@ _noctalia_deps += tracy_link_dep
 _noctalia_build_rpath = private_cpp_libdir + ':' + _cef_root / 'Release'
 _noctalia_install_rpath = private_cpp_install_rpath + ':' + _cef_root / 'Release'
 
+# CEF subprocess entry (renderer/GPU/utility). CefSettings.browser_subprocess_path
+# points here so Graphite, Vulkan, and Nucleus Skia are never loaded into a
+# Chromium subprocess. Keep it as an explicit dependency of the main executable:
+# both binaries compile CEF's generated wrapper and must always carry the same
+# API hash when the SDK changes in place.
+cef_helper = executable('noctalia_cef_helper',
+  'src/cef/cef_subprocess_main.cpp',
+  'src/cef/noctalia_cef_app.cpp',
+  dependencies: [cef_dep],
+  include_directories: [include_directories('src'), _cef_inc],
+  build_rpath: private_cpp_libdir + ':' + _cef_root / 'Release',
+  install_rpath: private_cpp_install_rpath + ':' + _cef_root / 'Release',
+  install: true,
+)
+
 noctalia_exe = executable('noctalia',
   sources: _noctalia_sources + nucleus_text_sources + _protocol_sources + _protocol_headers + [_git_revision_h],
   dependencies: _noctalia_deps,
@@ -1129,6 +1162,7 @@ noctalia_exe = executable('noctalia',
     '-DNOCTALIA_VERSION="' + meson.project_version() + '"',
   ] + nucleus_skia_cpp_args,
   link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
+  link_depends: cef_helper,
   build_rpath: _noctalia_build_rpath,
   install_rpath: _noctalia_install_rpath,
   install: true,
@@ -1194,6 +1228,14 @@ add_test_setup(
   'privatecppruntime',
   env: private_cpp_test_env,
   is_default: true,
+)
+
+test(
+  'cef_subprocess_api_contract',
+  python,
+  args: [files('tests/cef_subprocess_api_contract_test.py'), cef_helper.full_path()],
+  depends: cef_helper,
+  env: private_cpp_test_env,
 )
 
 texture_handle_test = executable('texture_handle_test',
@@ -1328,6 +1370,13 @@ cef_pointer_motion_coalescer_test = executable('cef_pointer_motion_coalescer_tes
 )
 
 test('cef_pointer_motion_coalescer', cef_pointer_motion_coalescer_test)
+
+cef_external_frame_scheduler_test = executable('cef_external_frame_scheduler_test',
+  sources: files('tests/cef_external_frame_scheduler_test.cpp'),
+  include_directories: _noctalia_inc,
+)
+
+test('cef_external_frame_scheduler', cef_external_frame_scheduler_test)
 
 graphite_runtime_effects_test = executable('graphite_runtime_effects_test',
   sources: files('tests/graphite_runtime_effects_test.cpp'),
@@ -1915,19 +1964,3 @@ test(
 )
 
 endif # build_tests
-
-# ── CEF (Chromium Embedded Framework) — in-shell Apple Music ──────────────────
-# CEF is a required renderer dependency supplied as an explicit, read-only,
-# codec-enabled distribution with -Dcef_sdk_path=/absolute/path.
-# CEF subprocess entry (renderer/GPU/utility). CefSettings.browser_subprocess_path
-# points here so Graphite, Vulkan, and Nucleus Skia are never loaded into a
-# Chromium subprocess.
-cef_helper = executable('noctalia_cef_helper',
-    'src/cef/cef_subprocess_main.cpp',
-    'src/cef/noctalia_cef_app.cpp',
-    dependencies: [cef_dep],
-    include_directories: [include_directories('src'), _cef_inc],
-    build_rpath: private_cpp_libdir + ':' + _cef_root / 'Release',
-    install_rpath: private_cpp_install_rpath + ':' + _cef_root / 'Release',
-    install: true,
-  )

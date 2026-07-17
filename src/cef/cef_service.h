@@ -18,10 +18,10 @@ class GraphicsDevice;
 // (panels destroy their surface + scene nodes on every close), so audio keeps
 // playing and reopening is instant.
 //
-// Threading: OnAcceleratedPaint and OnScheduleMessagePumpWork fire on CEF
-// threads and only duplicate handles / marshal to the main loop. Every method here is
-// called on noctalia's main thread; all GL happens on the main thread during
-// the surface node's update (same call site as the audio visualizers).
+// Threading: the external CEF message pump, acknowledged BeginFrame scheduler,
+// accelerated DMA-BUF acceptance, Graphite texture rebinding, and public
+// methods all run on Noctalia's main thread. OnScheduleMessagePumpWork may fire
+// on another CEF thread and is marshalled to that loop.
 class CefService {
 public:
   // cefDir: the distribution root (contains Release/ and Resources/).

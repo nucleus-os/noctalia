@@ -50,13 +50,13 @@ Set `NUCLEUS_WORKSPACE_PATH` if the workspace is not Noctalia's sibling. Use
 for the fair release performance capture.
 
 External begin frames are mandatory. The Apple Music surface's
-`wl_surface.frame` callback is the normal CEF clock: a painted frame causes a
-Graphite commit, the compositor supplies the next frame opportunity, and that
-opportunity advances Chromium. Input can issue an immediate request. A bounded
-watchdog breaks CEF's unacknowledged no-damage case and then probes slowly for
-autonomous webpage animation work; it is not the active frame clock. Scheduling
-stops while the panel is hidden. Presentation feedback remains measurement and
-refresh-rate telemetry rather than a userspace deadline timer.
+`wl_surface.frame` callback is the normal CEF clock. Noctalia supplies CEF an
+exact refresh interval and a deadline predicted from the latest realized
+presentation phase. CEF's real `BeginFrameAck` completes the one in-flight
+request; paint arrival does not. Opportunities that arrive while Chromium is
+busy are coalesced to the newest request, and input can mark that request
+urgent. Consecutive no-damage acknowledgments enter a slow idle-probe mode.
+Scheduling stops while the panel is hidden.
 
 Important zones include:
 
@@ -94,9 +94,12 @@ Use the reported refresh interval as the frame budget. For example, the July
 output, not 16.667 ms or 33 ms. It also reported vsync, hardware-clock, and
 hardware-completion flags. Native Noctalia repaint pacing remains driven by
 `wl_surface.frame`. Presentation feedback is retrospective proof that a commit
-became visible, not a guaranteed future deadline. CEF uses the surface frame
-callback as its active clock and keeps only a bounded no-damage watchdog for
-cases where no new surface commit exists.
+became visible, not a guaranteed future deadline; the scheduler projects the
+next phase from that proof and rolls an expired target forward by whole refresh
+intervals. CEF uses the surface callback as its active clock. Its long watchdog
+only diagnoses a missing Chromium acknowledgment and cannot release the
+one-in-flight state, while the separate idle probe handles quiet pages without
+committing an unchanged buffer continuously.
 
 `Graphite swapchain reason` distinguishes initial creation, size changes, and
 acquire/present `OUT_OF_DATE` or `SUBOPTIMAL` results. The apparent second

@@ -59,11 +59,26 @@ swapchain image rather than the CEF DMA-BUF.
 CEF uses its external message pump on Noctalia's main thread. Visible browser
 surfaces use mandatory external begin frames driven by the owning Wayland
 surface's `wl_surface.frame` callback. Input may request a frame immediately.
-Because CEF does not acknowledge begin frames that produce no paint, a bounded
-watchdog clears the outstanding request and probes slowly while idle; it is not
-the active frame clock. `wp_presentation_feedback` records the realized refresh
-interval, including 8.333 ms on a 120 Hz output, for telemetry. Hidden or
-detached panels call CEF's hidden-state API and stop all begin-frame work.
+The custom timed begin-frame API carries an exact nanosecond refresh interval
+and a deadline relative to the call. CEF reports the matching Chromium
+`BeginFrameAck`, including its `has_damage` value, and that acknowledgment is
+the only event that completes Noctalia's in-flight scheduler state. Accelerated
+paint delivery never substitutes for acknowledgment.
+
+Noctalia keeps only the newest Wayland opportunity while a request is in
+flight. The real acknowledgment either releases that opportunity immediately
+against a freshly predicted presentation deadline or returns the scheduler to
+idle. Four consecutive no-damage acknowledgments suppress full-rate idle work;
+a 250 ms idle probe detects newly autonomous animation. A two-second watchdog
+is recovery-only protection for a broken acknowledgment contract and never
+acts as an animation clock. It requests invalidation but deliberately preserves
+the accepted in-flight state until the real acknowledgment or a lifecycle
+generation change. Hidden or detached panels call CEF's hidden-state API,
+invalidate the scheduler generation, and stop all begin-frame work.
+
+`wp_presentation_feedback` supplies the realized timestamp, sequence and exact
+refresh interval used to predict the next deadline. The integer CEF
+`windowless_frame_rate` remains only a maximum capture-rate hint.
 
 Graphite recording, texture rebinding, Vulkan queue submission, and CEF frame
 acceptance all occur on the main thread. Background workers remain CPU-only.
@@ -90,16 +105,21 @@ fatal renderer error rather than an unbounded recovery loop.
 The maintained CEF patch stack lives in `nucleus-workspace/cef/patches` and
 contains only production changes:
 
-- native DMA-BUF accelerated-paint metadata and token-correlated release fences;
+- native DMA-BUF accelerated-paint metadata, token-correlated release fences,
+  and acknowledged presentation-timed external begin frames;
 - Viz native-handle capture-buffer selection;
 - Linux Vulkan DMA-BUF/export requirements;
 - ANGLE/Chromium pinning to Noctalia's Vulkan device;
 - preservation of OSR device scale;
-- correct handling of an already-reaped child process.
+- correct handling of an already-reaped child process;
+- transparent hover tracks for Chromium's overlay scrollbars.
 
-CEF API hashes are generated from the active checkout by
-`nucleus-workspace/cef/build.sh`. They are never carried from one CEF branch to
-another or maintained as a source patch.
+CEF's C/C++ translation layer and API hashes are generated from the active
+checkout by `nucleus-workspace/cef/build.sh` before compilation. They are never
+carried from one CEF branch to another or maintained as source patches.
+Noctalia's Meson configure step rejects a nominal CEF SDK that does not expose
+the timed BeginFrame, release-fence, capture-token, and producer-fence parts of
+this contract.
 
 ## Operational acceptance
 
