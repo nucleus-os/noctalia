@@ -16,7 +16,7 @@ cxx="$toolchain_root/bin/clang++"
 ar="$toolchain_root/bin/llvm-ar"
 ranlib="$toolchain_root/bin/llvm-ranlib"
 
-for tool in "$cc" "$cxx" "$ar" "$ranlib" cmake ninja curl tar; do
+for tool in "$cc" "$cxx" "$ar" "$ranlib" cmake ninja curl tar patch; do
   command -v "$tool" >/dev/null || { echo "missing required tool: $tool" >&2; exit 1; }
 done
 
@@ -53,6 +53,16 @@ fetch_extract libqalculate-5.9.0 \
 fetch_extract tomlplusplus-3.4.0 \
   https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz \
   8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155
+
+# Give the shared library sole ownership of Error's RTTI so exceptions cross
+# the DSO boundary correctly even when Noctalia is linked with ThinLTO.
+sdbus_rtti_patch="$(dirname "$0")/patches/sdbus-cpp-2.2.1-error-rtti.patch"
+if patch --dry-run --forward --fuzz=0 -d "$source_root/sdbus-cpp-2.2.1" -p1 < "$sdbus_rtti_patch" >/dev/null 2>&1; then
+  patch --forward --fuzz=0 -d "$source_root/sdbus-cpp-2.2.1" -p1 < "$sdbus_rtti_patch"
+elif ! patch --dry-run --reverse --fuzz=0 -d "$source_root/sdbus-cpp-2.2.1" -p1 < "$sdbus_rtti_patch" >/dev/null 2>&1; then
+  echo "sdbus-c++ RTTI patch does not apply cleanly" >&2
+  exit 1
+fi
 
 cmake -S "$source_root/sdbus-cpp-2.2.1" -B "$build_root/sdbus-cpp-2.2.1" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \

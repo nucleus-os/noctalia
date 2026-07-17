@@ -1,0 +1,26 @@
+diff --git a/include/sdbus-c++/Error.h b/include/sdbus-c++/Error.h
+index 929f68a..c685313 100644
+--- a/include/sdbus-c++/Error.h
++++ b/include/sdbus-c++/Error.h
+@@ -69,6 +69,8 @@ namespace sdbus {
+             , message_(std::move(message))
+         {
+         }
++
++        ~Error() override;
+ 
+         [[nodiscard]] const Name& getName() const
+         {
+diff --git a/src/Error.cpp b/src/Error.cpp
+index de7e480..b38cf1e 100644
+--- a/src/Error.cpp
++++ b/src/Error.cpp
+@@ -32,6 +32,8 @@
+ 
+ namespace sdbus
+ {
++    Error::~Error() = default;
++
+     Error createError(int errNo, std::string customMsg)
+     {
+         sd_bus_error sdbusError = SD_BUS_ERROR_NULL;
