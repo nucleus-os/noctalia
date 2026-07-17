@@ -10,7 +10,7 @@ namespace {
 
 constexpr std::string_view kAppleMusicTransparentThemeScript = R"JS(
 (() => {
-  const id = 'noctalia-apple-music-transparent-theme-v4';
+  const id = 'noctalia-apple-music-transparent-theme-v5';
   const install = () => {
     const root = document.documentElement;
     if (!root) return false;
@@ -29,6 +29,14 @@ constexpr std::string_view kAppleMusicTransparentThemeScript = R"JS(
         background: rgba(38, 38, 40, 0.28) !important;
         -webkit-backdrop-filter: saturate(2.2) blur(24px) !important;
         backdrop-filter: saturate(2.2) blur(24px) !important;
+      }
+      nav.navigation [data-testid="native-cta"] {
+        display: none !important;
+      }
+      nav.navigation [data-testid="native-cta"] + .auth-button {
+        border-top: 0.5px solid rgba(0, 0, 0, 0.1) !important;
+        margin-bottom: 0 !important;
+        padding-block: 12px !important;
       }
     `;
     return true;

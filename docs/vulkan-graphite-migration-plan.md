@@ -887,6 +887,12 @@ frame. Live repeated thumb dragging confirms this prevents drag updates from
 freezing until button release, without changing wheel behavior or replacing
 compositor-paced input coalescing.
 
+The embedded theme also hides Apple Music's semantic
+`data-testid="native-cta"` “Open in Music” block while retaining the adjacent
+authenticated account menu. The account section inherits the removed block's
+half-pixel separator and uses an even 12px vertical inset; selectors avoid
+localized text and generated Svelte class names.
+
 Runtime status (2026-07-17): the bounded backdrop-replacement implementation
 passed its focused Skia and Viz tests, the official PGO/ThinLTO CEF m151 build
 and package completed, and Noctalia rebuilt against that distribution with all
