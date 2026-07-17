@@ -13,8 +13,8 @@ class GraphicsDevice;
 
 // App-level owner of the embedded CEF browser. Deliberately exposes NO CEF
 // types (pImpl) so the rest of the shell — panels, the surface node, the bar
-// widget — never pulls the CEF headers. The browser and its GL texture live
-// here for the process lifetime, surviving panel open/close and scene rebuilds
+// widget — never pulls the CEF headers. The browser and its stable Graphite
+// texture handle live here for the process lifetime, surviving panel open/close and scene rebuilds
 // (panels destroy their surface + scene nodes on every close), so audio keeps
 // playing and reopening is instant.
 //
@@ -69,7 +69,8 @@ public:
   void setDisplayAttached(bool attached);
   // Called from the owning Wayland surface's wl_surface.frame callback. This
   // is the normal clock for external CEF begin frames while the panel paints.
-  void onFrameOpportunity();
+  // Returns true only while another compositor-paced opportunity is needed.
+  [[nodiscard]] bool onFrameOpportunity();
   void onPresentation(const SurfacePresentationFeedback& feedback);
 
   // Message pump — driven by CefPollSource on the main thread.
@@ -85,8 +86,10 @@ public:
   void invalidateGpuTexture();
 
   // Invoked on the main thread when a fresh frame has been buffered (schedule a
-  // redraw) and when the page cursor changes (arg: WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_*).
+  // redraw), when an idle scheduler needs its Wayland callback chain re-armed,
+  // and when the page cursor changes (arg: WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_*).
   void setFrameReadyCallback(std::function<void()> cb);
+  void setFrameOpportunityCallback(std::function<void()> cb);
   void setCursorCallback(std::function<void(std::uint32_t shape)> cb);
 
   // Opaque implementation holding all CEF state — defined in the .cpp. Public so

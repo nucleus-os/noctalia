@@ -297,8 +297,13 @@ is mandatory.
   completion was replaced by CEF's real `BeginFrameAck`: latency-sensitive
   input wakes immediately, duplicate opportunities coalesce, and exact
   presentation timing reaches Chromium in nanoseconds. No-damage
-  acknowledgments back off to slow idle probes. The long watchdog only detects
-  a broken acknowledgment contract and is not an active frame clock.
+  acknowledgments stop both begin frames and the callback-only Wayland tick
+  chain, then back off to slow idle probes. Input, navigation, resize, renderer
+  recovery, or a damage-producing probe re-arms the compositor-paced chain.
+  The long watchdog only detects a broken acknowledgment contract and is not
+  an active frame clock. Renderer termination suspends the scheduler, performs
+  one cached reload, and waits for a real ready render view before resuming; a
+  second pre-ready termination does not enter an unbounded reload loop.
 - The July 15 validation gate reported a constant 8,333,333 ns interval with
   exact clock conversion, loaded the authenticated Apple Music home page at
   HTTP 200, and produced no Vulkan VUID or synchronization diagnostics. After
@@ -377,15 +382,18 @@ synchronization validation.
 1. Rebuild and package the cleaned m151 CEF patch stack, then perform a final
    validation-enabled Apple Music smoke/soak covering authentication,
    navigation, input, playback, close/reopen, resize, fractional scale, FD
-   stability, and shutdown.
+   stability, and shutdown. Publish the SDK through an atomically renamed
+   staging directory so consumers never observe a partially replaced SDK.
 2. Validate presentation-aware scheduling on additional output refresh rates
    and across output moves when those environments are available. This is an
    acceptance test, not a blocker for the renderer port.
-3. Continue the text acceptance matrix with explicit paragraph-direction and
-   per-run color controls. Markdown is now a migrated real consumer of direct
-   structured SkParagraph runs; explicit blend modes, destination-native sRGB
-   controls, and linear-light image minification are covered by the live
-   Graphite golden.
+3. Complete the live text acceptance matrix across installed Latin, CJK,
+   Arabic, mixed-bidi, combining-mark, emoji/color-font, and plugin-font
+   families. Explicit paragraph direction and per-run colors are implemented
+   and covered by the renderer and SkParagraph service tests; Markdown is a
+   migrated real consumer of direct structured runs. Explicit blend modes,
+   destination-native sRGB controls, and linear-light image minification are
+   covered by the live Graphite golden.
 
 The Tracy build is opt-in and uses the source revision and capture/export tools
 pinned by `nucleus-workspace`. Normal builds remain Tracy-free, and aggregate
@@ -423,11 +431,9 @@ The gate passes only when:
 If the gate fails, correct the import, allocator, or lifecycle contract. Do not
 add a CPU or GLES fallback.
 
-### Phase 1: finish the reproducible build contract
+### Phase 1: keep the native build reproducible
 
 - Make the private dependency bootstrap reproducible from an empty cache.
-- Validate archive checksums, compiler identity, libc++ ABI identity, Skia
-  commit, GN arguments hash, target triple, and archive inventory.
 - Verify debug and release configurations with the required codec-enabled CEF SDK.
 - Verify installed binaries from a staged prefix with `readelf` and `ldd`.
 - Ensure Noctalia, sdbus-c++, and libqalculate do not load system libstdc++.
@@ -435,18 +441,13 @@ add a CPU or GLES fallback.
 - Update Nix, Guix, distro packaging, developer documentation, and credits.
 - Treat SDK and dependency cache directories strictly as generated output.
 
-Current status (2026-07-16): Meson validates two structured, read-only build
-manifests before configuration. The Nucleus render SDK contract covers exact
-Clang version and target triple, libc++ version and ABI namespace, Skia commit,
-GN arguments hash and required values, feature defines, archive order,
-undeclared archives, system libraries, and every archive checksum. The private
-C++ dependency bundle now has an equivalent JSON contract generated only by
-its bootstrap recipe: exact package/source versions and source checksums,
-compiler/libc++ identity, every installed sdbus-c++/libqalculate/toml++ public
-header, versioned shared libraries, libc++/libc++abi/libunwind linker and
-runtime inputs, and the SONAME symlink topology are all checked. A hermetic
-negative test proves artifact tampering, symlink drift, and compiler-version
-drift fail validation.
+Current status (2026-07-16): the render SDK, private libc++ dependencies, and
+CEF are built from pinned source recipes. Meson requires their explicit paths,
+checks the small set of files it directly consumes, and relies on normal
+compile/link failures rather than generated manifests that restate the source
+configuration. Source downloads retain checksum verification, and final ELF
+inspection verifies that the executable resolves the intended libc++ runtime
+without loading libstdc++.
 
 Exit criterion: all supported build configurations produce an ABI-compatible,
 relocatable installation from a clean environment.
@@ -841,7 +842,21 @@ override is deliberately limited to the root and body background rather than
 depending on generated Svelte class names. Artwork and localized surfaces are
 untouched. The navigation glass retains Apple's `saturate(2.2)` treatment but
 uses a lighter 0.28 tint and 24px blur so Noctalia's backdrop remains visible,
-matching the visual weight of the playback glass more closely. Chromium's
+matching the visual weight of the playback glass more closely. Apple's current
+stylesheet assigns navigation, the header, and sticky content chrome the same
+`--z-web-chrome` stack level. The override raises navigation by one local level
+(still below contextual menus and modals) and retains Apple's compositing
+structure by applying the tint and backdrop filter directly to the navigation
+element. An earlier negative-z pseudo-element implementation was removed
+because it established a different backdrop root: raster artwork could remain
+in the filter input while independently composited text escaped it and was
+only dimmed by the tint. Apple's floating player has a related native stacking
+problem: it defaults to `--z-web-chrome - 1`, below sticky headers and text at
+`--z-web-chrome`. The override places both semantic glass surfaces one level
+above page chrome, while contextual menus and modals remain higher, so all page
+content participates in their backdrop filters. A bounded startup observer
+marks the expected navigation and player targets and warns if Apple removes
+either; it disconnects once resolved and performs no steady-state DOM work. Chromium's
 Linux `OverlayScrollbar` feature lets navigation and main-content thumbs float
 without consuming layout width. CEF pointer motion carries held-button flags so
 windowless overlay thumbs receive valid drag sequences.
@@ -1292,9 +1307,9 @@ the rest of the migration.
 
 ### Process-wide ABI and allocator interactions
 
-CEF, Nucleus Skia, libc++, and third-party C++ libraries share a process. The
-build manifest, hidden Skia symbols, private dependencies, and ELF checks are
-required safeguards, not optional packaging work.
+CEF, Nucleus Skia, libc++, and third-party C++ libraries share a process.
+Hidden Skia symbols, consistently built private dependencies, and final ELF
+checks protect the real ABI boundary without a parallel manifest system.
 
 ### Vulkan presentation lifetime
 

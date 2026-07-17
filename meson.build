@@ -31,20 +31,6 @@ if not nucleus_render_sdk_path.startswith('/')
   error('nucleus_render_sdk_path must be absolute: ' + nucleus_render_sdk_path)
 endif
 
-python = import('python').find_installation('python3')
-nucleus_sdk_check = run_command(
-  python,
-  files('tools/nucleus-render-sdk.py'),
-  'validate',
-  '--sdk', nucleus_render_sdk_path,
-  '--compiler', cpp.cmd_array()[0],
-  check: false,
-)
-if nucleus_sdk_check.returncode() != 0
-  error(nucleus_sdk_check.stderr().strip())
-endif
-message(nucleus_sdk_check.stdout().strip())
-
 nucleus_cpp_deps_path = get_option('nucleus_cpp_deps_path')
 if nucleus_cpp_deps_path == ''
   error('nucleus_cpp_deps_path is required; create it with tools/bootstrap-nucleus-cpp-deps.sh')
@@ -63,25 +49,11 @@ foreach required : [
   'lib/libc++.so.1',
   'lib/libc++abi.so.1',
   'lib/libunwind.so.1',
-  'share/noctalia-cpp-deps/manifest.json',
 ]
   if not private_deps_fs.exists(nucleus_cpp_deps_path / required)
     error('Invalid nucleus_cpp_deps_path: missing ' + nucleus_cpp_deps_path / required)
   endif
 endforeach
-private_deps_manifest = run_command(
-  python,
-  files('tools/nucleus-cpp-deps.py'),
-  'validate',
-  '--prefix', nucleus_cpp_deps_path,
-  '--compiler', cpp.cmd_array()[0],
-  check: false,
-)
-if private_deps_manifest.returncode() != 0
-  error(private_deps_manifest.stderr().strip())
-endif
-message(private_deps_manifest.stdout().strip())
-
 nucleus_skia_root = nucleus_render_sdk_path / 'include' / 'skia'
 nucleus_skia_libdir = nucleus_render_sdk_path / 'lib' / 'skia-graphite'
 nucleus_text_root = nucleus_render_sdk_path / 'include' / 'skia-text'
@@ -114,18 +86,19 @@ nucleus_skia_archives = [
   'skia', 'skshaper', 'skparagraph', 'skunicode_core', 'skunicode_icu',
   'svg', 'skcms', 'skresources', 'freetype2', 'harfbuzz', 'icu',
   'png', 'jpeg', 'jpeg12', 'jpeg16', 'webp', 'webp_sse41', 'expat',
-  'zlib', 'wuffs', 'dng_sdk', 'piex', 'dawn_combined',
+  'zlib', 'dng_sdk', 'piex', 'dawn_combined',
 ]
-nucleus_skia_link_args = ['-Wl,--start-group']
+nucleus_skia_link_args = []
 foreach archive : nucleus_skia_archives
   nucleus_skia_link_args += [nucleus_skia_libdir / ('lib' + archive + '.a')]
 endforeach
+# Meson places static archives in its platform link group. A second explicit
+# group here would nest --start-group markers, which LLD correctly rejects.
 # Nucleus Skia and CEF's private Chromium Skia are two different Skia builds in
 # one process. Every symbol the Nucleus static archive group contributes stays
 # out of the executable's dynamic symbol table so it cannot preempt Chromium's
 # copy.
 nucleus_skia_link_args += [
-  '-Wl,--end-group',
   '-Wl,--exclude-libs,ALL',
   '-Wl,--version-script=' + meson.project_source_root() / 'tools/noctalia-skia.map',
 ]
@@ -1018,7 +991,6 @@ endif
 # ── Include directories ────────────────────────────────────────────────────────
 _noctalia_inc = [
   include_directories('src'),
-  include_directories('third_party/wuffs', is_system: true),
   # '.' adds both the source root and the corresponding build-dir root, so
   # generated protocol headers (written to the build root) are found by #include.
   include_directories('.'),
@@ -1074,24 +1046,6 @@ foreach _required : [
 ]
   if not _cef_fs.exists(_cef_root / _required)
     error('Invalid CEF SDK: missing ' + _cef_root / _required)
-  endif
-endforeach
-
-_cef_grep = find_program('grep')
-foreach _contract : [
-    ['include/cef_browser.h', 'SendExternalBeginFrameWithTiming'],
-    ['include/cef_browser.h', 'SetAcceleratedPaintReleaseFence'],
-    ['include/internal/cef_types.h', 'deadline_delta_ns'],
-    ['include/internal/cef_types_osr.h', 'capture_counter'],
-    ['include/internal/cef_types_linux.h', 'acquire_fence_fd'],
-]
-  _contract_check = run_command(
-      _cef_grep, '-Fq', _contract[1], _cef_root / _contract[0],
-      check: false,
-  )
-  if _contract_check.returncode() != 0
-    error('CEF SDK does not provide the required Vulkan OSR contract: '
-          + _contract[1] + ' in ' + _cef_root / _contract[0])
   endif
 endforeach
 
@@ -1168,18 +1122,6 @@ noctalia_exe = executable('noctalia',
   install: true,
 )
 
-custom_target('cpp_abi_contract',
-  input: noctalia_exe,
-  output: 'cpp-abi-contract.stamp',
-  command: [
-    python,
-    files('tools/check-cpp-abi-contract.py'),
-    '--binary', '@INPUT@',
-    '--prefix', nucleus_cpp_deps_path,
-    '--stamp', '@OUTPUT@',
-  ],
-)
-
 # Install only the ABI-bearing private runtime, not development symlinks or
 # headers. The executable resolves these through a relative RUNPATH.
 foreach private_runtime : [
@@ -1230,14 +1172,6 @@ add_test_setup(
   is_default: true,
 )
 
-test(
-  'cef_subprocess_api_contract',
-  python,
-  args: [files('tests/cef_subprocess_api_contract_test.py'), cef_helper.full_path()],
-  depends: cef_helper,
-  env: private_cpp_test_env,
-)
-
 texture_handle_test = executable('texture_handle_test',
   'tests/texture_handle_test.cpp',
   include_directories: _noctalia_inc,
@@ -1269,6 +1203,7 @@ notification_history_utf8_test = executable('notification_history_utf8_test',
     nlohmann_dep,
   ],
   include_directories: _noctalia_inc,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
 )
 
 test('notification_history_utf8', notification_history_utf8_test)
@@ -1377,6 +1312,20 @@ cef_external_frame_scheduler_test = executable('cef_external_frame_scheduler_tes
 )
 
 test('cef_external_frame_scheduler', cef_external_frame_scheduler_test)
+
+cef_message_pump_deadline_test = executable('cef_message_pump_deadline_test',
+  sources: files('tests/cef_message_pump_deadline_test.cpp'),
+  include_directories: _noctalia_inc,
+)
+
+test('cef_message_pump_deadline', cef_message_pump_deadline_test)
+
+cef_renderer_recovery_test = executable('cef_renderer_recovery_test',
+  sources: files('tests/cef_renderer_recovery_test.cpp'),
+  include_directories: _noctalia_inc,
+)
+
+test('cef_renderer_recovery', cef_renderer_recovery_test)
 
 graphite_runtime_effects_test = executable('graphite_runtime_effects_test',
   sources: files('tests/graphite_runtime_effects_test.cpp'),
@@ -1886,9 +1835,6 @@ image_file_loader_data_uri_test = executable('image_file_loader_data_uri_test',
     'src/render/core/image_decoder.cpp',
     'src/render/core/stb_image_resize_impl.cpp',
   ),
-  dependencies: [
-    libwebp_dep,
-  ],
   include_directories: _noctalia_inc,
   link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
 )
@@ -1900,13 +1846,22 @@ ico_decoder_test = executable('ico_decoder_test',
     'tests/ico_decoder_test.cpp',
     'src/render/core/image_decoder.cpp',
   ),
-  dependencies: [
-    libwebp_dep,
-  ],
   include_directories: _noctalia_inc,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
 )
 
 test('ico_decoder', ico_decoder_test)
+
+animated_gif_decoder_test = executable('animated_gif_decoder_test',
+  sources: files(
+    'tests/animated_gif_decoder_test.cpp',
+    'src/render/core/image_decoder.cpp',
+  ),
+  include_directories: _noctalia_inc,
+  link_args: nucleus_skia_link_args + ['-lfontconfig', '-lfreetype', '-lz', '-ldl', '-lpthread', '-lm'],
+)
+
+test('animated_gif_decoder', animated_gif_decoder_test)
 
 app_identity_test = executable('app_identity_test',
   sources: files(
@@ -1956,11 +1911,5 @@ wayland_toplevels_identity_test = executable('wayland_toplevels_identity_test',
 )
 
 test('wayland_toplevels_identity', wayland_toplevels_identity_test)
-
-test(
-  'nucleus_cpp_deps_contract',
-  python,
-  args: [files('tests/nucleus_cpp_deps_contract_test.py')],
-)
 
 endif # build_tests

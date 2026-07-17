@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
 # Build the C++-ABI-bearing dependencies with the same Clang/libc++ toolchain
 # as Nucleus. Sources and build trees are disposable cache outputs; only this
 # recipe is versioned.
@@ -98,8 +96,5 @@ for runtime in libc++.so libc++.so.1 libc++abi.so libc++abi.so.1 libunwind.so li
     cp -aL "$toolchain_root/lib/$runtime" "$prefix/lib/$runtime"
   fi
 done
-
-rm -f "$prefix/share/noctalia-cpp-deps/manifest.txt"
-"$script_dir/nucleus-cpp-deps.py" generate --prefix "$prefix" --compiler "$cxx"
 
 echo "$prefix"

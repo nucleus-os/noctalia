@@ -4,7 +4,6 @@
 #include "core/deferred_call.h"
 #include "core/tracy_latency.h"
 
-#include <algorithm>
 #include <chrono>
 
 namespace {
@@ -17,33 +16,26 @@ long long nowMs() {
 } // namespace
 
 CefPollSource::CefPollSource(CefService& service) : m_service(service) {
-  m_service.setScheduleWorkCallback([this](std::int64_t delayMs) { scheduleWork(delayMs); });
+  m_service.setScheduleWorkCallback(
+      [state = std::weak_ptr<State>(m_state)](std::int64_t delayMs) {
+        if (const auto retained = state.lock()) {
+          scheduleWork(retained, delayMs);
+        }
+      }
+  );
 }
 
-void CefPollSource::scheduleWork(std::int64_t delayMs) {
-  const long long clamped = std::max<std::int64_t>(0, delayMs);
-  const long long requested = nowMs() + clamped;
-  long long current = m_deadlineMs.load();
-  bool deadlineUpdated = false;
-  while ((current == kNone || requested < current)
-         && !m_deadlineMs.compare_exchange_weak(current, requested)) {
-  }
-  deadlineUpdated = current == kNone || requested < current;
+void CefPollSource::scheduleWork(
+    const std::shared_ptr<State>& state, std::int64_t delayMs
+) {
+  const bool deadlineUpdated = state->deadline.schedule(nowMs(), delayMs);
   tracy_latency::messagePumpScheduled(delayMs, deadlineUpdated);
   // Wake the poll loop so it re-reads pollTimeoutMs() with the new deadline.
   DeferredCall::callLater([]() {});
 }
 
 int CefPollSource::pollTimeoutMs() const {
-  const long long deadline = m_deadlineMs.load();
-  if (deadline == kNone) {
-    return -1;
-  }
-  const long long remaining = deadline - nowMs();
-  if (remaining <= 0) {
-    return 0;
-  }
-  return static_cast<int>(std::min<long long>(remaining, 1000));
+  return m_state->deadline.pollTimeoutMs(nowMs());
 }
 
 void CefPollSource::doAddPollFds(std::vector<pollfd>& /*fds*/) {
@@ -51,21 +43,16 @@ void CefPollSource::doAddPollFds(std::vector<pollfd>& /*fds*/) {
 }
 
 void CefPollSource::dispatch(const std::vector<pollfd>& /*fds*/, std::size_t /*startIdx*/) {
-  long long deadline = m_deadlineMs.load();
-  if (deadline == kNone) {
+  const long long dispatchNowMs = nowMs();
+  const auto deadline = m_state->deadline.claimDue(dispatchNowMs);
+  if (!deadline) {
     return;
   }
-  if (deadline - nowMs() > 0) {
-    return; // not due yet (woke for another source)
-  }
-  // Claim this deadline before pumping. If another thread schedules earlier
-  // work after this exchange it remains visible for the next dispatch.
-  if (!m_deadlineMs.compare_exchange_strong(deadline, kNone)) {
-    return;
-  }
-  tracy_latency::messagePumpDispatched(std::max<long long>(0, nowMs() - deadline));
+  tracy_latency::messagePumpDispatched(
+      std::max<long long>(0, dispatchNowMs - *deadline)
+  );
   m_service.doMessageLoopWork();
   // CEF's reference external-pump implementation requires a bounded periodic
   // pump even when OnScheduleMessagePumpWork emits no follow-up request.
-  scheduleWork(kMaxPumpDelayMs);
+  scheduleWork(m_state, kMaxPumpDelayMs);
 }

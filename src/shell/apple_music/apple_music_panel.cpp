@@ -34,6 +34,7 @@ void AppleMusicPanel::create() {
         PanelManager::instance().requestUpdateOnly();
         PanelManager::instance().requestRedraw();
       },
+      []() { PanelManager::instance().requestCallbackTick(); },
       []() { PanelManager::instance().inputDispatcher().refreshCursor(); }
   );
   setRoot(std::move(surface));
@@ -55,11 +56,13 @@ void AppleMusicPanel::onClose() {
 }
 
 void AppleMusicPanel::onFrameTick(float /*deltaMs*/) {
-  m_service.onFrameOpportunity();
-  // Keep the callback chain alive without redrawing the last imported CEF
-  // buffer. Direct-sampled DMA-BUFs are released after presentation and may be
+  // Direct-sampled DMA-BUFs are released after presentation and may be
   // rewritten by CEF, so only a newly arrived frame may trigger a redraw.
-  PanelManager::instance().requestCallbackTick();
+  // Callback-only ticks continue while the acknowledged scheduler reports
+  // demand and stop entirely once repeated no-damage acks enter quiescence.
+  if (m_service.onFrameOpportunity()) {
+    PanelManager::instance().requestCallbackTick();
+  }
 }
 
 void AppleMusicPanel::onPresentation(const SurfacePresentationFeedback& feedback) {

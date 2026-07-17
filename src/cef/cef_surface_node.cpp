@@ -93,8 +93,12 @@ void CefSurfaceNode::wireInput() {
   m_input->setOnFocusLoss([this]() { m_service.setFocus(false); });
 }
 
-void CefSurfaceNode::attach(std::function<void()> requestRedraw, std::function<void()> refreshCursor) {
+void CefSurfaceNode::attach(
+    std::function<void()> requestRedraw, std::function<void()> requestFrameOpportunity,
+    std::function<void()> refreshCursor
+) {
   m_service.setFrameReadyCallback(std::move(requestRedraw));
+  m_service.setFrameOpportunityCallback(std::move(requestFrameOpportunity));
   m_service.setCursorCallback([this, refreshCursor = std::move(refreshCursor)](std::uint32_t shape) {
     if (m_input != nullptr) {
       m_input->setCursorShape(shape);
@@ -118,6 +122,7 @@ void CefSurfaceNode::detach() {
   m_attached = false;
   m_service.setDisplayAttached(false);
   m_service.setFrameReadyCallback(nullptr);
+  m_service.setFrameOpportunityCallback(nullptr);
   m_service.setCursorCallback(nullptr);
 }
 

@@ -139,6 +139,72 @@ int main() {
     ok = false;
   }
 
+  // Exercise the provisioned CJK family explicitly instead of treating tofu
+  // fallback as successful shaping. Minimal developer environments may omit
+  // the family; distro acceptance environments are expected to provide it.
+  constexpr std::string_view cjkFamily = "Noto Sans CJK JP";
+  nt::ResolvedFontDescriptor cjkFont{};
+  if (service.resolveFont(
+          {cjkFamily.data(), cjkFamily.size()}, 24.0f, nt::FontWeightRegular,
+          nt::FontWidthStandard, nt::FontSlantUpright, &cjkFont)
+      && std::string_view(cjkFont.familyName, cjkFont.familyNameLength).contains(cjkFamily)) {
+    const std::string cjk = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x81\xAE"
+                            "\xE6\x96\x87\xE5\xAD\x97\xE7\xB5\x84\xE3\x81\xBF";
+    nt::TextRunView cjkRun{
+        .text = {cjk.data(), cjk.size()},
+        .fontFamily = {cjkFamily.data(), cjkFamily.size()},
+        .pointSize = 24.0f,
+    };
+    nt::ParagraphStyle cjkStyle{.width = 256.0f};
+    nt::ParagraphMetrics cjkMetrics{};
+    nt::TextBounds cjkBounds{};
+    std::uint64_t cjkHandle = 0;
+    auto cjkSurface = SkSurfaces::Raster(
+        SkImageInfo::Make(256, 64, kRGBA_8888_SkColorType, kPremul_SkAlphaType)
+    );
+    bool paintedCjk = false;
+    std::uint32_t cjkRectCount = 0;
+    std::uint32_t cjkBreakCount = 0;
+    std::vector<std::uint32_t> cjkBreaks;
+    if (cjkSurface != nullptr
+        && service.createRuns(&cjkRun, 1, &cjkStyle, &cjkHandle, &cjkMetrics)
+        && service.inkBounds(cjkHandle, &cjkBounds)
+        && service.rectsForRange(cjkHandle, 0, 3, nullptr, 0, &cjkRectCount)
+        && service.graphemeBreaks(
+            {cjk.data(), cjk.size()}, nullptr, 0, &cjkBreakCount
+        )) {
+      cjkBreaks.resize(cjkBreakCount);
+      const bool breaksMeasured = service.graphemeBreaks(
+          {cjk.data(), cjk.size()}, cjkBreaks.data(), cjkBreaks.size(),
+          &cjkBreakCount
+      );
+      cjkSurface->getCanvas()->clear(SK_ColorTRANSPARENT);
+      service.paint(cjkHandle, cjkSurface->getCanvas(), 0.0f, 0.0f);
+      SkPixmap pixels;
+      if (cjkSurface->peekPixels(&pixels)) {
+        for (int y = 0; y < pixels.height() && !paintedCjk; ++y) {
+          for (int x = 0; x < pixels.width(); ++x) {
+            paintedCjk |= SkColorGetA(pixels.getColor(x, y)) > 0;
+          }
+        }
+      }
+      if (!breaksMeasured || cjkBreaks.empty() || cjkBreaks.front() != 0
+          || cjkBreaks.back() != cjk.size()) {
+        std::cerr << "CJK grapheme mapping did not preserve UTF-8 endpoints\n";
+        ok = false;
+      }
+    }
+    if (cjkHandle != 0) {
+      service.release(cjkHandle);
+    }
+    if (!paintedCjk || cjkMetrics.lineCount != 1 || cjkMetrics.width <= 0.0f
+        || cjkBounds.right <= cjkBounds.left || cjkBounds.bottom <= cjkBounds.top
+        || cjkRectCount == 0) {
+      std::cerr << "installed CJK font failed shaping, geometry, or raster acceptance\n";
+      ok = false;
+    }
+  }
+
   constexpr std::string_view inkText = "Hgj";
   nt::TextRunView inkRun{.text = {inkText.data(), inkText.size()}, .pointSize = 28.0f};
   nt::ParagraphStyle inkStyle{.width = 160.0f};

@@ -3,6 +3,7 @@
 #include "cef/cef_external_frame_scheduler.h"
 #include "cef/cef_gpu_frame_bridge.h"
 #include "cef/cef_pointer_motion_coalescer.h"
+#include "cef/cef_renderer_recovery.h"
 #include "cef/noctalia_cef_app.h"
 #include "core/deferred_call.h"
 #include "core/input/key_modifiers.h"
@@ -17,6 +18,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_render_handler.h"
+#include "include/cef_request_handler.h"
 #include "include/wrapper/cef_helpers.h"
 
 #include <algorithm>
@@ -198,6 +200,33 @@ private:
   IMPLEMENT_REFCOUNTING(NoctaliaExternalBeginFrameCallback);
 };
 
+// OnScheduleMessagePumpWork may run on any CEF thread. Keep its callback in a
+// separately owned synchronization boundary so CEF never dereferences Impl
+// while the service is shutting down.
+class CefScheduleWorkBridge {
+public:
+  void set(std::function<void(std::int64_t)> callback) {
+    const std::scoped_lock lock(m_mutex);
+    m_callback = std::move(callback);
+  }
+
+  void dispatch(std::int64_t delayMs) {
+    const std::scoped_lock lock(m_mutex);
+    if (m_callback) {
+      m_callback(delayMs);
+    }
+  }
+
+  void disable() {
+    const std::scoped_lock lock(m_mutex);
+    m_callback = nullptr;
+  }
+
+private:
+  std::mutex m_mutex;
+  std::function<void(std::int64_t)> m_callback;
+};
+
 // ---------------------------------------------------------------------------
 // Impl: the actual CEF-owning state.
 // ---------------------------------------------------------------------------
@@ -214,6 +243,7 @@ struct CefService::Impl {
   std::uint32_t presentationRefreshNs = 0;
   int configuredFrameRate = kCefWindowlessFrameRate;
   CefExternalFrameScheduler frameScheduler{kFallbackBeginFrameIntervalNs};
+  CefRendererRecovery rendererRecovery;
   Timer beginFrameAckWatchdog;
   Timer idleAnimationProbe;
   std::string pendingUrl;
@@ -230,14 +260,22 @@ struct CefService::Impl {
   CefPointerMotionCoalescer pointerMotion;
   std::uint32_t pointerButtonFlags = 0;
 
-  std::function<void(std::int64_t)> scheduleWork;
+  std::shared_ptr<CefScheduleWorkBridge> scheduleWork =
+      std::make_shared<CefScheduleWorkBridge>();
   std::function<void()> frameReady;
+  std::function<void()> frameOpportunity;
   std::function<void(std::uint32_t)> cursorCb;
   int lastCursorType = -1;
   std::uint32_t lastCursorShape = 0;
 
   // Guards deferred main-thread callbacks against use-after-free during shutdown.
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
+
+  void armFrameOpportunity() {
+    if (attached && browser != nullptr && frameScheduler.needsFrameOpportunity() && frameOpportunity) {
+      frameOpportunity();
+    }
+  }
 
   void submitExternalBeginFrame(const CefExternalFrameScheduler::Request& request) {
     if (!attached || browser == nullptr || request.generation != frameScheduler.generation()) {
@@ -332,6 +370,7 @@ struct CefService::Impl {
     } else {
       scheduleIdleProbe();
     }
+    armFrameOpportunity();
   }
 
   void requestExternalBeginFrame(bool urgent) {
@@ -347,6 +386,7 @@ struct CefService::Impl {
     } else if (priorState == CefExternalFrameScheduler::State::InFlight) {
       tracy_latency::externalBeginFrameCoalesced();
     }
+    armFrameOpportunity();
   }
 
   void onPresentation(const SurfacePresentationFeedback& feedback) {
@@ -422,7 +462,8 @@ class NoctaliaCefClient : public CefClient,
                           public CefRenderHandler,
                           public CefLifeSpanHandler,
                           public CefLoadHandler,
-                          public CefDisplayHandler {
+                          public CefDisplayHandler,
+                          public CefRequestHandler {
 public:
   explicit NoctaliaCefClient(CefService::Impl* impl) : m_impl(impl) {}
 
@@ -430,6 +471,7 @@ public:
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
   // CefRenderHandler
   void GetViewRect(CefRefPtr<CefBrowser> /*browser*/, CefRect& rect) override {
@@ -547,6 +589,20 @@ public:
     return true; // we render the cursor via the Wayland cursor-shape protocol
   }
 
+  bool OnConsoleMessage(
+      CefRefPtr<CefBrowser> /*browser*/, cef_log_severity_t /*level*/, const CefString& message,
+      const CefString& source, int line
+  ) override {
+    const std::string text = message.ToString();
+    if (!text.starts_with("[Noctalia]")) {
+      return false;
+    }
+    kLog.warn(
+        "CEF theme compatibility warning: {} ({}:{})", text, source.ToString(), line
+    );
+    return true;
+  }
+
   // CefLifeSpanHandler
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
@@ -562,7 +618,63 @@ public:
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override {
     m_impl->stopExternalScheduler();
+    m_impl->rendererRecovery.reset();
     m_impl->browser = nullptr;
+  }
+
+  // CefRequestHandler
+  void OnRenderViewReady(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    const bool recovered =
+        m_impl->rendererRecovery.state() != CefRendererRecovery::State::Ready;
+    m_impl->rendererRecovery.onRenderViewReady();
+    if (!m_impl->attached || browser == nullptr) {
+      return;
+    }
+    browser->GetHost()->WasResized();
+    browser->GetHost()->Invalidate(PET_VIEW);
+    browser->GetHost()->SetFocus(true);
+    m_impl->startExternalScheduler();
+    m_impl->requestExternalBeginFrame(true);
+    if (recovered) {
+      kLog.info("CEF renderer recovery produced a ready render view");
+    }
+  }
+
+  void OnRenderProcessTerminated(
+      CefRefPtr<CefBrowser> browser, TerminationStatus status, int errorCode,
+      const CefString& errorString
+  ) override {
+    CEF_REQUIRE_UI_THREAD();
+    m_impl->stopExternalScheduler();
+    if (m_impl->gpuBridge != nullptr) {
+      m_impl->gpuBridge->discardPendingFrame();
+    }
+
+    const auto action = m_impl->rendererRecovery.onTerminated();
+    kLog.error(
+        "CEF renderer terminated: status={} code={} error={} recovery={}",
+        static_cast<int>(status), errorCode, errorString.ToString(),
+        action == CefRendererRecovery::Action::Reload ? "reload" : "stopped"
+    );
+    if (action != CefRendererRecovery::Action::Reload || browser == nullptr) {
+      return;
+    }
+
+    auto alive = m_impl->alive;
+    auto* impl = m_impl;
+    const int browserId = browser->GetIdentifier();
+    const std::uint64_t recoveryGeneration = m_impl->rendererRecovery.generation();
+    DeferredCall::callLater([alive, impl, browserId, recoveryGeneration]() {
+      if (!alive->load() || impl->browser == nullptr
+          || impl->browser->GetIdentifier() != browserId
+          || !impl->rendererRecovery.isPending(recoveryGeneration)) {
+        return;
+      }
+      // Reload uses the existing persistent request context and HTTP cache.
+      // The new render view's ready callback restarts external begin frames.
+      impl->browser->Reload();
+    });
   }
 
   // CefLoadHandler
@@ -623,13 +735,11 @@ bool CefService::initialize() {
 
   CefMainArgs mainArgs(0, nullptr);
 
-  auto* impl = m_impl.get();
-  auto alive = m_impl->alive;
-  m_impl->app = new NoctaliaCefApp([alive, impl](std::int64_t delayMs) {
-    // OnScheduleMessagePumpWork can fire on any CEF thread — marshal.
-    if (alive->load() && impl->scheduleWork) {
-      impl->scheduleWork(delayMs);
-    }
+  auto scheduleWork = m_impl->scheduleWork;
+  m_impl->app = new NoctaliaCefApp([scheduleWork = std::move(scheduleWork)](
+                                       std::int64_t delayMs
+                                   ) {
+    scheduleWork->dispatch(delayMs);
   });
 
   const std::string rootCachePath = userCachePath();
@@ -713,6 +823,7 @@ void CefService::shutdown() {
   if (!m_impl->initialized) {
     return;
   }
+  m_impl->scheduleWork->disable();
   m_impl->alive->store(false);
   m_impl->stopExternalScheduler();
   if (m_impl->browser) {
@@ -963,10 +1074,10 @@ void CefService::onPresentation(const SurfacePresentationFeedback& feedback) {
   m_impl->onPresentation(feedback);
 }
 
-void CefService::onFrameOpportunity() {
+bool CefService::onFrameOpportunity() {
   const bool forwardedPointerMotion = m_impl->flushPointerMotion();
   if (!m_impl->attached || m_impl->browser == nullptr) {
-    return;
+    return false;
   }
   const auto priorState = m_impl->frameScheduler.state();
   const std::int64_t nowNs = steadyNowNs();
@@ -978,6 +1089,7 @@ void CefService::onFrameOpportunity() {
   } else if (priorState == CefExternalFrameScheduler::State::InFlight) {
     tracy_latency::externalBeginFrameCoalesced();
   }
+  return m_impl->frameScheduler.needsFrameOpportunity();
 }
 
 void CefService::doMessageLoopWork() {
@@ -988,7 +1100,7 @@ void CefService::doMessageLoopWork() {
 }
 
 void CefService::setScheduleWorkCallback(std::function<void(std::int64_t)> cb) {
-  m_impl->scheduleWork = std::move(cb);
+  m_impl->scheduleWork->set(std::move(cb));
 }
 
 bool CefService::uploadIfDirty(TextureManager& textures) {
@@ -1013,6 +1125,11 @@ void CefService::invalidateGpuTexture() {
 
 void CefService::setFrameReadyCallback(std::function<void()> cb) {
   m_impl->frameReady = std::move(cb);
+}
+
+void CefService::setFrameOpportunityCallback(std::function<void()> cb) {
+  m_impl->frameOpportunity = std::move(cb);
+  m_impl->armFrameOpportunity();
 }
 
 void CefService::setCursorCallback(std::function<void(std::uint32_t)> cb) {

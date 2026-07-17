@@ -144,6 +144,12 @@ public:
     return m_state == State::InFlight && m_inFlightId == requestId;
   }
   [[nodiscard]] bool idleSuppressed() const noexcept { return m_idleSuppressed; }
+  // True while the owning Wayland surface should keep a compositor-paced
+  // callback chain alive. Quiescent idle probes bypass suppression directly
+  // and re-arm the chain only when Chromium acknowledges real damage.
+  [[nodiscard]] bool needsFrameOpportunity() const noexcept {
+    return m_state != State::Suspended && !m_idleSuppressed;
+  }
   [[nodiscard]] std::uint32_t consecutiveNoDamage() const noexcept {
     return m_consecutiveNoDamage;
   }

@@ -40,7 +40,7 @@ int main() {
   // decoded bytes, not the data URI media type.
   const std::string mismatchedDataUri =
       "data:image/jpeg;base64,"
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
 
   auto image = loadImageFile(mismatchedDataUri);
   ok = check(image.has_value(), image ? "failed to decode mismatched data URI" : image.error().c_str()) && ok;

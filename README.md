@@ -110,9 +110,9 @@ tools/bootstrap-nucleus-cpp-deps.sh
 ```
 
 The patched, codec-enabled CEF m151 distribution must be present under
-`~/.cache/nucleus/cef/dist/` with `latest.json`, or selected explicitly with
-`CEF_SDK_PATH`. `just configure` validates all three generated manifests and
-uses these defaults; `NUCLEUS_TOOLCHAIN_ROOT`, `NUCLEUS_RENDER_SDK_PATH`,
+`~/.cache/nucleus/cef/dist/current`, or selected explicitly with
+`CEF_SDK_PATH`. `just configure` checks the required SDK files and uses these
+defaults; `NUCLEUS_TOOLCHAIN_ROOT`, `NUCLEUS_RENDER_SDK_PATH`,
 `NUCLEUS_CPP_DEPS_PATH`, and `CEF_SDK_PATH` override them.
 
 The following lists are only the remaining C/system build prerequisites. Do
@@ -187,12 +187,13 @@ sudo xbps-install meson ninja pkg-config git \
   polkit-devel libxml2-devel
 ```
 
-Vendored dependencies, with no system package needed: `Wuffs`,
-`Luau`, `dr_wav`, `fzy`, and Material Color Utilities.
+Vendored dependencies, with no system package needed: `Luau`, `dr_wav`,
+`fzy`, and Material Color Utilities.
 
-System packages required beyond the Wayland/Vulkan stack: `libwebp` handles WebP decoding and thumbnail encoding. Wuffs
-handles the other supported raster image formats. `libqalculate` powers the launcher calculator (arithmetic, unit and
-currency conversion).
+System packages required beyond the Wayland/Vulkan stack: `libwebp` handles
+thumbnail encoding; raster image decoding uses the Nucleus Skia SDK.
+`libqalculate` powers the launcher calculator (arithmetic, unit and currency
+conversion).
 
 Polkit agent support requires development files that provide the `polkit-agent-1` and `polkit-gobject-1` pkg-config
 modules. Some distros ship these in the runtime `polkit` package, while split-package distros use names such as
@@ -210,9 +211,9 @@ and daemon into separate packages, make sure you have both installed.
 
 Sanitizer runtime packages are only needed for ASan/UBSan builds configured with `just configure asan`.
 
-The sources are built as C++23 with the exact Clang/libc++ identity recorded in
-the Nucleus SDK manifests. A different system compiler is intentionally
-rejected.
+The sources are built as C++23 with the Nucleus Clang/libc++ toolchain. A
+different system compiler is intentionally rejected because the linked Skia
+and private C++ libraries use that ABI.
 
 ## Building and installing
 

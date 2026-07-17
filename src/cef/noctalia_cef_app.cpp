@@ -10,7 +10,9 @@ namespace {
 
 constexpr std::string_view kAppleMusicTransparentThemeScript = R"JS(
 (() => {
-  const id = 'noctalia-apple-music-transparent-theme-v1';
+  const id = 'noctalia-apple-music-transparent-theme-v4';
+  const navigationSelector = 'nav.navigation[data-testid="navigation"], nav.navigation';
+  const playerSelector = '.player-bar';
   const install = () => {
     const root = document.documentElement;
     if (!root) return false;
@@ -26,18 +28,57 @@ constexpr std::string_view kAppleMusicTransparentThemeScript = R"JS(
         background-image: none !important;
       }
       nav.navigation {
-        background-color: rgba(38, 38, 40, 0.28) !important;
+        /*
+         * Apple assigns navigation, its header, and sticky content chrome the
+         * same --z-web-chrome level. Later content can consequently paint over
+         * navigation's backdrop. Raise navigation by one local chrome level
+         * while leaving contextual menus and modals above it. Keep the filter
+         * on the navigation itself: moving it to a negative-z pseudo-element
+         * creates a different backdrop root and can leave independently
+         * composited text outside the filtered result.
+         */
+        z-index: calc(var(--z-web-chrome, 9901) + 1) !important;
+        background: rgba(38, 38, 40, 0.28) !important;
         -webkit-backdrop-filter: saturate(2.2) blur(24px) !important;
         backdrop-filter: saturate(2.2) blur(24px) !important;
       }
+      .player-bar {
+        /*
+         * Apple's player defaults to --z-web-chrome - 1 while sticky text and
+         * headers use --z-web-chrome. That lets those text layers paint sharp
+         * above the player's filtered backdrop even though ordinary artwork
+         * remains behind it. Keep all page content below the player glass.
+         */
+        z-index: calc(var(--z-web-chrome, 9901) + 1) !important;
+      }
     `;
-    root.dataset.noctaliaTransparentTheme = 'v1';
+    root.dataset.noctaliaTransparentTheme = 'v4';
+    return true;
+  };
+  const markGlassTargets = () => {
+    const root = document.documentElement;
+    const navigation = document.querySelector(navigationSelector);
+    const player = document.querySelector(playerSelector);
+    if (!root || !navigation || !player) return false;
+    root.dataset.noctaliaGlassTargets = 'v4';
     return true;
   };
   if (!install()) {
     new MutationObserver((_, observer) => {
       if (install()) observer.disconnect();
     }).observe(document, {childList: true, subtree: true});
+  }
+  if (!markGlassTargets()) {
+    const observer = new MutationObserver(() => {
+      if (markGlassTargets()) observer.disconnect();
+    });
+    observer.observe(document, {childList: true, subtree: true});
+    setTimeout(() => {
+      if (!markGlassTargets()) {
+        observer.disconnect();
+        console.warn('[Noctalia] Apple Music glass targets were not found');
+      }
+    }, 10000);
   }
 })();
 )JS";

@@ -1,9 +1,10 @@
 #pragma once
 
 #include "app/poll_source.h"
+#include "cef/cef_message_pump_deadline.h"
 
-#include <atomic>
 #include <cstdint>
+#include <memory>
 
 class CefService;
 
@@ -23,11 +24,16 @@ protected:
   void doAddPollFds(std::vector<pollfd>& fds) override;
 
 private:
+  struct State {
+    CefMessagePumpDeadline deadline;
+  };
+
   // Called (possibly from a CEF thread) when the next pump time changes.
-  void scheduleWork(std::int64_t delayMs);
+  static void scheduleWork(const std::shared_ptr<State>& state, std::int64_t delayMs);
 
   CefService& m_service;
-  // Absolute deadline in steady-clock milliseconds; kNone when idle.
-  static constexpr long long kNone = -1;
-  std::atomic<long long> m_deadlineMs{kNone};
+  // CEF can enter its scheduling callback from another thread while the
+  // application is tearing down this poll source. The callback retains only
+  // this deadline state, never a pointer to the CefPollSource object.
+  std::shared_ptr<State> m_state = std::make_shared<State>();
 };

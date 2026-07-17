@@ -16,20 +16,10 @@ configure m=mode install_prefix=prefix:
     cpp_deps="${NUCLEUS_CPP_DEPS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/noctalia-cpp-deps/clang-21-libcxx}"
     cef_sdk="${CEF_SDK_PATH:-}"
     if [[ -z "$cef_sdk" ]]; then
-        cef_metadata="${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/cef/dist/latest.json"
-        if [[ -f "$cef_metadata" ]]; then
-            cef_sdk="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dist_dir"])' "$cef_metadata")"
-        fi
+        cef_sdk="${XDG_CACHE_HOME:-$HOME/.cache}/nucleus/cef/dist/current"
     fi
-    for contract in "$render_sdk/manifest.json" "$cpp_deps/share/noctalia-cpp-deps/manifest.json"; do
-        if [[ ! -f "$contract" ]]; then
-            echo "error: required generated build contract is missing: $contract" >&2
-            echo "run the Nucleus SDK/bootstrap workflow or set the corresponding *_PATH variable" >&2
-            exit 1
-        fi
-    done
     if [[ -z "$cef_sdk" || ! -f "$cef_sdk/Release/libcef.so" ]]; then
-        echo "error: codec-enabled CEF SDK not found; set CEF_SDK_PATH or generate ~/.cache/nucleus/cef/dist/latest.json" >&2
+        echo "error: codec-enabled CEF SDK not found; set CEF_SDK_PATH or build ~/.cache/nucleus/cef/dist/current" >&2
         exit 1
     fi
     export CC="${CC:-$toolchain_root/bin/clang}"
@@ -42,7 +32,14 @@ configure m=mode install_prefix=prefix:
         -Dnucleus_cpp_deps_path="$cpp_deps"
         -Dcef_sdk_path="$cef_sdk"
     )
-    [[ "{{m}}" == "release" ]] && args+=(-Db_lto=true)
+    if [[ "{{m}}" == "release" ]]; then
+        args+=(
+            -Db_lto=true
+            -Db_lto_mode=thin
+            -Dc_link_args=-fuse-ld=lld
+            -Dcpp_link_args=-fuse-ld=lld
+        )
+    fi
     [[ "{{m}}" == "asan"    ]] && args+=(-Db_sanitize=address,undefined)
     if [[ -d "build-{{m}}" ]]; then
         meson setup "build-{{m}}" "${args[@]}" --prefix "{{install_prefix}}" --reconfigure

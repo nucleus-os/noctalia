@@ -20,9 +20,13 @@ public:
   ~CefSurfaceNode() override;
 
   // Wire the display live: requestRedraw is invoked on the main thread whenever
-  // a fresh browser frame is ready, so the owner can schedule a repaint. Marks
-  // the browser attached (it resumes painting + takes focus).
-  void attach(std::function<void()> requestRedraw, std::function<void()> refreshCursor);
+  // a fresh browser frame is ready, and requestFrameOpportunity arms one
+  // callback-only Wayland tick when CEF needs another compositor-paced begin
+  // frame. Marks the browser attached (it resumes painting + takes focus).
+  void attach(
+      std::function<void()> requestRedraw, std::function<void()> requestFrameOpportunity,
+      std::function<void()> refreshCursor
+  );
   // Detach the display: the browser keeps running (audio continues) but stops
   // painting until re-attached.
   void detach();
