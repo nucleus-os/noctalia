@@ -62,6 +62,8 @@ public:
   void sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers);
   void sendMouseWheel(float x, float y, float deltaX, float deltaY, std::uint32_t modifiers);
   void sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed);
+  void goBack();
+  void goForward();
   void setFocus(bool focused);
 
   // Keep the browser alive but stop painting when its display is detached

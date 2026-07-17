@@ -1,6 +1,7 @@
 #include "cef/cef_surface_node.h"
 
 #include "cef/cef_service.h"
+#include "core/input/key_modifiers.h"
 #include "core/tracy_latency.h"
 #include "render/core/renderer.h"
 #include "render/core/texture_manager.h"
@@ -9,6 +10,7 @@
 
 #include <linux/input-event-codes.h>
 #include <memory>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
 // wl axis value -> CEF wheel delta. wl positive = scroll down; Chromium wheel
@@ -22,6 +24,26 @@ int cefButtonFromLinux(std::uint32_t button) {
     case BTN_LEFT:
     default: return 0;
   }
+}
+
+bool isHistoryBackButton(std::uint32_t button) {
+  return button == BTN_SIDE || button == BTN_BACK;
+}
+
+bool isHistoryForwardButton(std::uint32_t button) {
+  return button == BTN_EXTRA || button == BTN_FORWARD;
+}
+
+bool isHistoryBackKey(const InputArea::KeyData& key) {
+  return key.sym == XKB_KEY_XF86Back || (key.sym == XKB_KEY_Left && key.modifiers == KeyMod::Alt);
+}
+
+bool isHistoryForwardKey(const InputArea::KeyData& key) {
+  return key.sym == XKB_KEY_XF86Forward || (key.sym == XKB_KEY_Right && key.modifiers == KeyMod::Alt);
+}
+
+bool isAltModifierKey(const InputArea::KeyData& key) {
+  return key.sym == XKB_KEY_Alt_L || key.sym == XKB_KEY_Alt_R;
 }
 } // namespace
 
@@ -48,7 +70,9 @@ void CefSurfaceNode::setCornerRadius(float radius) {
 }
 
 void CefSurfaceNode::wireInput() {
-  m_input->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT, BTN_MIDDLE, BTN_RIGHT}));
+  m_input->setAcceptedButtons(
+      InputArea::buttonMask({BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_SIDE, BTN_EXTRA, BTN_BACK, BTN_FORWARD})
+  );
   m_input->setFocusable(true);
   // The browser is itself a keyboard-focus container. InputDispatcher normally
   // clears focus from button-like areas on pointer release; doing that here
@@ -74,6 +98,18 @@ void CefSurfaceNode::wireInput() {
     if (p.pressed) {
       tracy_latency::inputReceived(tracy_latency::InputKind::PointerButton);
     }
+    if (isHistoryBackButton(p.button)) {
+      if (p.pressed) {
+        m_service.goBack();
+      }
+      return;
+    }
+    if (isHistoryForwardButton(p.button)) {
+      if (p.pressed) {
+        m_service.goForward();
+      }
+      return;
+    }
     m_service.sendMouseButton(p.localX, p.localY, cefButtonFromLinux(p.button), p.pressed, 1, 0);
   });
   m_input->setOnAxisHandler([this](const InputArea::PointerData& p) {
@@ -84,9 +120,27 @@ void CefSurfaceNode::wireInput() {
 
   m_input->setOnKeyDown([this](const InputArea::KeyData& k) {
     tracy_latency::inputReceived(tracy_latency::InputKind::Key);
+    // In a normal Chrome window the browser chrome consumes the raw Alt
+    // modifier event. CEF OSR has no browser chrome, so forwarding it exposes
+    // the event to page accessibility handling. Combination keys still carry
+    // KeyMod::Alt and are forwarded or handled below.
+    if (isAltModifierKey(k)) {
+      return;
+    }
+    if (isHistoryBackKey(k)) {
+      m_service.goBack();
+      return;
+    }
+    if (isHistoryForwardKey(k)) {
+      m_service.goForward();
+      return;
+    }
     m_service.sendKey(k.sym, k.utf32, k.modifiers, true);
   });
   m_input->setOnKeyUp([this](const InputArea::KeyData& k) {
+    if (isAltModifierKey(k) || isHistoryBackKey(k) || isHistoryForwardKey(k)) {
+      return;
+    }
     m_service.sendKey(k.sym, k.utf32, k.modifiers, false);
   });
   m_input->setOnFocusGain([this]() { m_service.setFocus(true); });

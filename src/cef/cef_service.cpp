@@ -1033,6 +1033,22 @@ void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t m
   m_impl->requestExternalBeginFrame(true);
 }
 
+void CefService::goBack() {
+  if (!m_impl->browser || !m_impl->browser->CanGoBack()) {
+    return;
+  }
+  m_impl->browser->GoBack();
+  m_impl->requestExternalBeginFrame(true);
+}
+
+void CefService::goForward() {
+  if (!m_impl->browser || !m_impl->browser->CanGoForward()) {
+    return;
+  }
+  m_impl->browser->GoForward();
+  m_impl->requestExternalBeginFrame(true);
+}
+
 void CefService::setFocus(bool focused) {
   if (m_impl->browser) {
     m_impl->browser->GetHost()->SetFocus(focused);
