@@ -74,7 +74,6 @@ nucleus_text_sources = [
 nucleus_skia_cpp_args = [
   '-DNDEBUG',
   '-DSK_GRAPHITE',
-  '-DSK_DAWN',
   '-DSK_VULKAN',
   '-DSK_GAMMA_APPLY_TO_A8',
   '-DSK_ALLOW_STATIC_GLOBAL_INITIALIZERS=1',
@@ -86,7 +85,7 @@ nucleus_skia_archives = [
   'skia', 'skshaper', 'skparagraph', 'skunicode_core', 'skunicode_icu',
   'svg', 'skcms', 'skresources', 'freetype2', 'harfbuzz', 'icu',
   'png', 'jpeg', 'jpeg12', 'jpeg16', 'webp', 'webp_sse41', 'expat',
-  'zlib', 'dng_sdk', 'piex', 'dawn_combined',
+  'zlib', 'dng_sdk', 'piex',
 ]
 nucleus_skia_link_args = []
 foreach archive : nucleus_skia_archives

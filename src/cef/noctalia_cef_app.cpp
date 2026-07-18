@@ -132,16 +132,24 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
   // enabling it in the browser process.
   appendCommaSeparatedSwitchValue(cmd, "disable-features", "ImmersiveReadAnything");
   appendCommaSeparatedSwitchValue(cmd, "enable-features", "OverlayScrollbar");
-  // The accelerated OSR contract is Wayland + ANGLE Vulkan. ANGLE writes into
-  // the exportable native pixmap consumed by Noctalia; Chromium's separate
-  // native-Vulkan compositor is not part of this path.
+  if (const char* validation = std::getenv("NOCTALIA_VULKAN_VALIDATION");
+      validation != nullptr && validation[0] == '1') {
+    appendCommaSeparatedSwitchValue(
+        cmd, "enable-features", "SkiaGraphite:dawn_skip_validation/false/dawn_backend_validation/true"
+    );
+    cmd->AppendSwitchWithValue("enable-dawn-backend-validation", "full");
+  }
+  // Viz renders with Graphite/Dawn/Vulkan into the exportable native pixmap.
+  // ANGLE remains Vulkan-backed for WebGL and other GL-originated content.
   cmd->AppendSwitchWithValue("ozone-platform", "wayland");
+  cmd->AppendSwitch("enable-skia-graphite");
+  cmd->AppendSwitchWithValue("skia-graphite-dawn-backend", "vulkan");
   cmd->AppendSwitchWithValue("use-angle", "vulkan");
 }
 
 void NoctaliaCefApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) {
-  // Forward the compositor-selected GPU explicitly so ANGLE, native Vulkan,
-  // and the Wayland native-pixmap allocator all use Noctalia's device.
+  // Forward the compositor-selected GPU explicitly so Dawn, ANGLE, native
+  // Vulkan, and the Wayland native-pixmap allocator use the same device.
   if (const char* uuid = std::getenv("NOCTALIA_CEF_VULKAN_DEVICE_UUID");
       uuid != nullptr && uuid[0] != '\0') {
     cmd->AppendSwitchWithValue("cef-vulkan-device-uuid", uuid);

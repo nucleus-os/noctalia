@@ -10,9 +10,10 @@ CEF rendering path. There is no CPU paint, GLES, persistent-image copy, or
 runtime backend fallback.
 
 The workspace pins CEF branch 7922 and Chromium 151.0.7922.19. The SDK is built
-from source with the required codec support. Noctalia always requests native
-Wayland and ANGLE Vulkan; those are build/runtime requirements, not user
-selectable compatibility modes.
+from source with the required codec support. Viz renders through Skia Graphite
+over Dawn Vulkan. ANGLE Vulkan remains mandatory for WebGL and other
+GL-originated Chromium content. Native Wayland and both Vulkan paths are build
+and runtime requirements, not user-selectable compatibility modes.
 
 The integration rests on two invariants:
 
@@ -30,6 +31,7 @@ completed.
 Wayland frame callback
   -> CEF external BeginFrame
   -> Chromium/Viz root render
+  -> Skia Graphite / Dawn Vulkan
   -> exportable offscreen buffer queue
   -> OnAcceleratedPaint
   -> Vulkan DMA-BUF import
@@ -39,11 +41,12 @@ Wayland frame callback
   -> token-correlated release fence returned to Viz
 ```
 
-CEF publishes a borrowed DMA-BUF description, producer acquire fence,
-transport epoch, capture counter, output generation, output slot, and content
-serial. The frame descriptors are valid only for the callback. Noctalia
-duplicates the DMA-BUF descriptor only when creating a cached import and never
-retains CEF's borrowed descriptor.
+CEF publishes a borrowed DMA-BUF description, producer acquire fence, exact
+producer ownership-release `(oldLayout, newLayout)` pair, external queue-family
+domain, transport epoch, capture counter, output generation, output slot, and
+content serial. The frame descriptors are valid only for the callback.
+Noctalia duplicates the DMA-BUF descriptor only when creating a cached import
+and never retains CEF's borrowed descriptor.
 
 The export device uses a bounded queue of complete root frames. Partial swap is
 disabled, so each published slot is independently valid; future damage-based
@@ -53,9 +56,11 @@ full-root path.
 ## Consumer ownership and synchronization
 
 `CefGpuFrameBridge` validates each frame's dimensions, format, modifier, plane
-layout, producer layout, queue-family domain, and external-memory support.
+layout, producer layout pair, queue-family domain, and external-memory support.
 Imports are cached by transport epoch, stable file identity, geometry, format,
-modifier, layout, queue family, stride, and offset. Each cache entry owns:
+modifier, stride, and offset. Layout and queue-family state belong to the
+individual access, not the DMA-BUF allocation, and therefore live on the
+pending frame rather than in import identity. Each cache entry owns:
 
 - the imported `VkImage` and dedicated `VkDeviceMemory`;
 - its Graphite `BackendTexture` and `SkImage`;
@@ -68,35 +73,42 @@ new CEF slot arrives without changing scene identity.
 For a newly published frame:
 
 1. Import the producer sync FD into the selected frame-slot semaphore.
-2. Wait on that semaphore and record the producer-to-graphics ownership
-   acquire plus the transition to
+2. Wait on that semaphore and record a producer-to-graphics ownership acquire
+   using the exact producer `(oldLayout, newLayout)` pair.
+3. Record a separate local transition from the producer's new layout to
    `VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL`.
-3. Signal acquire-complete and attach that exact wait to the Graphite
+4. Signal acquire-complete and attach that exact wait to the Graphite
    recording that samples the image.
-4. Have that recording signal sampling-complete.
-5. Consume sampling-complete in a bridge submission and advance the completion
+5. Have that recording signal sampling-complete.
+6. Consume sampling-complete in a bridge submission and advance the completion
    timeline for the image.
 
 The currently displayed buffer stays owned by Noctalia across unrelated scene
 redraws. When its replacement is rebound, the bridge:
 
 1. waits on the latest Graphite completion timeline value;
-2. records the graphics-to-producer ownership release and restores the
-   producer handoff layout;
-3. signals an exportable semaphore;
-4. exports its sync FD;
-5. returns it through
+2. records a local transition from shader-read layout to `GENERAL`;
+3. records a separate `GENERAL` to `GENERAL` ownership release from the
+   Noctalia graphics queue to `VK_QUEUE_FAMILY_EXTERNAL_KHR`;
+4. signals an exportable semaphore;
+5. exports its sync FD;
+6. returns it through
    `SetAcceleratedPaintReleaseFence(transport_epoch, capture_counter, fd)`.
 
 A frame superseded before it is drawn still receives a balanced acquire and
-release. Viz cannot rewrite or recycle a slot until its matching release fence
+release. Viz stores `GENERAL`/`GENERAL` as the state for Dawn's next ownership
+acquire and cannot rewrite or recycle a slot until its matching release fence
 signals.
 
 Queue-family ownership must match across processes. Chromium carries the
-producer's actual handoff domain in the frame metadata; Noctalia must not infer
-`FOREIGN_EXT` or `EXTERNAL_KHR` locally. Vulkan validation cannot verify the
-other process's half of this ownership transfer, so this remains an explicit
-cross-process contract.
+producer's exact external-release layout pair and queue-family domain in the
+frame metadata. Vulkan validation cannot verify the other process's half of
+this ownership transfer, so this remains an explicit cross-process contract.
+
+Dawn, Chromium native Vulkan, ANGLE, and Noctalia are pinned to the
+compositor-selected GPU. Dawn matches the requested DRM render node through
+`wgpu::AdapterPropertiesDrm`; initialization fails if no Vulkan adapter has
+that render-node identity.
 
 ## External BeginFrame scheduling
 
@@ -169,7 +181,10 @@ The Chromium/CEF patch stack owns only behavior that must exist inside the
 producer:
 
 - exportable Viz offscreen output and transparent-root backdrop composition;
-- frame identity, queue-family/layout metadata, and release-fence plumbing;
+- Graphite/Dawn/Vulkan output routing and Linux DMA-BUF shared-memory support;
+- exact frame identity, queue-family/layout metadata, and release-fence
+  plumbing;
+- deterministic Dawn, native-Vulkan, and ANGLE device selection;
 - exact external-BeginFrame completion and in-place abort;
 - timed external BeginFrame entry points;
 - Linux DMA-BUF accelerated paint support;
@@ -177,6 +192,13 @@ producer:
 
 Noctalia owns Wayland scheduling, Vulkan import/cache lifetime, Graphite
 dependencies, presentation, input translation, and browser lifecycle.
+
+The production CEF build is Wayland-only at GN configuration time:
+`ozone_platform=wayland`, `ozone_platform_wayland=true`, and
+`ozone_platform_x11=false`. CEF does not create the visible Wayland surface in
+OSR mode; this setting selects Chromium's native Wayland DMA-BUF integration
+and removes its X11 window-system backend and fallback. Noctalia remains the
+sole owner of shell-surface creation and presentation.
 
 Keep patches organized by responsibility. A source file should not be modified
 by multiple patches in the same area. Temporary diagnostics, experiment
@@ -187,8 +209,12 @@ belong in the shipping CEF stack.
 
 The release gate is:
 
+- Resolved GN args select Ozone Wayland and disable Ozone X11; CEF's target
+  graph and direct shared-library dependencies contain no X11 backend.
 - Vulkan synchronization validation is clean during launch, animation,
   resize, fractional scaling, detach/reopen, and shutdown.
+- Startup identifies `Graphite/Dawn/Vulkan`, and Dawn's DRM render node matches
+  Noctalia's compositor-presenting device.
 - Continuous Apple Music artwork remains complete and flicker-free.
 - Autonomous animation progresses at the compositor refresh rate without
   pointer motion.

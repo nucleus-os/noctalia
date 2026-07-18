@@ -245,6 +245,15 @@ just build release
 just install release
 ```
 
+For the common per-user deployment, the equivalent one-command workflow is:
+
+```sh
+just deploy-user
+```
+
+This configures a release build, installs the executable, helper, assets, and private libraries
+under `~/.local`, and deliberately leaves any running Noctalia process untouched.
+
 To remove files installed from a build directory, run `just uninstall release`. The `install` and `uninstall` recipes
 require an explicit build mode so debug builds are not installed by accident.
 

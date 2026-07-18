@@ -532,7 +532,8 @@ namespace {
         frame.fourcc = drmFourccFromCef(info.format);
         frame.modifier = info.modifier;
         frame.queueFamilyIndex = info.extra.queue_family_index;
-        frame.imageLayout = info.extra.image_layout;
+        frame.producerOldLayout = info.extra.producer_old_layout;
+        frame.producerNewLayout = info.extra.producer_new_layout;
         frame.acquireFenceFd = info.acquire_fence_fd;
         frame.planeCount = std::min(info.plane_count, 4);
         if (!m_impl->loggedAcceleratedPaint.exchange(true)) {

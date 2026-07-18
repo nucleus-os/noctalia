@@ -85,6 +85,13 @@ install m:
     fi
     meson install --no-rebuild -C build-{{m}}
 
+# Configure, build, and install the selected mode into the current user's
+# ~/.local prefix. Installation deliberately does not restart a running shell.
+deploy-user m="release":
+    just configure {{m}} "$HOME/.local"
+    just build {{m}}
+    just install {{m}}
+
 uninstall m:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -115,8 +115,6 @@ namespace {
     int height = 0;
     std::uint32_t fourcc = 0;
     std::uint64_t modifier = 0;
-    std::uint32_t queueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    std::uint32_t imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t stride = 0;
     std::uint64_t offset = 0;
 
@@ -160,6 +158,9 @@ struct CefGpuFrameBridge::Impl {
     std::int64_t captureCounter = -1;
     std::uint64_t outputGeneration = 0;
     std::uint64_t contentSerial = 0;
+    std::uint32_t queueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    VkImageLayout producerOldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout producerNewLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool prepared = false;
     bool acquireCompletionWait = false;
     bool sampled = false;
@@ -460,8 +461,15 @@ struct CefGpuFrameBridge::Impl {
     if (frame.acquireFenceFd < 0) {
       throw std::runtime_error("CEF DMA-BUF did not provide a producer acquire fence");
     }
-    if (frame.imageLayout != VK_IMAGE_LAYOUT_GENERAL) {
-      throw std::runtime_error(std::format("CEF DMA-BUF has unsupported handoff layout {}", frame.imageLayout));
+    if (frame.producerOldLayout == VK_IMAGE_LAYOUT_UNDEFINED
+        || frame.producerOldLayout == VK_IMAGE_LAYOUT_PREINITIALIZED
+        || frame.producerNewLayout == VK_IMAGE_LAYOUT_UNDEFINED
+        || frame.producerNewLayout == VK_IMAGE_LAYOUT_PREINITIALIZED) {
+      throw std::runtime_error(
+          std::format(
+              "CEF DMA-BUF has invalid producer layout pair {} -> {}", frame.producerOldLayout, frame.producerNewLayout
+          )
+      );
     }
     if (frame.queueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL_KHR) {
       throw std::runtime_error(
@@ -594,8 +602,6 @@ struct CefGpuFrameBridge::Impl {
         .height = frame.height,
         .fourcc = frame.fourcc,
         .modifier = frame.modifier,
-        .queueFamilyIndex = frame.queueFamilyIndex,
-        .imageLayout = frame.imageLayout,
         .stride = frame.planes[0].stride,
         .offset = frame.planes[0].offset,
     };
@@ -680,7 +686,8 @@ struct CefGpuFrameBridge::Impl {
   }
 
   void recordDirectAcquire(
-      VkCommandBuffer commandBuffer, VkImage image, std::uint32_t handoffQueueFamily, VkImageLayout handoffLayout
+      VkCommandBuffer commandBuffer, VkImage image, std::uint32_t handoffQueueFamily, VkImageLayout producerOldLayout,
+      VkImageLayout producerNewLayout
   ) {
     NOCTALIA_TRACE_ZONE("CEF record direct-sampling acquire");
     requireVulkan(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer(CEF direct acquire)");
@@ -689,31 +696,49 @@ struct CefGpuFrameBridge::Impl {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     requireVulkan(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(CEF direct acquire)");
-    const VkImageMemoryBarrier2 barrier{
+    const VkImageMemoryBarrier2 ownershipBarrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
         .srcAccessMask = VK_ACCESS_2_NONE,
         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
-        .oldLayout = handoffLayout,
-        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .oldLayout = producerOldLayout,
+        .newLayout = producerNewLayout,
         .srcQueueFamilyIndex = handoffQueueFamily,
         .dstQueueFamilyIndex = graphics.graphicsQueueFamily(),
         .image = image,
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
     };
-    const VkDependencyInfo dependency{
+    const VkDependencyInfo ownershipDependency{
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
         .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier,
+        .pImageMemoryBarriers = &ownershipBarrier,
     };
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    vkCmdPipelineBarrier2(commandBuffer, &ownershipDependency);
+
+    const VkImageMemoryBarrier2 layoutBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .oldLayout = producerNewLayout,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    const VkDependencyInfo layoutDependency{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &layoutBarrier,
+    };
+    vkCmdPipelineBarrier2(commandBuffer, &layoutDependency);
     requireVulkan(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(CEF direct acquire)");
   }
 
-  void recordDirectRelease(
-      VkCommandBuffer commandBuffer, VkImage image, std::uint32_t handoffQueueFamily, VkImageLayout handoffLayout
-  ) {
+  void recordDirectRelease(VkCommandBuffer commandBuffer, VkImage image) {
     NOCTALIA_TRACE_ZONE("CEF record direct-sampling release");
     requireVulkan(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer(CEF direct release)");
     const VkCommandBufferBeginInfo beginInfo{
@@ -721,25 +746,45 @@ struct CefGpuFrameBridge::Impl {
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     requireVulkan(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(CEF direct release)");
-    const VkImageMemoryBarrier2 barrier{
+    const VkImageMemoryBarrier2 layoutBarrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    const VkDependencyInfo layoutDependency{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &layoutBarrier,
+    };
+    vkCmdPipelineBarrier2(commandBuffer, &layoutDependency);
+
+    const VkImageMemoryBarrier2 ownershipBarrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_NONE,
         .dstAccessMask = VK_ACCESS_2_NONE,
-        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        .newLayout = handoffLayout,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = graphics.graphicsQueueFamily(),
-        .dstQueueFamilyIndex = handoffQueueFamily,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR,
         .image = image,
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
     };
-    const VkDependencyInfo dependency{
+    const VkDependencyInfo ownershipDependency{
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
         .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier,
+        .pImageMemoryBarriers = &ownershipBarrier,
     };
-    vkCmdPipelineBarrier2(commandBuffer, &dependency);
+    vkCmdPipelineBarrier2(commandBuffer, &ownershipDependency);
     requireVulkan(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(CEF direct release)");
   }
 
@@ -752,8 +797,8 @@ struct CefGpuFrameBridge::Impl {
       return true;
     }
     recordDirectAcquire(
-        pending.slot->commandBuffer, pending.imported->source->image, pending.imported->key.queueFamilyIndex,
-        static_cast<VkImageLayout>(pending.imported->key.imageLayout)
+        pending.slot->commandBuffer, pending.imported->source->image, pending.queueFamilyIndex,
+        pending.producerOldLayout, pending.producerNewLayout
     );
     const VkSemaphoreSubmitInfo waitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -799,10 +844,7 @@ struct CefGpuFrameBridge::Impl {
     PendingFrame pending = *pendingFrame;
     FrameSlot& slot = *pending.slot;
     CachedImport& imported = *pending.imported;
-    recordDirectRelease(
-        slot.releaseCommandBuffer, imported.source->image, imported.key.queueFamilyIndex,
-        static_cast<VkImageLayout>(imported.key.imageLayout)
-    );
+    recordDirectRelease(slot.releaseCommandBuffer, imported.source->image);
     const std::uint64_t completionValue = ++nextCompletionValue;
     const VkCommandBufferSubmitInfo commandInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
@@ -920,6 +962,9 @@ struct CefGpuFrameBridge::Impl {
           .captureCounter = frame.captureCounter,
           .outputGeneration = frame.outputGeneration,
           .contentSerial = frame.contentSerial,
+          .queueFamilyIndex = frame.queueFamilyIndex,
+          .producerOldLayout = static_cast<VkImageLayout>(frame.producerOldLayout),
+          .producerNewLayout = static_cast<VkImageLayout>(frame.producerNewLayout),
       };
       lastOutputGeneration = frame.outputGeneration;
       lastContentSerial = frame.contentSerial;

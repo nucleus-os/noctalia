@@ -33,7 +33,8 @@ struct BorrowedDmabufFrame {
   std::uint32_t fourcc = 0;
   std::uint64_t modifier = 0;
   std::uint32_t queueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  std::uint32_t imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  std::uint32_t producerOldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  std::uint32_t producerNewLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   int acquireFenceFd = -1;
   int planeCount = 0;
   std::array<BorrowedDmabufPlane, 4> planes{};
