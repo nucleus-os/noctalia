@@ -57,6 +57,9 @@ public:
   void setEllipsize(TextEllipsize ellipsize);
   // Text uses the resolved font line box; InkCentered centers the current glyph ink.
   void setBaselineMode(LabelBaselineMode mode);
+  // Visual adjustment applied after baseline layout without changing the
+  // label's measured box. Negative values move the text upward.
+  void setBaselineShift(float shift);
   void setShadow(const Color& color, float offsetX, float offsetY);
   void clearShadow();
   // Single-line horizontal marquee when the line is wider than the laid-out width.
@@ -79,6 +82,7 @@ public:
   [[nodiscard]] ParagraphDirection paragraphDirection() const noexcept;
   [[nodiscard]] TextEllipsize ellipsize() const noexcept;
   [[nodiscard]] LabelBaselineMode baselineMode() const noexcept { return m_baselineMode; }
+  [[nodiscard]] float baselineShift() const noexcept { return m_baselineShift; }
   [[nodiscard]] float baselineOffset() const noexcept { return m_baselineOffset; }
 
   void measure(Renderer& renderer);
@@ -109,6 +113,7 @@ private:
   TextNode* m_textNode = nullptr;
   float m_minWidth = 0.0f;
   float m_baselineOffset = 0.0f;
+  float m_baselineShift = 0.0f;
   ColorSpec m_color = colorSpecFromRole(ColorRole::OnSurface);
   Signal<>::ScopedConnection m_paletteConn;
 

@@ -413,6 +413,9 @@ namespace ui {
     if (props.baselineMode.has_value()) {
       control->setBaselineMode(*props.baselineMode);
     }
+    if (props.baselineShift.has_value()) {
+      control->setBaselineShift(*props.baselineShift);
+    }
     if (props.autoScroll.has_value()) {
       control->setAutoScroll(*props.autoScroll);
     }

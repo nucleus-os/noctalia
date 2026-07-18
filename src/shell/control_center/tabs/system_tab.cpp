@@ -20,6 +20,7 @@ namespace {
 
   constexpr float kGraphLineWidth = 0.75f;
   constexpr float kGraphFillOpacity = 0.15f;
+  constexpr float kMetricTextBaselineShift = -0.625f;
   constexpr double kNetMinScaleBps = 10000.0;
   constexpr std::size_t kMaxDiskRows = 4;
 
@@ -76,6 +77,8 @@ namespace {
             .out = &ptr,
             .fontSize = Style::fontSizeCaption * scale,
             .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .baselineMode = LabelBaselineMode::TextFixedHeight,
+            .baselineShift = kMetricTextBaselineShift * scale,
         })
     );
     return ptr;
@@ -140,6 +143,8 @@ namespace {
                 .fontSize = Style::fontSizeMini * scale,
                 .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
                 .maxLines = 1,
+                .baselineMode = LabelBaselineMode::TextFixedHeight,
+                .baselineShift = kMetricTextBaselineShift * scale,
                 .flexGrow = 1.0f,
             }),
             ui::label({
@@ -147,6 +152,8 @@ namespace {
                 .fontSize = Style::fontSizeMini * scale,
                 .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
                 .maxLines = 1,
+                .baselineMode = LabelBaselineMode::TextFixedHeight,
+                .baselineShift = kMetricTextBaselineShift * scale,
             })
         )
     );
@@ -191,6 +198,8 @@ namespace {
                   .fontSize = Style::fontSizeMini * scale,
                   .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
                   .maxLines = 1,
+                  .baselineMode = LabelBaselineMode::TextFixedHeight,
+                  .baselineShift = kMetricTextBaselineShift * scale,
                   .flexGrow = 1.0f,
               })
           )
@@ -401,6 +410,8 @@ std::unique_ptr<Flex> SystemTab::create() {
                   .maxLines = 1,
                   // Ellipsize from the start so the identifying tail stays visible ("…/long/mount/point").
                   .ellipsize = TextEllipsize::Start,
+                  .baselineMode = LabelBaselineMode::TextFixedHeight,
+                  .baselineShift = kMetricTextBaselineShift * sc,
                   .flexGrow = 1.0f,
                   .configure = [mountPoint](Label& label) { label.setTooltip(mountPoint); },
               }),
@@ -409,6 +420,8 @@ std::unique_ptr<Flex> SystemTab::create() {
                   .fontSize = Style::fontSizeMini * sc,
                   .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
                   .maxLines = 1,
+                  .baselineMode = LabelBaselineMode::TextFixedHeight,
+                  .baselineShift = kMetricTextBaselineShift * sc,
               })
           )
       );

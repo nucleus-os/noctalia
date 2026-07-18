@@ -54,6 +54,15 @@ int main() {
     return 1;
   }
 
+  constexpr float ellipsisWidth = 80.0f;
+  const auto ellipsized = renderer.measure(
+      "the painted ellipsis must remain inside its reported layout width", 18.0f, FontWeight::Normal,
+      ellipsisWidth, 1, TextAlign::Start, {}, TextEllipsize::End);
+  if (ellipsized.lineCount != 1 || std::abs(ellipsized.width - ellipsisWidth) > 0.01f) {
+    std::cerr << "ellipsized paragraph under-reported the width of its painted layout box\n";
+    return 1;
+  }
+
 
   const auto forcedLtr = renderer.measure(
       "direction", 18.0f, FontWeight::Normal, 240.0f, 1, TextAlign::Start, {}, TextEllipsize::None,

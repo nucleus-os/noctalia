@@ -97,6 +97,22 @@ namespace {
     return result;
   }
 
+  SkRRect insetRoundedRect(float width, float height, const Radii& radius, float strokeWidth) {
+    const float inset = std::min(
+        std::max(0.0f, strokeWidth * 0.5f), std::max(0.0f, std::min(width, height) * 0.5f)
+    );
+    const SkRect rect = SkRect::MakeLTRB(inset, inset, width - inset, height - inset);
+    const SkVector radii[4] = {
+        {std::max(0.0f, radius.tl - inset), std::max(0.0f, radius.tl - inset)},
+        {std::max(0.0f, radius.tr - inset), std::max(0.0f, radius.tr - inset)},
+        {std::max(0.0f, radius.br - inset), std::max(0.0f, radius.br - inset)},
+        {std::max(0.0f, radius.bl - inset), std::max(0.0f, radius.bl - inset)},
+    };
+    SkRRect result;
+    result.setRectRadii(rect, radii);
+    return result;
+  }
+
   SkBlendMode blendMode(RenderBlendMode mode) {
     return mode == RenderBlendMode::Disabled ? SkBlendMode::kSrc : SkBlendMode::kSrcOver;
   }
@@ -437,7 +453,10 @@ void GraphiteRenderBackend::drawRect(
     border.setStrokeWidth(style.borderWidth);
     border.setColor4f(skColor(style.border));
     border.setBlendMode(blendMode(m_blendMode));
-    m_canvas->drawRRect(shape, border);
+    // Skia strokes are centered on the path. Inset the path by half the
+    // stroke width so the border remains inside the node's layout bounds and
+    // survives parent/viewport clips at every edge.
+    m_canvas->drawRRect(insetRoundedRect(width, height, style.radius, style.borderWidth), border);
   }
   endDraw();
 }
@@ -494,7 +513,16 @@ void GraphiteRenderBackend::drawImage(const RenderImageDraw& draw) {
     border.setStyle(SkPaint::kStroke_Style);
     border.setStrokeWidth(draw.borderWidth);
     border.setColor4f(skColor(draw.borderColor));
-    m_canvas->drawRRect(SkRRect::MakeRectXY(SkRect::MakeWH(draw.width, draw.height), draw.radius, draw.radius), border);
+    const float inset = std::min(
+        draw.borderWidth * 0.5f, std::max(0.0f, std::min(draw.width, draw.height) * 0.5f)
+    );
+    m_canvas->drawRRect(
+        SkRRect::MakeRectXY(
+            SkRect::MakeLTRB(inset, inset, draw.width - inset, draw.height - inset),
+            std::max(0.0f, draw.radius - inset), std::max(0.0f, draw.radius - inset)
+        ),
+        border
+    );
   }
   endDraw();
 }

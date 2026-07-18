@@ -179,6 +179,14 @@ void Label::setBaselineMode(LabelBaselineMode mode) {
   m_measureCached = false;
 }
 
+void Label::setBaselineShift(float shift) {
+  if (m_baselineShift == shift) {
+    return;
+  }
+  m_baselineShift = shift;
+  applyScrollPosition();
+}
+
 void Label::setShadow(const Color& color, float offsetX, float offsetY) {
   m_textNode->setShadow(color, offsetX, offsetY);
 }
@@ -246,7 +254,7 @@ void Label::syncTextNodeConstraints() {
 
 void Label::applyScrollPosition() {
   const float targetX = m_textBaseX - m_scrollOffset;
-  const float targetY = m_baselineOffset;
+  const float targetY = m_baselineOffset + m_baselineShift;
 
   // Text is snapped in the renderer, so keep the raw fractional position but
   // avoid invalidating the surface while its snapped buffer position is unchanged.
@@ -655,11 +663,17 @@ LayoutSize Label::measureWithConstraints(Renderer& renderer, const LayoutConstra
   const float layoutWidth = width();
   const bool overflow = m_autoScroll && m_fullTextWidth > layoutWidth + 0.5f;
   const float alignWidth = m_autoScroll ? m_fullTextWidth : measuredWidth;
+  // A constrained SkParagraph applies its own center/trailing alignment inside
+  // the paragraph width. Only manually align an unconstrained paragraph inside
+  // a larger Label box (for example one widened solely by minWidth). Applying
+  // both offsets shifts centered text to the right and trailing text beyond its
+  // intended edge.
+  const bool paragraphOwnsAlignment = !m_autoScroll && measureMaxWidth > 0.0f;
   float textX = 0.0f;
   if (isIconGlyph) {
     // Center the icon's ink (not its advance) within the box.
     textX = (layoutWidth - inkWidth) * 0.5f - metrics.inkLeft;
-  } else if (!overflow) {
+  } else if (!overflow && !paragraphOwnsAlignment) {
     if (align == TextAlign::Center) {
       textX = (layoutWidth - alignWidth) * 0.5f;
     } else if (align == TextAlign::End) {

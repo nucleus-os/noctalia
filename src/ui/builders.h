@@ -213,6 +213,7 @@ namespace ui {
     std::optional<ParagraphDirection> paragraphDirection = std::nullopt;
     std::optional<TextEllipsize> ellipsize = std::nullopt;
     std::optional<LabelBaselineMode> baselineMode = std::nullopt;
+    std::optional<float> baselineShift = std::nullopt;
     std::optional<bool> autoScroll = std::nullopt;
     std::optional<float> autoScrollSpeed = std::nullopt;
     std::optional<bool> autoScrollOnlyWhenHovered = std::nullopt;

@@ -17,6 +17,7 @@
 #include "ui/ui_tree.h"
 #include "ui/ui_tree_reconciler.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <print>
 #include <string>
@@ -81,6 +82,21 @@ namespace {
 int main() {
   bool ok = true;
   StubRenderer renderer;
+
+  // A constrained paragraph performs center/end alignment itself. The Label
+  // must not add a second offset to the TextNode.
+  {
+    Label label;
+    label.setText("centered");
+    label.setTextAlign(TextAlign::Center);
+    (void)static_cast<Node&>(label).measure(renderer, LayoutConstraints::exact(100.0f, 20.0f));
+    label.arrange(renderer, LayoutRect{.width = 100.0f, .height = 20.0f});
+    ok = expect(
+             !label.children().empty() && std::abs(label.children().front()->x()) < 0.01f,
+             "constrained centered label does not double-apply paragraph alignment"
+         )
+         && ok;
+  }
 
   // Editable cursor movement follows Unicode extended grapheme clusters, not
   // individual code points. Neither a combining mark nor a ZWJ emoji family

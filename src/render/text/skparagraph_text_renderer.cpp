@@ -182,6 +182,14 @@ struct SkParagraphTextRenderer::Impl {
     metrics.top = -paragraph.alphabeticBaseline;
     metrics.bottom = paragraph.height - paragraph.alphabeticBaseline;
     for (const auto& line : lineMetrics) metrics.width = std::max(metrics.width, line.x + line.width);
+    // SkParagraph's line metrics exclude the separately shaped ellipsis run.
+    // Once a width-constrained paragraph truncates, its layout box—not the
+    // surviving source glyph advances—is therefore the only safe reported
+    // width. Returning the shorter line width lets parents shrink underneath
+    // the painted ellipsis, which is visible as text escaping a pill/button.
+    if (paragraph.didExceedMaximumLines && width > 0.0f) {
+      metrics.width = width;
+    }
     metrics.right = metrics.width;
     nt::TextBounds ink{};
     if (service.inkBounds(handle, &ink)) {
