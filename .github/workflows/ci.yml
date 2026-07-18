@@ -39,11 +39,10 @@ jobs:
           pacman -Syu --noconfirm --needed \
             base-devel git meson ninja pkgconf \
             wayland wayland-protocols \
-            libglvnd freetype2 fontconfig \
-            cairo pango harfbuzz \
+            vulkan-headers vulkan-icd-loader freetype2 fontconfig \
             libxkbcommon glib2 \
             sdbus-cpp libpipewire wireplumber polkit \
-            pam curl libwebp librsvg \
+            pam curl libwebp \
             libqalculate libxml2 \
             md4c tomlplusplus \
             nlohmann-json stb \

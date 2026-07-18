@@ -22,8 +22,7 @@ public:
   void onFontChanged();
   void onStateChange();
   void onThemeChanged();
-  void onGpuResourcesInvalidated();
-  void prepareForGraphicsDeviceRebuild();
+  void prepareForGraphicsDeviceRebuild(bool deviceLost);
   void resumeAfterGraphicsDeviceRebuild();
   void requestLayout();
 
@@ -33,6 +32,7 @@ private:
   void reload();
   void cacheReloadBaseline();
   void destroyInstances();
+  void abandonInstancesAfterDeviceLoss() noexcept;
   void syncInstances();
   void createInstance(const WaylandOutput& output);
   void loadWallpaper(BackdropInstance& inst, const std::string& path);

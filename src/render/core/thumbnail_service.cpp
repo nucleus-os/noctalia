@@ -386,16 +386,6 @@ bool ThumbnailService::uploadPending(TextureManager& textures) {
   return changed;
 }
 
-void ThumbnailService::invalidateGpuResources(TextureManager& textures) {
-  for (auto& [key, entry] : m_entries) {
-    (void)key;
-    if (auto handle = entry.handles.find(&textures); handle != entry.handles.end()) {
-      textures.unload(handle->second);
-      entry.handles.erase(handle);
-    }
-  }
-}
-
 void ThumbnailService::abandonGpuResources() noexcept {
   for (auto& [key, entry] : m_entries) {
     (void)key;

@@ -48,6 +48,7 @@ namespace {
     void setPresentationCallback(SurfacePresentationCallback callback) override {
       m_target.setPresentationCallback(std::move(callback));
     }
+    void abandonAfterDeviceLoss() noexcept override { m_target.abandonDevice(); }
     void destroy() override { m_target.destroy(); }
     [[nodiscard]] bool isReady() const noexcept override { return m_target.ready(); }
     [[nodiscard]] GraphiteSurfaceTarget& target() noexcept { return m_target; }
@@ -211,9 +212,7 @@ void GraphiteRenderBackend::endFrame(RenderTarget& target) {
     finishExternalTextures(false);
   }
   if (status == RenderFrameStatus::DeviceLost) {
-    if (!surfaceTarget(target).target().deviceLossWasInjected()) {
-      surfaceTarget(target).target().abandonDevice();
-    }
+    surfaceTarget(target).target().abandonDevice();
     m_deviceLost = true;
     kLog.error("Graphite presentation reported VK_ERROR_DEVICE_LOST");
   } else if (status == RenderFrameStatus::Failed || status == RenderFrameStatus::SurfaceLost) {
@@ -225,10 +224,8 @@ RenderDeviceStatus GraphiteRenderBackend::deviceStatus() const noexcept {
   return m_deviceLost ? RenderDeviceStatus::Lost : RenderDeviceStatus::Ready;
 }
 
-void GraphiteRenderBackend::invalidateGpuResources() { m_graphics.textureManager().invalidateAll(); }
-
-void GraphiteRenderBackend::abandonAfterGraphicsReset() noexcept {
-  m_graphics.textureManager().abandonGpuResources();
+void GraphiteRenderBackend::abandonGpuResourcesAfterDeviceLoss() noexcept {
+  m_graphics.abandonAfterDeviceLoss();
   cleanup();
   m_deviceLost = true;
 }

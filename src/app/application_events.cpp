@@ -60,6 +60,7 @@ void Application::rebuildGraphiteDevice() {
   kLog.warn("rebuilding process-wide Vulkan/Graphite device after VK_ERROR_DEVICE_LOST");
 
   const GraphicsDeviceIdentity previousIdentity = m_graphicsDevice.identity();
+  const bool deviceWasLost = m_graphicsDevice.deviceLost();
   const bool integrationProbe = [] {
     const char* value = std::getenv("NOCTALIA_TEST_GRAPHICS_DEVICE_REBUILD");
     return value != nullptr && std::string_view(value) == "1";
@@ -88,8 +89,9 @@ void Application::rebuildGraphiteDevice() {
         }
       }
     }
-    m_wallpaper.prepareForGraphicsDeviceRebuild();
-    m_backdrop.prepareForGraphicsDeviceRebuild();
+    m_lockScreen.prepareForGraphicsDeviceRebuild();
+    m_wallpaper.prepareForGraphicsDeviceRebuild(deviceWasLost);
+    m_backdrop.prepareForGraphicsDeviceRebuild(deviceWasLost);
     m_cefService->prepareForGraphicsDeviceRebuild();
     m_sharedTextureCache.abandonGpuResources();
     m_asyncTextureCache.abandonGpuResources();
@@ -137,6 +139,7 @@ void Application::rebuildGraphiteDevice() {
     m_cefService->resumeAfterGraphicsDeviceRebuild(m_graphicsDevice);
     m_wallpaper.resumeAfterGraphicsDeviceRebuild();
     m_backdrop.resumeAfterGraphicsDeviceRebuild();
+    m_lockScreen.resumeAfterGraphicsDeviceRebuild();
     requestAllSurfacesRedraw();
     kLog.info("Vulkan/Graphite device recovery completed; requested a fresh CEF frame");
   } catch (const std::exception& error) {

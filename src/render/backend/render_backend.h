@@ -96,6 +96,7 @@ public:
   virtual ~RenderSurfaceTarget() = default;
 
   virtual void resize(std::uint32_t bufferWidth, std::uint32_t bufferHeight) = 0;
+  virtual void abandonAfterDeviceLoss() noexcept = 0;
   virtual void destroy() = 0;
   virtual void setPresentationCallback(SurfacePresentationCallback callback) { (void)callback; }
 
@@ -108,16 +109,16 @@ public:
 
   virtual void cleanup() = 0;
 
-  // Returns false if the surface could not be made current (e.g. invalidated
-  // during compositor teardown); callers must skip the frame, not treat it as fatal.
+  // Returns false if the surface target is unavailable (for example, while it
+  // is being recreated); callers must skip the frame, not treat it as fatal.
   virtual bool selectTarget(RenderTarget& target) = 0;
   // Returns false if the frame could not begin; callers must skip drawing and endFrame.
   virtual bool beginFrame(RenderTarget& target) = 0;
   virtual void endFrame(RenderTarget& target) = 0;
   [[nodiscard]] virtual RenderDeviceStatus deviceStatus() const noexcept = 0;
-  virtual void invalidateGpuResources() = 0;
-  // Tear down a lost context without attempting to preserve its invalid GL objects.
-  virtual void abandonAfterGraphicsReset() noexcept = 0;
+  // Detach resources owned by a lost device without recording, submitting, or
+  // waiting for GPU work. Immediate Vulkan object destruction remains allowed.
+  virtual void abandonGpuResourcesAfterDeviceLoss() noexcept = 0;
 
   [[nodiscard]] virtual std::unique_ptr<RenderSurfaceTarget> createSurfaceTarget(wl_surface* surface) = 0;
   [[nodiscard]] virtual std::unique_ptr<RenderFramebuffer>

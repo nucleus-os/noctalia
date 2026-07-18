@@ -109,6 +109,7 @@ struct GraphiteTextureManager::Impl {
   std::vector<Entry> entries;
   std::vector<std::uint32_t> freeSlots;
   GraphiteResourceObserverRegistry observers;
+  bool abandoned = false;
 
   explicit Impl(GraphicsDevice& device) : graphics(device) {}
 
@@ -160,7 +161,7 @@ struct GraphiteTextureManager::Impl {
   }
 
   TextureHandle upload(const std::uint8_t* premultiplied, int width, int height, TextureFilter filter, bool mipmap) {
-    if (premultiplied == nullptr || width <= 0 || height <= 0 || graphics.recorder() == nullptr) {
+    if (abandoned || premultiplied == nullptr || width <= 0 || height <= 0 || graphics.recorder() == nullptr) {
       return {};
     }
     if (freeSlots.empty() && entries.size() >= std::numeric_limits<std::uint32_t>::max()) {
@@ -333,7 +334,7 @@ struct GraphiteTextureManager::Impl {
       sk_sp<SkImage> externalImage, int width, int height, TextureFilter filter,
       GraphiteExternalImageSynchronization* synchronization
   ) {
-    if (externalImage == nullptr || width <= 0 || height <= 0) {
+    if (abandoned || externalImage == nullptr || width <= 0 || height <= 0) {
       return {};
     }
     if (freeSlots.empty() && entries.size() >= std::numeric_limits<std::uint32_t>::max()) {
@@ -372,7 +373,7 @@ GraphiteTextureManager::GraphiteTextureManager(GraphicsDevice& graphics) : m_imp
 
 GraphiteTextureManager::~GraphiteTextureManager() {
   if (m_impl != nullptr) {
-    m_impl->observers.notifyDestroying();
+    m_impl->observers.notifyInvalidated();
   }
   cleanup();
 }
@@ -570,8 +571,20 @@ void GraphiteTextureManager::abandonGpuResources() noexcept {
   if (m_impl == nullptr) {
     return;
   }
+  m_impl->abandoned = true;
+  // Framebuffers retain SkSurface/SkImage objects owned by this manager's
+  // Graphite context. Detach them before clearing the entries so their
+  // destructors cannot later enqueue work against the lost Vulkan device.
+  m_impl->observers.notifyInvalidated();
+  auto* context = m_impl->graphics.graphiteContextForResourceDestruction();
   for (auto& entry : m_impl->entries) {
     entry.image.reset();
+    if (entry.backendTexture.isValid() && context != nullptr) {
+      // Vulkan object destruction remains valid after VK_ERROR_DEVICE_LOST.
+      // Delete owned BackendTextures immediately; only queue submission,
+      // synchronization waits, and recorder retirement are forbidden here.
+      context->deleteBackendTexture(entry.backendTexture);
+    }
     entry.backendTexture = {};
     entry.width = 0;
     entry.height = 0;
@@ -634,5 +647,3 @@ bool GraphiteTextureManager::rebindExternalImage(TextureHandle& handle, sk_sp<Sk
   handle.height = height;
   return true;
 }
-
-void GraphiteTextureManager::invalidateAll() { cleanup(); }

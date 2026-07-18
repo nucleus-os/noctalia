@@ -8,7 +8,7 @@ For dependencies and normal build commands, start with [README.md](README.md).
 
 ## Design Principles
 
-- Direct Wayland + OpenGL ES only -- no toolkit overhead
+- Direct Wayland with Vulkan 1.4 and Skia Graphite -- no toolkit overhead
 - Minimal scene graph, domain-specific to shell UI
 - Packaging should work across all major Linux distros: Arch, NixOS, Fedora, Gentoo, Debian, Void, OpenSuse
 
@@ -27,9 +27,9 @@ For dependencies and normal build commands, start with [README.md](README.md).
 | Idle | `ext-idle-notify-v1`, `idle-inhibit-unstable-v1` |
 | Cursor | `wp-cursor-shape-v1` |
 | Keyboard | `xkbcommon` |
-| Rendering | `EGL`, `OpenGL ES 2.0+`, `wayland-egl` |
-| Text | `cairo`, `pango`, `pangocairo`, `freetype`, `fontconfig` |
-| Images | `Wuffs` (vendored), `stb_image_resize2` (vendored), `libwebp`, `librsvg` |
+| Rendering | Vulkan 1.4, Skia Graphite, native Wayland swapchains |
+| Text | SkParagraph, SkUnicode/ICU, FreeType, Fontconfig |
+| Images | Skia codecs and SkSVG, `stb_image_resize2`, `libwebp` |
 | IPC | `sdbus-c++` |
 | Audio | `libpipewire`, `dr_wav` (vendored) |
 | Authentication | `PAM`, `polkit-agent-1`, `polkit-gobject-1`, `glib-2.0`, `gobject-2.0` |
@@ -162,11 +162,11 @@ src/
   pipewire/         PipeWire audio service, sound playback, spectrum analyzer
   render/
     animation/      Animation manager, easing, motion settings
-    backend/        GLES render backend, framebuffers, texture manager
+    backend/        Graphite renderer, surface targets, offscreen surfaces, texture manager
     core/           Render data types, image decoders/encoders, texture caches
-    programs/       GLES shader programs
     scene/          Scene graph nodes and pointer input dispatch
-    text/           Cairo/Pango text and glyph rendering
+    text/           SkParagraph text and Skia glyph rendering
+    vulkan/         Vulkan WSI result handling and fault-injection seams
   scripting/        Luau plugin runtime, manifests, registry, source management, bindings
   shell/
     backdrop/       Backdrop layer surfaces

@@ -6,7 +6,7 @@
 class GraphiteTextureManagerObserver {
 public:
   virtual ~GraphiteTextureManagerObserver() = default;
-  virtual void onGraphiteTextureManagerDestroying() noexcept = 0;
+  virtual void onGraphiteTextureManagerInvalidated() noexcept = 0;
 };
 
 class GraphiteResourceObserverRegistry {
@@ -19,12 +19,12 @@ public:
 
   void remove(GraphiteTextureManagerObserver& observer) noexcept { std::erase(m_observers, &observer); }
 
-  void notifyDestroying() noexcept {
+  void notifyInvalidated() noexcept {
     const auto observers = m_observers;
     m_observers.clear();
     for (auto* observer : observers) {
       if (observer != nullptr) {
-        observer->onGraphiteTextureManagerDestroying();
+        observer->onGraphiteTextureManagerInvalidated();
       }
     }
   }

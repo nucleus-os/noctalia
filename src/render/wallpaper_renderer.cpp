@@ -188,6 +188,16 @@ void WallpaperRenderer::renderToFramebuffer(const RenderFramebuffer& target) {
   // The caller owns presentation.
 }
 
+void WallpaperRenderer::abandonAfterDeviceLoss() noexcept {
+  if (m_target != nullptr) {
+    m_target->abandonAfterDeviceLoss();
+  }
+  if (m_backend != nullptr) {
+    m_backend->abandonGpuResourcesAfterDeviceLoss();
+  }
+  cleanup();
+}
+
 void WallpaperRenderer::renderBackdropFrame(
     RenderFramebuffer& target, RenderFramebuffer& scratch, const BackdropPostProcessOptions& options
 ) {
@@ -227,12 +237,6 @@ void WallpaperRenderer::presentTexture(TextureId texture) {
 
   blitToSurface(texture);
   swapBuffers();
-}
-
-void WallpaperRenderer::invalidateGpuResources() {
-  if (m_backend != nullptr) {
-    m_backend->invalidateGpuResources();
-  }
 }
 
 void WallpaperRenderer::blur(RenderFramebuffer& target, RenderFramebuffer& scratch, float radius, int rounds) {

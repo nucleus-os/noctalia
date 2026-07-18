@@ -75,7 +75,6 @@ public:
   [[nodiscard]] GraphiteExternalImageSynchronization* externalSynchronization(TextureId id) const noexcept;
   void addObserver(GraphiteTextureManagerObserver& observer);
   void removeObserver(GraphiteTextureManagerObserver& observer) noexcept;
-  void invalidateAll();
 
 private:
   struct Impl;

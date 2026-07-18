@@ -34,7 +34,7 @@ public:
   [[nodiscard]] bool refreshSnapshot() const noexcept;
 
 private:
-  void onGraphiteTextureManagerDestroying() noexcept override;
+  void onGraphiteTextureManagerInvalidated() noexcept override;
 
   GraphiteTextureManager* m_textures = nullptr;
   sk_sp<SkSurface> m_surface;

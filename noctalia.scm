@@ -29,8 +29,6 @@
   #:use-module (gnu packages freedesktop)
   #:use-module (gnu packages gl)
   #:use-module (gnu packages glib)
-  #:use-module (gnu packages gnome)
-  #:use-module (gnu packages gtk)
   #:use-module (gnu packages image)
   #:use-module (gnu packages linux)
   #:use-module (gnu packages markup)
@@ -89,15 +87,12 @@
     (native-inputs
      (list pkg-config))
     (inputs
-     (list cairo
-           curl
+     (list curl
            fontconfig
            freetype
            glib
            gmp
-           harfbuzz
            mpfr
-           (librsvg-for-system)
            libqalculate
            libwebp
            libxkbcommon
@@ -106,7 +101,6 @@
            md4c
            mesa
            nlohmann-json
-           pango
            pipewire
            polkit
            sdbus-c++
@@ -120,7 +114,7 @@
     (synopsis "Wayland shell and bar")
     (description
      "Noctalia is a lightweight Wayland shell and bar built directly on
-Wayland and OpenGL ES, with no Qt or GTK dependency.")
+Wayland with Vulkan and Skia Graphite, with no Qt or GTK dependency.")
     (license license:expat)))
 
 ;; Also return the package at the end, so that this file can be used by

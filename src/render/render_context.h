@@ -35,8 +35,8 @@ public:
   void setDeviceStatusCallback(std::function<void(RenderDeviceStatus)> callback) {
     m_deviceStatusCallback = std::move(callback);
   }
-  // Returns false if the surface could not be made current (e.g. teardown);
-  // best-effort callers may ignore it, render paths must skip the frame.
+  // Returns false if the surface target is unavailable (for example, during
+  // teardown); best-effort callers may ignore it, render paths must skip the frame.
   bool selectTarget(RenderTarget& target);
   // Sync text/glyph renderer content scale to the given target's
   // buffer-to-logical ratio. Must be called before any measureText /

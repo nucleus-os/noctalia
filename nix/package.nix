@@ -8,13 +8,8 @@
   wayland-scanner,
   wayland,
   wayland-protocols,
-  libGL,
-  libglvnd,
   freetype,
   fontconfig,
-  cairo,
-  pango,
-  harfbuzz,
   libxkbcommon,
   sdbus-cpp_2,
   systemd,
@@ -24,7 +19,6 @@
   libwebp,
   glib,
   polkit,
-  librsvg,
   libqalculate,
   libxml2,
   md4c,
@@ -79,13 +73,8 @@ stdenv.mkDerivation {
   buildInputs = [
     wayland
     wayland-protocols
-    libGL
-    libglvnd
     freetype
     fontconfig
-    cairo
-    pango
-    harfbuzz
     libxkbcommon
     sdbus-cpp_2
     systemd
@@ -96,7 +85,6 @@ stdenv.mkDerivation {
     libwebp
     glib
     polkit
-    librsvg
     libqalculate
     libxml2
     md4c
@@ -110,7 +98,7 @@ stdenv.mkDerivation {
   ninjaFlags = [ "-v" ];
 
   meta = with lib; {
-    description = "A lightweight Wayland shell and bar built directly on Wayland + OpenGL ES";
+    description = "A lightweight Wayland shell and bar built directly on Wayland, Vulkan, and Skia Graphite";
     homepage = "https://github.com/noctalia-dev/noctalia";
     license = licenses.mit;
     platforms = platforms.linux;

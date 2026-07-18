@@ -23,8 +23,7 @@ public:
   bool beginFrame(RenderTarget& target) override;
   void endFrame(RenderTarget& target) override;
   [[nodiscard]] RenderDeviceStatus deviceStatus() const noexcept override;
-  void invalidateGpuResources() override;
-  void abandonAfterGraphicsReset() noexcept override;
+  void abandonGpuResourcesAfterDeviceLoss() noexcept override;
 
   [[nodiscard]] std::unique_ptr<RenderSurfaceTarget> createSurfaceTarget(wl_surface* surface) override;
   [[nodiscard]] std::unique_ptr<RenderFramebuffer>

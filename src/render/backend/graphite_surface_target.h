@@ -62,10 +62,6 @@ public:
       std::span<const VkSemaphore> waitSemaphores = {}, std::span<const VkSemaphore> signalSemaphores = {},
       const std::function<void()>& recordingSubmitted = {}
   );
-  // True only for the validation seam which reports device loss after a real,
-  // synchronously completed submit. Such a target must use orderly teardown
-  // rather than abandoning genuinely lost-device synchronization objects.
-  [[nodiscard]] bool deviceLossWasInjected() const noexcept;
   [[nodiscard]] VkFormat format() const noexcept;
   [[nodiscard]] VkExtent2D extent() const noexcept;
 

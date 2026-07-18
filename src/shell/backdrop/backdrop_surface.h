@@ -18,11 +18,7 @@ public:
   void setTintIntensity(float v) noexcept;
   void setTintColor(float r, float g, float b) noexcept;
   void setWallpaperState(TextureId tex, float imgW, float imgH, WallpaperFillMode fillMode);
-  void onGpuResourcesInvalidated();
-  void prepareForGraphicsReset() noexcept;
-  void restoreAfterGraphicsReset();
-  void finishGraphicsResetRecovery() noexcept;
-
+  void abandonAfterDeviceLoss() noexcept;
   [[nodiscard]] WallpaperRenderer* wallpaperRenderer() noexcept { return &m_wallpaperRenderer; }
 
 protected:

@@ -568,8 +568,8 @@ void Button::applyColors(const Color& bg, const Color& border, const Color& labe
     }
     if (auto* lbl = dynamic_cast<Label*>(child.get())) {
       lbl->setColor(label);
-    } else if (auto* gl = dynamic_cast<Glyph*>(child.get())) {
-      gl->setColor(label);
+    } else if (auto* glyph = dynamic_cast<Glyph*>(child.get())) {
+      glyph->setColor(label);
     }
   }
   if (m_badge != nullptr) {

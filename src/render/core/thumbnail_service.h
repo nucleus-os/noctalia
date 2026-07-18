@@ -80,11 +80,10 @@ public:
   // owner releases it.
   void release(const std::string& path, int targetPx = kDefaultTargetPx);
 
-  // Uploads decoded pixmaps to textures. Must run on the main thread with the
-  // owning render context current.
+  // Uploads decoded pixmaps to textures. Must run on the main thread that owns
+  // the Graphite recorder.
   [[nodiscard]] bool uploadPending(TextureManager& textures);
   void abandonGpuResources() noexcept;
-  void invalidateGpuResources(TextureManager& textures);
 
   [[nodiscard]] int pollTimeoutMs() const override { return -1; }
   void dispatch(const std::vector<pollfd>& fds, std::size_t startIdx) override;

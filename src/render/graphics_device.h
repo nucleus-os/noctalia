@@ -66,6 +66,10 @@ public:
   [[nodiscard]] std::int32_t presentationClockId() const noexcept { return m_presentationClockId; }
   [[nodiscard]] skgpu::graphite::Context* graphiteContext() const noexcept;
   [[nodiscard]] skgpu::graphite::Recorder* recorder() const noexcept;
+  // Device-loss teardown still has to destroy Noctalia-owned backend textures.
+  // This accessor deliberately remains available after valid() becomes false;
+  // callers must not record or submit work through the returned context.
+  [[nodiscard]] skgpu::graphite::Context* graphiteContextForResourceDestruction() const noexcept;
   [[nodiscard]] GraphiteTextureManager& textureManager();
   [[nodiscard]] const std::vector<std::string>& instanceExtensions() const noexcept {
     return m_instanceExtensions;
@@ -79,6 +83,7 @@ public:
   }
   [[nodiscard]] bool cefExternalMemoryEnabled() const noexcept { return m_cefExternalMemoryEnabled; }
   [[nodiscard]] bool validationEnabled() const noexcept { return m_requirements.validation; }
+  [[nodiscard]] bool deviceLost() const noexcept { return m_deviceLost; }
   [[nodiscard]] GraphicsDeviceIdentity identity() const;
   [[nodiscard]] std::uint64_t validationErrorCount() const noexcept {
     return m_validationMessages[0].load();
@@ -86,6 +91,11 @@ public:
   [[nodiscard]] std::uint64_t validationWarningCount() const noexcept {
     return m_validationMessages[1].load();
   }
+
+  // Marks the current logical device unusable, detaches Graphite references,
+  // and destroys owned backend textures without submitting cleanup work.
+  // Remaining Vulkan handles are destroyed by rebuild().
+  void abandonAfterDeviceLoss() noexcept;
 
   // Drops all Graphite/Vulkan objects, recreates the same contract, and bumps
   // the generation so every opaque TextureHandle becomes stale.
@@ -123,6 +133,7 @@ private:
   std::uint64_t m_generation = 1;
   TextureGenerationAllocator m_textureGenerations;
   bool m_cefExternalMemoryEnabled = false;
+  bool m_deviceLost = false;
   // [0] errors, [1] warnings. Passed directly to the debug-utils callback so
   // the phase-2 gate can make validation errors fatal.
   std::array<std::atomic<std::uint64_t>, 2> m_validationMessages{};

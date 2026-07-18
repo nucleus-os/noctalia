@@ -14,19 +14,18 @@ Noctalia is made possible by the incredible work of many open-source projects an
 - **[Universfield on Pixabay](https://pixabay.com/users/universfield-28281460/)** — Notification sound effect
 - **[Lucas McCallister on Freesound](http://www.freesound.org/samplesViewSingle.php?id=67091)** — Volume change feedback sound effect
 
-## System Libraries
+## Rendering and System Libraries
 
-Linked dynamically at runtime when required or enabled:
+Provided by the Nucleus SDK or linked at runtime as appropriate:
 
-- **[Wayland](https://wayland.freedesktop.org/)** (`wayland-client`, `wayland-protocols`, `wayland-egl`) — Display protocol
-- **[Mesa / EGL / GLES2](https://www.mesa3d.org/)** (or **[libepoxy](https://github.com/anholt/libepoxy)** as fallback) — OpenGL ES context and dispatch
-- **[Cairo](https://www.cairographics.org/)** — 2D graphics surface used for text and SVG rasterization
-- **[Pango](https://pango.gnome.org/)** / **PangoCairo** — Text layout and shaping
-- **[HarfBuzz](https://harfbuzz.github.io/)** — OpenType font metrics used for stable text alignment
+- **[Wayland](https://wayland.freedesktop.org/)** (`wayland-client`, `wayland-protocols`) — Display protocol and native surface integration
+- **[Vulkan](https://www.vulkan.org/)** — GPU device, synchronization, external-memory interop, and presentation
+- **[Skia](https://skia.org/)** — Graphite rendering, SkParagraph text layout, image codecs, and SVG rendering
+- **[Chromium Embedded Framework](https://bitbucket.org/chromiumembedded/cef/)** — Embedded Apple Music browser
+- **[HarfBuzz](https://harfbuzz.github.io/)** — Text shaping through the Nucleus Skia SDK
 - **[FreeType](https://freetype.org/)** — Font rasterization
 - **[Fontconfig](https://www.fontconfig.org/)** — Font discovery
-- **[librsvg](https://wiki.gnome.org/Projects/LibRsvg)** — SVG rendering (filters, clipPaths, masks)
-- **[GLib / GObject / GIO](https://gitlab.gnome.org/GNOME/glib)** — Core utilities used by Pango/Cairo/librsvg
+- **[GLib / GObject / GIO](https://gitlab.gnome.org/GNOME/glib)** — System-service integration
 - **[libxkbcommon](https://xkbcommon.org/)** — Keyboard handling
 - **[sdbus-c++](https://github.com/Kistler-Group/sdbus-cpp)** — D-Bus client bindings
 - **[PipeWire](https://pipewire.org/)** — Audio capture and playback
@@ -49,7 +48,6 @@ Bundled in `third_party/` and built from source:
 - **[nlohmann/json](https://github.com/nlohmann/json)** — JSON for Modern C++ (MIT)
 - **[stb](https://github.com/nothings/stb)** — Single-file utilities, primarily image I/O (MIT / public domain)
 - **[toml++](https://github.com/marzer/tomlplusplus)** — TOML parser (MIT)
-- **[Wuffs](https://github.com/google/wuffs)** — Memory-safe image decoders (Apache-2.0)
 
 ## System Integration
 

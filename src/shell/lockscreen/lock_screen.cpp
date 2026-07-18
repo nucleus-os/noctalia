@@ -233,21 +233,18 @@ void LockScreen::onThemeChanged() {
   }
 }
 
-void LockScreen::onGpuResourcesInvalidated() {
-  if (!isActive()) {
-    return;
-  }
+void LockScreen::prepareForGraphicsDeviceRebuild() noexcept {
   for (auto& instance : m_instances) {
     if (instance.surface != nullptr) {
-      instance.surface->onGpuResourcesInvalidated();
+      instance.surface->prepareForGraphicsDeviceRebuild();
     }
   }
 }
 
-void LockScreen::prepareForGraphicsReset() noexcept {
+void LockScreen::resumeAfterGraphicsDeviceRebuild() {
   for (auto& instance : m_instances) {
     if (instance.surface != nullptr) {
-      instance.surface->prepareForGraphicsReset();
+      instance.surface->resumeAfterGraphicsDeviceRebuild();
     }
   }
 }

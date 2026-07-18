@@ -122,16 +122,20 @@ GraphicsDevice::GraphicsDevice() = default;
 GraphicsDevice::~GraphicsDevice() { cleanup(); }
 
 bool GraphicsDevice::valid() const noexcept {
-  return m_device != VK_NULL_HANDLE && m_graphite != nullptr && m_graphite->context != nullptr
+  return !m_deviceLost && m_device != VK_NULL_HANDLE && m_graphite != nullptr && m_graphite->context != nullptr
       && m_graphite->recorder != nullptr;
 }
 
 skgpu::graphite::Context* GraphicsDevice::graphiteContext() const noexcept {
-  return m_graphite != nullptr ? m_graphite->context.get() : nullptr;
+  return !m_deviceLost && m_graphite != nullptr ? m_graphite->context.get() : nullptr;
 }
 
 skgpu::graphite::Recorder* GraphicsDevice::recorder() const noexcept {
-  return m_graphite != nullptr ? m_graphite->recorder.get() : nullptr;
+  return !m_deviceLost && m_graphite != nullptr ? m_graphite->recorder.get() : nullptr;
+}
+
+skgpu::graphite::Context* GraphicsDevice::graphiteContextForResourceDestruction() const noexcept {
+  return m_graphite != nullptr ? m_graphite->context.get() : nullptr;
 }
 
 GraphiteTextureManager& GraphicsDevice::textureManager() {
@@ -142,6 +146,13 @@ GraphiteTextureManager& GraphicsDevice::textureManager() {
     m_textureManager = std::make_unique<GraphiteTextureManager>(*this);
   }
   return *m_textureManager;
+}
+
+void GraphicsDevice::abandonAfterDeviceLoss() noexcept {
+  m_deviceLost = true;
+  if (m_textureManager != nullptr) {
+    m_textureManager->abandonGpuResources();
+  }
 }
 
 GraphicsDeviceIdentity GraphicsDevice::identity() const {
@@ -495,20 +506,31 @@ void GraphicsDevice::destroyDeviceObjects() {
   if (m_device == VK_NULL_HANDLE) {
     m_textureManager.reset();
     m_graphite.reset();
+    m_deviceLost = false;
     return;
   }
-  // Teardown and the one-shot device-loss rebuild are the only paths allowed
-  // to idle the whole device.
-  (void)vkDeviceWaitIdle(m_device);
-  if (m_graphite != nullptr && m_graphite->context != nullptr) {
-    m_graphite->context->checkAsyncWorkCompletion();
+  const bool deviceLost = m_deviceLost;
+  if (!deviceLost) {
+    // Normal teardown and the healthy-device integration rebuild are the only
+    // paths allowed to idle the whole device.
+    (void)vkDeviceWaitIdle(m_device);
+    if (m_graphite != nullptr && m_graphite->context != nullptr) {
+      m_graphite->context->checkAsyncWorkCompletion();
+    }
+  } else if (m_textureManager != nullptr) {
+    // Idempotent safeguard for callers that detected loss before the render
+    // backend had a chance to detach its resources.
+    m_textureManager->abandonGpuResources();
   }
-  // Texture destruction enqueues recorder finish callbacks which drop the
-  // SkImage references and delete their BackendTextures. Drain that retirement
-  // recording explicitly: recorder destruction alone does not guarantee that
-  // unsnapped finish callbacks run before vkDestroyDevice.
+  // On a healthy device texture destruction enqueues recorder finish callbacks
+  // that drop SkImage references and delete BackendTextures. On a lost device,
+  // abandonAfterDeviceLoss() has already destroyed those BackendTextures
+  // directly without enqueueing or submitting GPU work.
   m_textureManager.reset();
-  if (m_graphite != nullptr && m_graphite->recorder != nullptr && m_graphite->context != nullptr) {
+  if (!deviceLost
+      && m_graphite != nullptr
+      && m_graphite->recorder != nullptr
+      && m_graphite->context != nullptr) {
     auto retirementRecording = m_graphite->recorder->snap();
     if (retirementRecording != nullptr) {
       skgpu::graphite::InsertRecordingInfo insertInfo;
@@ -525,6 +547,7 @@ void GraphicsDevice::destroyDeviceObjects() {
   m_physicalDevice = VK_NULL_HANDLE;
   m_graphicsQueueFamily = UINT32_MAX;
   m_cefExternalMemoryEnabled = false;
+  m_deviceLost = false;
 }
 
 void GraphicsDevice::destroyInstanceObjects() {

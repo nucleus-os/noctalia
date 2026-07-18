@@ -3,7 +3,7 @@
 namespace {
   class Observer final : public GraphiteTextureManagerObserver {
   public:
-    void onGraphiteTextureManagerDestroying() noexcept override { ++notifications; }
+    void onGraphiteTextureManagerInvalidated() noexcept override { ++notifications; }
     int notifications = 0;
   };
 } // namespace
@@ -17,11 +17,11 @@ int main() {
   registry.add(retained);
   registry.add(removed);
   registry.remove(removed);
-  registry.notifyDestroying();
+  registry.notifyInvalidated();
 
   if (retained.notifications != 1 || removed.notifications != 0) {
     return 1;
   }
-  registry.notifyDestroying();
+  registry.notifyInvalidated();
   return retained.notifications == 1 ? 0 : 1;
 }

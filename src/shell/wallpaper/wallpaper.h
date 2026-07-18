@@ -41,7 +41,7 @@ public:
   void setOutputExternallyManaged(const std::string& connector, bool managed);
   [[nodiscard]] std::vector<WallpaperChange> onStateChange();
   void onSecondTick();
-  void prepareForGraphicsDeviceRebuild();
+  void prepareForGraphicsDeviceRebuild(bool deviceLost);
   void resumeAfterGraphicsDeviceRebuild();
   void registerIpc(IpcService& ipc);
   // Apply and persist a wallpaper image. nullopt connector targets all connected
@@ -104,6 +104,7 @@ private:
   void updateRendererState(WallpaperInstance& instance);
   void releaseInstanceTextures(WallpaperInstance& inst);
   void destroyInstances();
+  void abandonInstancesAfterDeviceLoss() noexcept;
 
   WaylandConnection* m_wayland = nullptr;
   ConfigService* m_config = nullptr;

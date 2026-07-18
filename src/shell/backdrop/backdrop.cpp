@@ -36,6 +36,16 @@ void Backdrop::destroyInstances() {
   m_instances.clear();
 }
 
+void Backdrop::abandonInstancesAfterDeviceLoss() noexcept {
+  for (auto& inst : m_instances) {
+    inst->currentTexture = {};
+    if (inst->surface != nullptr) {
+      inst->surface->abandonAfterDeviceLoss();
+    }
+  }
+  m_instances.clear();
+}
+
 bool Backdrop::initialize(WaylandConnection& wayland, ConfigService* config, GraphicsDevice& graphics) {
   m_wayland = &wayland;
   m_config = config;
@@ -145,30 +155,13 @@ void Backdrop::onThemeChanged() {
   }
 }
 
-void Backdrop::onGpuResourcesInvalidated() {
-  for (auto& inst : m_instances) {
-    if (inst->surface != nullptr) {
-      inst->surface->onGpuResourcesInvalidated();
-    }
-    if (!inst->currentPath.empty()) {
-      if (inst->surface != nullptr) {
-        auto* renderer = inst->surface->wallpaperRenderer();
-        if (renderer != nullptr && renderer->backend() != nullptr) {
-          if (inst->currentTexture.id != 0) {
-            renderer->backend()->textureManager().unload(inst->currentTexture);
-          }
-          inst->currentTexture = renderer->backend()->textureManager().loadFromFile(inst->currentPath, 0, true);
-        }
-      }
-    }
-    updateRendererState(*inst);
-    if (inst->surface != nullptr) {
-      inst->surface->requestRedraw();
-    }
+void Backdrop::prepareForGraphicsDeviceRebuild(bool deviceLost) {
+  if (deviceLost) {
+    abandonInstancesAfterDeviceLoss();
+  } else {
+    destroyInstances();
   }
 }
-
-void Backdrop::prepareForGraphicsDeviceRebuild() { destroyInstances(); }
 
 void Backdrop::resumeAfterGraphicsDeviceRebuild() {
   if (!shouldHaveInstances()) {

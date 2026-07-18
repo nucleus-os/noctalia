@@ -898,26 +898,10 @@ void LockSurface::applyBlurredDesktopTexture() {
   m_wallpaperDirty = false;
 }
 
-void LockSurface::onGpuResourcesInvalidated() {
-  releaseCaptureTextures();
-
-  if (!m_wallpaperPath.empty() && m_textureCache != nullptr) {
-    if (m_textureCache->shared()) {
-      m_wallpaperTexture = m_textureCache->peek(m_wallpaperPath);
-    } else if (renderContext() != nullptr) {
-      renderContext()->backend().textureManager().unload(m_wallpaperTexture);
-      if (!m_wallpaperPath.empty()) {
-        m_wallpaperTexture = renderContext()->backend().textureManager().loadFromFile(m_wallpaperPath, 0, true);
-      }
-    }
-  }
-
-  m_captureDirty = true;
-  m_wallpaperDirty = true;
-  requestLayout();
-}
-
-void LockSurface::prepareForGraphicsReset() noexcept {
+void LockSurface::prepareForGraphicsDeviceRebuild() noexcept {
+  // These offscreen surfaces and handles belong to the lost device. Abandon
+  // them without unloading; the process-wide caches preserve their CPU-side
+  // ownership and will repopulate the replacement texture manager.
   m_blurCache.abandon();
   m_wallpaperBlurCache.abandon();
   m_wallpaperTexture = {};
@@ -926,6 +910,20 @@ void LockSurface::prepareForGraphicsReset() noexcept {
   m_blurredDesktopTexture = {};
   m_captureDirty = true;
   m_wallpaperDirty = true;
+}
+
+void LockSurface::resumeAfterGraphicsDeviceRebuild() {
+  // SharedTextureCache retains reference counts across recovery. Rebind the
+  // handle with peek(), not acquire(), so an active lock surface does not gain
+  // a duplicate ownership reference on every device rebuild.
+  if (m_textureCache != nullptr && m_textureCache->shared() && !m_textureWallpaperPath.empty()) {
+    m_wallpaperTexture = m_textureCache->peek(m_textureWallpaperPath);
+  } else {
+    m_wallpaperTexture = {};
+  }
+  m_captureDirty = true;
+  m_wallpaperDirty = true;
+  requestLayout();
 }
 
 void LockSurface::render() {

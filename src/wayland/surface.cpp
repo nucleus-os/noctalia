@@ -1340,9 +1340,9 @@ void Surface::processQueuedFrameWork() {
       );
     }
 
-    // Frame-tick callbacks make the surface's render target current and do GL
-    // work. Skip them until the target is ready; on wlroots compositors the
-    // surface can be configured a frame before its swapchain exists.
+    // Frame-tick callbacks can record GPU work. Skip them until the target is
+    // ready; on wlroots compositors the surface can be configured a frame
+    // before its swapchain exists.
     if (m_frameTickCallback && ensureRenderTargetReady()) {
       const float callbackMs = elapsedMs([this, deltaMs] { m_frameTickCallback(deltaMs); });
       recordSurfaceProfileEvent(*this, SurfaceProfileEvent::FrameTick, callbackMs);

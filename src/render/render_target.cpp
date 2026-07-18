@@ -60,6 +60,12 @@ void RenderTarget::setPresentationCallback(SurfacePresentationCallback callback)
 
 bool RenderTarget::isReady() const noexcept { return m_surfaceTarget != nullptr && m_surfaceTarget->isReady(); }
 
+void RenderTarget::abandonAfterDeviceLoss() noexcept {
+  if (m_surfaceTarget != nullptr) {
+    m_surfaceTarget->abandonAfterDeviceLoss();
+  }
+}
+
 void RenderTarget::destroy() {
   if (m_surfaceTarget != nullptr) {
     m_surfaceTarget->destroy();

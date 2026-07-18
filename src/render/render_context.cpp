@@ -306,8 +306,11 @@ void RenderContext::handleDeviceLoss(RenderDeviceStatus status) {
   m_deviceLossHandled = true;
   kLog.warn("Vulkan device loss detected; rebuilding GPU resources");
   invalidateGpuResourcesNextFrame();
+  for (RenderTarget* target : m_targets) {
+    target->abandonAfterDeviceLoss();
+  }
   if (m_backend != nullptr) {
-    m_backend->invalidateGpuResources();
+    m_backend->abandonGpuResourcesAfterDeviceLoss();
   }
   m_textRenderer.invalidateGlyphTextures();
   m_glyphRenderer.invalidateGlyphTextures();

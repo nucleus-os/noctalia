@@ -36,7 +36,7 @@ bool GraphiteFramebuffer::valid() const noexcept {
   return m_surface != nullptr && m_textures != nullptr && m_color.valid() && m_textures->image(m_color.id) != nullptr;
 }
 
-void GraphiteFramebuffer::onGraphiteTextureManagerDestroying() noexcept {
+void GraphiteFramebuffer::onGraphiteTextureManagerInvalidated() noexcept {
   m_surface.reset();
   m_color = {};
   m_textures = nullptr;

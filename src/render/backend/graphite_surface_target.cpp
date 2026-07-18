@@ -133,7 +133,6 @@ struct GraphiteSurfaceTarget::Impl {
   bool swapchainInvalid = false;
   bool surfaceInvalid = false;
   bool deviceLost = false;
-  bool injectedDeviceLoss = false;
   SwapchainReason swapchainReason = SwapchainReason::Initial;
   std::uint64_t swapchainsCreated = 0;
   std::list<PresentationFeedback> presentationFeedbacks;
@@ -749,12 +748,11 @@ struct GraphiteSurfaceTarget::Impl {
       recordingSubmitted();
     }
     if (submitFault.has_value()) {
-      // The test recording really completed, so its resources can be torn down
-      // normally. Report device loss only after honoring the submission and
-      // external-image completion contracts.
+      // Report the injected loss only after honoring the submission and
+      // external-image completion contracts. Recovery must still take the
+      // same abandonment path as a real device loss.
       currentFrame = nullptr;
       currentImage = nullptr;
-      injectedDeviceLoss = true;
       return RenderFrameStatus::DeviceLost;
     }
 
@@ -942,10 +940,6 @@ RenderFrameStatus GraphiteSurfaceTarget::endFrame(
   return m_impl != nullptr
       ? m_impl->end(waitSemaphores, signalSemaphores, recordingSubmitted)
       : RenderFrameStatus::Failed;
-}
-
-bool GraphiteSurfaceTarget::deviceLossWasInjected() const noexcept {
-  return m_impl != nullptr && m_impl->injectedDeviceLoss;
 }
 
 VkFormat GraphiteSurfaceTarget::format() const noexcept {

@@ -48,8 +48,8 @@ public:
   void onOutputChange();
   void onFontChanged();
   void onThemeChanged();
-  void onGpuResourcesInvalidated();
-  void prepareForGraphicsReset() noexcept;
+  void prepareForGraphicsDeviceRebuild() noexcept;
+  void resumeAfterGraphicsDeviceRebuild();
   void onWallpaperChanged();
   void onConfigChanged();
   void onLockKeysChanged();

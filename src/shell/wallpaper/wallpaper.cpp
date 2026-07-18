@@ -439,7 +439,13 @@ bool Wallpaper::onPointerEvent(const PointerEvent& event) {
   return true;
 }
 
-void Wallpaper::prepareForGraphicsDeviceRebuild() { destroyInstances(); }
+void Wallpaper::prepareForGraphicsDeviceRebuild(bool deviceLost) {
+  if (deviceLost) {
+    abandonInstancesAfterDeviceLoss();
+  } else {
+    destroyInstances();
+  }
+}
 
 void Wallpaper::resumeAfterGraphicsDeviceRebuild() {
   if (!m_wallpaperEnabled) {
@@ -1267,6 +1273,15 @@ void Wallpaper::releaseInstanceTextures(WallpaperInstance& inst) {
 void Wallpaper::destroyInstances() {
   for (auto& inst : m_instances) {
     releaseInstanceTextures(*inst);
+  }
+  m_instances.clear();
+  m_textureCache.clear();
+}
+
+void Wallpaper::abandonInstancesAfterDeviceLoss() noexcept {
+  for (auto& inst : m_instances) {
+    inst->currentTexture = {};
+    inst->nextTexture = {};
   }
   m_instances.clear();
   m_textureCache.clear();
