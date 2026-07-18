@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/backend/graphite_runtime_effect.h"
+#include "render/backend/graphite_texture_manager.h"
 #include "render/backend/render_backend.h"
 
 #include <optional>
@@ -9,7 +10,6 @@
 
 class GraphicsDevice;
 class GraphiteFramebuffer;
-class GraphiteExternalImageSynchronization;
 class SkCanvas;
 
 // RenderBackend adapter for the process-wide Vulkan/Graphite device.
@@ -24,6 +24,7 @@ public:
   void endFrame(RenderTarget& target) override;
   [[nodiscard]] RenderDeviceStatus deviceStatus() const noexcept override;
   void invalidateGpuResources() override;
+  void abandonAfterGraphicsReset() noexcept override;
 
   [[nodiscard]] std::unique_ptr<RenderSurfaceTarget> createSurfaceTarget(wl_surface* surface) override;
   [[nodiscard]] std::unique_ptr<RenderFramebuffer>
@@ -82,10 +83,15 @@ public:
   [[nodiscard]] TextureManager& textureManager() override;
 
 private:
+  struct ExternalSubmission {
+    GraphiteExternalImageSynchronization* synchronization = nullptr;
+    GraphiteSubmissionDependency dependency;
+  };
+
   void beginDraw(const Mat3& transform);
   void endDraw();
   [[nodiscard]] bool prepareExternalTexture(TextureId texture);
-  void releaseExternalTextures();
+  void finishExternalTextures(bool submitted);
 
   GraphicsDevice& m_graphics;
   SkCanvas* m_canvas = nullptr;
@@ -97,5 +103,5 @@ private:
   bool m_frameSaved = false;
   bool m_deviceLost = false;
   GraphiteRuntimeEffects m_runtimeEffects;
-  std::vector<GraphiteExternalImageSynchronization*> m_externalSynchronizations;
+  std::vector<ExternalSubmission> m_externalSubmissions;
 };

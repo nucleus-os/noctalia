@@ -43,9 +43,6 @@ public:
   );
   void presentTexture(TextureId texture);
   void invalidateGpuResources();
-  void prepareForGraphicsReset() noexcept;
-  void restoreAfterGraphicsReset(GlSharedContext& shared);
-  void finishGraphicsResetRecovery() noexcept { m_graphicsResetPending = false; }
   [[nodiscard]] std::unique_ptr<RenderFramebuffer> createFramebuffer(std::uint32_t width, std::uint32_t height);
 
   void setTransitionState(
@@ -53,7 +50,7 @@ public:
       WallpaperTransition transition, WallpaperFillMode fillMode, const TransitionParams& params
   );
 
-  [[nodiscard]] RenderBackend* backend() const noexcept { return m_graphicsResetPending ? nullptr : m_backend.get(); }
+  [[nodiscard]] RenderBackend* backend() const noexcept { return m_backend.get(); }
 
 private:
   void cleanup();
@@ -84,5 +81,4 @@ private:
   WallpaperFillMode m_fillMode = WallpaperFillMode::Crop;
   Color m_fillColor = rgba(0.0f, 0.0f, 0.0f, 1.0f);
   TransitionParams m_params;
-  bool m_graphicsResetPending = false;
 };

@@ -11,15 +11,15 @@
 #include "core/timer_manager.h"
 #include "core/tracy.h"
 #include "core/tracy_latency.h"
-#include "render/core/texture_manager.h"
-#include "render/graphics_device.h"
-
+#include "cursor-shape-v1-client-protocol.h"
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_request_handler.h"
 #include "include/wrapper/cef_helpers.h"
+#include "render/core/texture_manager.h"
+#include "render/graphics_device.h"
 
 #include <algorithm>
 #include <atomic>
@@ -35,121 +35,133 @@
 #include <unistd.h>
 #include <utility>
 
-#include "cursor-shape-v1-client-protocol.h"
-
 namespace {
 
-constexpr Logger kLog("cef");
-constexpr int kCefWindowlessFrameRate = 120;
-constexpr std::int64_t kFallbackBeginFrameIntervalNs = 1'000'000'000LL / kCefWindowlessFrameRate;
-constexpr std::int64_t kBeginFrameAckRecoveryNs = 2'000'000'000;
-constexpr std::int64_t kIdleAnimationProbeNs = 250'000'000;
+  constexpr Logger kLog("cef");
+  constexpr int kCefWindowlessFrameRate = 120;
+  constexpr std::int64_t kFallbackBeginFrameIntervalNs = 1'000'000'000LL / kCefWindowlessFrameRate;
+  constexpr std::int64_t kBeginFrameAckRecoveryNs = 2'000'000'000;
 
-std::int64_t steadyNowNs() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch()
-  ).count();
-}
+  std::int64_t steadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
 
-// Resolve the CEF subprocess helper binary next to the running executable.
-std::string helperNextToSelf() {
-  std::string exe(PATH_MAX, '\0');
-  const ssize_t n = ::readlink("/proc/self/exe", exe.data(), exe.size());
-  if (n <= 0) {
-    return {};
+  // Resolve the CEF subprocess helper binary next to the running executable.
+  std::string helperNextToSelf() {
+    std::string exe(PATH_MAX, '\0');
+    const ssize_t n = ::readlink("/proc/self/exe", exe.data(), exe.size());
+    if (n <= 0) {
+      return {};
+    }
+    exe.resize(static_cast<std::size_t>(n));
+    const auto slash = exe.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? std::string(".") : exe.substr(0, slash);
+    return dir + "/noctalia_cef_helper";
   }
-  exe.resize(static_cast<std::size_t>(n));
-  const auto slash = exe.find_last_of('/');
-  const std::string dir = slash == std::string::npos ? std::string(".") : exe.substr(0, slash);
-  return dir + "/noctalia_cef_helper";
-}
 
-std::string userCachePath() {
-  if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg != nullptr && xdg[0] != '\0') {
-    return std::string(xdg) + "/noctalia/cef";
+  std::string userCachePath() {
+    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg != nullptr && xdg[0] != '\0') {
+      return std::string(xdg) + "/noctalia/cef";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+      return std::string(home) + "/.cache/noctalia/cef";
+    }
+    return "/tmp/noctalia-cef";
   }
-  if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-    return std::string(home) + "/.cache/noctalia/cef";
-  }
-  return "/tmp/noctalia-cef";
-}
 
-std::uint32_t cefModifiersFromKeyMod(std::uint32_t mods) {
-  std::uint32_t flags = 0;
-  if (mods & KeyMod::Shift) {
-    flags |= EVENTFLAG_SHIFT_DOWN;
+  std::uint32_t cefModifiersFromKeyMod(std::uint32_t mods) {
+    std::uint32_t flags = 0;
+    if (mods & KeyMod::Shift) {
+      flags |= EVENTFLAG_SHIFT_DOWN;
+    }
+    if (mods & KeyMod::Ctrl) {
+      flags |= EVENTFLAG_CONTROL_DOWN;
+    }
+    if (mods & KeyMod::Alt) {
+      flags |= EVENTFLAG_ALT_DOWN;
+    }
+    if (mods & KeyMod::Super) {
+      flags |= EVENTFLAG_COMMAND_DOWN;
+    }
+    return flags;
   }
-  if (mods & KeyMod::Ctrl) {
-    flags |= EVENTFLAG_CONTROL_DOWN;
-  }
-  if (mods & KeyMod::Alt) {
-    flags |= EVENTFLAG_ALT_DOWN;
-  }
-  if (mods & KeyMod::Super) {
-    flags |= EVENTFLAG_COMMAND_DOWN;
-  }
-  return flags;
-}
 
-std::uint32_t cefButtonFlag(int button) {
-  if (button == 1) {
-    return EVENTFLAG_MIDDLE_MOUSE_BUTTON;
+  std::uint32_t cefButtonFlag(int button) {
+    if (button == 1) {
+      return EVENTFLAG_MIDDLE_MOUSE_BUTTON;
+    }
+    if (button == 2) {
+      return EVENTFLAG_RIGHT_MOUSE_BUTTON;
+    }
+    return EVENTFLAG_LEFT_MOUSE_BUTTON;
   }
-  if (button == 2) {
-    return EVENTFLAG_RIGHT_MOUSE_BUTTON;
-  }
-  return EVENTFLAG_LEFT_MOUSE_BUTTON;
-}
 
-// XKB keysym -> Windows virtual-key code for the non-printable keys the browser
-// needs for navigation/editing. Printable keys ride in on the CHAR event.
-int windowsKeyCodeFromSym(std::uint32_t sym) {
-  switch (sym) {
-    case 0xff08: return 0x08; // BackSpace -> VK_BACK
-    case 0xff09: return 0x09; // Tab -> VK_TAB
-    case 0xff0d: return 0x0D; // Return -> VK_RETURN
-    case 0xff1b: return 0x1B; // Escape -> VK_ESCAPE
-    case 0xff50: return 0x24; // Home
-    case 0xff51: return 0x25; // Left
-    case 0xff52: return 0x26; // Up
-    case 0xff53: return 0x27; // Right
-    case 0xff54: return 0x28; // Down
-    case 0xff55: return 0x21; // Page_Up
-    case 0xff56: return 0x22; // Page_Down
-    case 0xff57: return 0x23; // End
-    case 0xffff: return 0x2E; // Delete
-    default: break;
+  // XKB keysym -> Windows virtual-key code for the non-printable keys the browser
+  // needs for navigation/editing. Printable keys ride in on the CHAR event.
+  int windowsKeyCodeFromSym(std::uint32_t sym) {
+    switch (sym) {
+    case 0xff08:
+      return 0x08; // BackSpace -> VK_BACK
+    case 0xff09:
+      return 0x09; // Tab -> VK_TAB
+    case 0xff0d:
+      return 0x0D; // Return -> VK_RETURN
+    case 0xff1b:
+      return 0x1B; // Escape -> VK_ESCAPE
+    case 0xff50:
+      return 0x24; // Home
+    case 0xff51:
+      return 0x25; // Left
+    case 0xff52:
+      return 0x26; // Up
+    case 0xff53:
+      return 0x27; // Right
+    case 0xff54:
+      return 0x28; // Down
+    case 0xff55:
+      return 0x21; // Page_Up
+    case 0xff56:
+      return 0x22; // Page_Down
+    case 0xff57:
+      return 0x23; // End
+    case 0xffff:
+      return 0x2E; // Delete
+    default:
+      break;
+    }
+    // ASCII letters/digits map directly to their uppercase VK code.
+    if (sym >= '0' && sym <= '9') {
+      return static_cast<int>(sym);
+    }
+    if (sym >= 'a' && sym <= 'z') {
+      return static_cast<int>(sym - ('a' - 'A'));
+    }
+    if (sym >= 'A' && sym <= 'Z') {
+      return static_cast<int>(sym);
+    }
+    return 0;
   }
-  // ASCII letters/digits map directly to their uppercase VK code.
-  if (sym >= '0' && sym <= '9') {
-    return static_cast<int>(sym);
-  }
-  if (sym >= 'a' && sym <= 'z') {
-    return static_cast<int>(sym - ('a' - 'A'));
-  }
-  if (sym >= 'A' && sym <= 'Z') {
-    return static_cast<int>(sym);
-  }
-  return 0;
-}
 
-// CEF shared-texture pixel format -> DRM FourCC (little-endian byte order).
-std::uint32_t drmFourccFromCef(cef_color_type_t type) {
-  const auto fourcc = [](char a, char b, char c, char d) {
-    return static_cast<std::uint32_t>(a) | (static_cast<std::uint32_t>(b) << 8)
-        | (static_cast<std::uint32_t>(c) << 16) | (static_cast<std::uint32_t>(d) << 24);
-  };
-  switch (type) {
+  // CEF shared-texture pixel format -> DRM FourCC (little-endian byte order).
+  std::uint32_t drmFourccFromCef(cef_color_type_t type) {
+    const auto fourcc = [](char a, char b, char c, char d) {
+      return static_cast<std::uint32_t>(a)
+          | (static_cast<std::uint32_t>(b) << 8)
+          | (static_cast<std::uint32_t>(c) << 16)
+          | (static_cast<std::uint32_t>(d) << 24);
+    };
+    switch (type) {
     case CEF_COLOR_TYPE_RGBA_8888:
       return fourcc('A', 'B', '2', '4'); // DRM_FORMAT_ABGR8888 (bytes R,G,B,A)
     case CEF_COLOR_TYPE_BGRA_8888:
     default:
       return fourcc('A', 'R', '2', '4'); // DRM_FORMAT_ARGB8888 (bytes B,G,R,A)
+    }
   }
-}
 
-std::uint32_t cursorShapeFromCef(cef_cursor_type_t type) {
-  switch (type) {
+  std::uint32_t cursorShapeFromCef(cef_cursor_type_t type) {
+    switch (type) {
     case CT_HAND:
       return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER;
     case CT_IBEAM:
@@ -173,21 +185,18 @@ std::uint32_t cursorShapeFromCef(cef_cursor_type_t type) {
     case CT_POINTER:
     default:
       return WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT;
+    }
   }
-}
 
 } // namespace
 
 class NoctaliaExternalBeginFrameCallback : public CefExternalBeginFrameCallback {
 public:
   NoctaliaExternalBeginFrameCallback(
-      CefService::Impl* impl, std::shared_ptr<std::atomic<bool>> alive,
-      std::uint64_t requestId, std::uint64_t generation
+      CefService::Impl* impl, std::shared_ptr<std::atomic<bool>> alive, std::uint64_t requestId,
+      std::uint64_t generation
   )
-      : m_impl(impl),
-        m_alive(std::move(alive)),
-        m_requestId(requestId),
-        m_generation(generation) {}
+      : m_impl(impl), m_alive(std::move(alive)), m_requestId(requestId), m_generation(generation) {}
 
   void OnComplete(bool hasDamage) override;
 
@@ -245,7 +254,6 @@ struct CefService::Impl {
   CefExternalFrameScheduler frameScheduler{kFallbackBeginFrameIntervalNs};
   CefRendererRecovery rendererRecovery;
   Timer beginFrameAckWatchdog;
-  Timer idleAnimationProbe;
   std::string pendingUrl;
   int logicalWidth = 1280;
   int logicalHeight = 720;
@@ -260,8 +268,7 @@ struct CefService::Impl {
   CefPointerMotionCoalescer pointerMotion;
   std::uint32_t pointerButtonFlags = 0;
 
-  std::shared_ptr<CefScheduleWorkBridge> scheduleWork =
-      std::make_shared<CefScheduleWorkBridge>();
+  std::shared_ptr<CefScheduleWorkBridge> scheduleWork = std::make_shared<CefScheduleWorkBridge>();
   std::function<void()> frameReady;
   std::function<void()> frameOpportunity;
   std::function<void(std::uint32_t)> cursorCb;
@@ -298,16 +305,11 @@ struct CefService::Impl {
     args.deadline_delta_ns = request.deadlineDeltaNs;
     args.interval_ns = request.intervalNs;
     CefRefPtr<CefExternalBeginFrameCallback> callback =
-        new NoctaliaExternalBeginFrameCallback(
-            this, alive, request.id, request.generation
-        );
+        new NoctaliaExternalBeginFrameCallback(this, alive, request.id, request.generation);
     const bool accepted = browser->GetHost()->SendExternalBeginFrameWithTiming(args, callback);
     if (!accepted) {
       frameScheduler.abandon(request.id);
-      kLog.warn(
-          "CEF rejected timed external begin frame {} (generation {})",
-          request.id, request.generation
-      );
+      kLog.warn("CEF rejected timed external begin frame {} (generation {})", request.id, request.generation);
       NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(0));
       return;
     }
@@ -317,69 +319,55 @@ struct CefService::Impl {
       return;
     }
 
-    idleAnimationProbe.stop();
     tracy_latency::externalBeginFrameIssued(request.urgent);
     NOCTALIA_TRACE_PLOT("CEF external begin frames", static_cast<std::int64_t>(1));
     NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(1));
     auto token = alive;
     beginFrameAckWatchdog.stop();
     beginFrameAckWatchdog.start(
-        std::chrono::milliseconds(kBeginFrameAckRecoveryNs / 1'000'000),
-        [this, token, request]() {
-          if (!token->load() || request.generation != frameScheduler.generation()
+        std::chrono::milliseconds(kBeginFrameAckRecoveryNs / 1'000'000), [this, token, request]() {
+          if (!token->load()
+              || request.generation != frameScheduler.generation()
               || !frameScheduler.isInFlight(request.id)) {
             return;
           }
           kLog.error(
               "CEF external begin frame {} was not acknowledged within the recovery deadline; "
-              "preserving the accepted one-in-flight state",
+              "aborting the pending Chromium BeginFrame in place",
               request.id
           );
           if (attached && browser != nullptr) {
-            browser->GetHost()->Invalidate(PET_VIEW);
+            if (!browser->GetHost()->AbortPendingExternalBeginFrame()) {
+              kLog.error("CEF rejected pending external BeginFrame abort");
+            }
           }
         }
     );
   }
 
-  void scheduleIdleProbe() {
-    idleAnimationProbe.stop();
-    if (!attached || browser == nullptr || !frameScheduler.idleSuppressed()) {
-      return;
-    }
-    auto token = alive;
-    const std::uint64_t generation = frameScheduler.generation();
-    idleAnimationProbe.start(
-        std::chrono::milliseconds(kIdleAnimationProbeNs / 1'000'000),
-        [this, token, generation]() {
-          if (!token->load() || !attached || browser == nullptr
-              || generation != frameScheduler.generation()) {
-            return;
-          }
-          if (auto request = frameScheduler.requestIdleProbe(steadyNowNs())) {
-            submitExternalBeginFrame(*request);
-          }
-        }
-    );
-  }
-
-  void onExternalBeginFrameAck(
-      std::uint64_t requestId, std::uint64_t generation, bool hasDamage
-  ) {
+  void onExternalBeginFrameAck(std::uint64_t requestId, std::uint64_t generation, bool hasDamage) {
     if (generation != frameScheduler.generation() || !frameScheduler.isInFlight(requestId)) {
       return;
     }
+    const bool wasDraining = frameScheduler.state() == CefExternalFrameScheduler::State::Draining;
     beginFrameAckWatchdog.stop();
     auto next = frameScheduler.acknowledge(requestId, hasDamage, steadyNowNs());
     NOCTALIA_TRACE_PLOT("CEF begin frame outstanding", static_cast<std::int64_t>(next.has_value()));
-    NOCTALIA_TRACE_PLOT(
-        "CEF no-damage begin frames",
-        static_cast<std::int64_t>(frameScheduler.consecutiveNoDamage())
-    );
+    if (wasDraining) {
+      if (browser != nullptr) {
+        CefRefPtr<CefBrowserHost> host = browser->GetHost();
+        if (attached) {
+          host->WasHidden(false);
+          host->Invalidate(PET_VIEW);
+          requestExternalBeginFrame(true);
+        } else {
+          host->WasHidden(true);
+        }
+      }
+      return;
+    }
     if (next) {
       submitExternalBeginFrame(*next);
-    } else {
-      scheduleIdleProbe();
     }
     armFrameOpportunity();
   }
@@ -389,9 +377,7 @@ struct CefService::Impl {
       return;
     }
     const auto priorState = frameScheduler.state();
-    auto request = urgent
-        ? frameScheduler.requestUrgent(steadyNowNs())
-        : frameScheduler.requestNormal(steadyNowNs());
+    auto request = urgent ? frameScheduler.requestUrgent(steadyNowNs()) : frameScheduler.requestNormal(steadyNowNs());
     if (request) {
       submitExternalBeginFrame(*request);
     } else if (priorState == CefExternalFrameScheduler::State::InFlight) {
@@ -410,9 +396,8 @@ struct CefService::Impl {
     }
     if (feedback.refreshNs > 0) {
       presentationRefreshNs = feedback.refreshNs;
-      const int frameRate = std::max(
-          1, static_cast<int>((1'000'000'000ULL + presentationRefreshNs / 2U) / presentationRefreshNs)
-      );
+      const int frameRate =
+          std::max(1, static_cast<int>((1'000'000'000ULL + presentationRefreshNs / 2U) / presentationRefreshNs));
       if (browser != nullptr && frameRate != configuredFrameRate) {
         configuredFrameRate = frameRate;
         browser->GetHost()->SetWindowlessFrameRate(frameRate);
@@ -434,8 +419,7 @@ struct CefService::Impl {
 
   void stopExternalScheduler() {
     beginFrameAckWatchdog.stop();
-    idleAnimationProbe.stop();
-    frameScheduler.suspend();
+    frameScheduler.forceSuspend();
     pointerMotion.reset();
   }
 
@@ -469,243 +453,275 @@ void NoctaliaExternalBeginFrameCallback::OnComplete(bool hasDamage) {
 // ---------------------------------------------------------------------------
 namespace {
 
-class NoctaliaCefClient : public CefClient,
-                          public CefRenderHandler,
-                          public CefLifeSpanHandler,
-                          public CefLoadHandler,
-                          public CefDisplayHandler,
-                          public CefRequestHandler {
-public:
-  explicit NoctaliaCefClient(CefService::Impl* impl) : m_impl(impl) {}
+  class NoctaliaCefClient : public CefClient,
+                            public CefRenderHandler,
+                            public CefLifeSpanHandler,
+                            public CefLoadHandler,
+                            public CefDisplayHandler,
+                            public CefRequestHandler {
+  public:
+    explicit NoctaliaCefClient(CefService::Impl* impl) : m_impl(impl) {}
 
-  CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
-  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
-  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
-  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
-  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+    CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
+    CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+    CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+    CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+    CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
-  // CefRenderHandler
-  void GetViewRect(CefRefPtr<CefBrowser> /*browser*/, CefRect& rect) override {
-    rect = CefRect(0, 0, m_impl->logicalWidth, m_impl->logicalHeight);
-  }
+    // CefRenderHandler
+    void GetViewRect(CefRefPtr<CefBrowser> /*browser*/, CefRect& rect) override {
+      rect = CefRect(0, 0, m_impl->logicalWidth, m_impl->logicalHeight);
+    }
 
-  bool GetScreenInfo(CefRefPtr<CefBrowser> /*browser*/, CefScreenInfo& info) override {
-    info.device_scale_factor = m_impl->deviceScale;
-    info.rect = CefRect(0, 0, m_impl->logicalWidth, m_impl->logicalHeight);
-    info.available_rect = info.rect;
-    return true;
-  }
+    bool GetScreenInfo(CefRefPtr<CefBrowser> /*browser*/, CefScreenInfo& info) override {
+      info.device_scale_factor = m_impl->deviceScale;
+      info.rect = CefRect(0, 0, m_impl->logicalWidth, m_impl->logicalHeight);
+      info.available_rect = info.rect;
+      return true;
+    }
 
-  void OnPaint(
-      CefRefPtr<CefBrowser> /*browser*/, PaintElementType type, const RectList& /*dirtyRects*/, const void* buffer,
-      int width, int height
-  ) override {
-    (void)type;
-    (void)buffer;
-    (void)width;
-    (void)height;
-    if (!m_impl->loggedCpuPaint.exchange(true)) {
-      kLog.error("CEF delivered a CPU OSR frame despite shared textures being required ({}x{})", width, height);
-    }
-  }
-
-  // CEF's fds are borrowed for this callback only. The bridge duplicates a
-  // DMA-BUF only on an import-cache miss. The normal path samples that cached
-  // import directly and returns a release fence after Graphite submission;
-  // sampling submission returns a token-correlated release fence to CEF.
-  void OnAcceleratedPaint(
-      CefRefPtr<CefBrowser> /*browser*/, PaintElementType type, const RectList& /*dirtyRects*/,
-      const CefAcceleratedPaintInfo& info
-  ) override {
-    NOCTALIA_TRACE_ZONE("CEF OnAcceleratedPaint");
-    CEF_REQUIRE_UI_THREAD();
-    if (type != PET_VIEW) {
-      return;
-    }
-    if (m_impl->gpuBridge == nullptr) {
-      kLog.error("received accelerated CEF frame before the Vulkan bridge was attached");
-      return;
-    }
-    tracy_latency::acceleratedPaintArrived();
-    BorrowedDmabufFrame frame;
-    frame.width = info.extra.coded_size.width > 0
-        ? info.extra.coded_size.width
-        : static_cast<int>(static_cast<float>(m_impl->logicalWidth) * m_impl->deviceScale);
-    frame.height = info.extra.coded_size.height > 0
-        ? info.extra.coded_size.height
-        : static_cast<int>(static_cast<float>(m_impl->logicalHeight) * m_impl->deviceScale);
-    if (!info.extra.has_capture_counter) {
-      kLog.error("CEF accelerated frame did not include a capture counter");
-      return;
-    }
-    frame.captureCounter = info.extra.capture_counter;
-    frame.fourcc = drmFourccFromCef(info.format);
-    frame.modifier = info.modifier;
-    frame.acquireFenceFd = info.acquire_fence_fd;
-    frame.planeCount = std::min(info.plane_count, 4);
-    if (!m_impl->loggedAcceleratedPaint.exchange(true)) {
-      kLog.info(
-          "received first accelerated CEF frame: {}x{}, fourcc=0x{:08x}, modifier=0x{:016x}, planes={}",
-          frame.width, frame.height, frame.fourcc, frame.modifier, frame.planeCount
-      );
-    }
-    for (int i = 0; i < frame.planeCount; ++i) {
-      frame.planes[i].fd = info.planes[i].fd;
-      frame.planes[i].stride = info.planes[i].stride;
-      frame.planes[i].offset = info.planes[i].offset;
-    }
-    if (!m_impl->gpuBridge->acceptFrame(frame)) {
-      tracy_latency::acceleratedPaintFailed();
-      kLog.error("failed to accept CEF DMA-BUF through Vulkan: {}", m_impl->gpuBridge->lastError());
-      m_impl->requestExternalBeginFrame(true);
-      return;
-    }
-    NOCTALIA_TRACE_FRAME("CEF accelerated frame accepted");
-    NOCTALIA_TRACE_PLOT(
-        "CEF frames accepted", static_cast<std::int64_t>(m_impl->gpuBridge->acceptedFrameCount())
-    );
-    NOCTALIA_TRACE_PLOT("CEF frame width", static_cast<std::int64_t>(frame.width));
-    NOCTALIA_TRACE_PLOT("CEF frame height", static_cast<std::int64_t>(frame.height));
-    if (m_impl->textureChanged) {
-      ++m_impl->supersededReadyFrames;
-      NOCTALIA_TRACE_PLOT(
-          "CEF ready frames superseded before adoption",
-          static_cast<std::int64_t>(m_impl->supersededReadyFrames)
-      );
-    }
-    m_impl->texture = m_impl->gpuBridge->texture();
-    m_impl->textureChanged = true;
-    if (m_impl->frameReady) {
-      m_impl->frameReady();
-    }
-  }
-
-  bool OnCursorChange(
-      CefRefPtr<CefBrowser> /*browser*/, CefCursorHandle /*cursor*/, cef_cursor_type_t type,
-      const CefCursorInfo& /*info*/
-  ) override {
-    const std::uint32_t shape = cursorShapeFromCef(type);
-    if (m_impl->lastCursorType != static_cast<int>(type) || m_impl->lastCursorShape != shape) {
-      kLog.debug("CEF cursor changed: type={} shape={}", static_cast<int>(type), shape);
-      m_impl->lastCursorType = static_cast<int>(type);
-      m_impl->lastCursorShape = shape;
-    }
-    auto alive = m_impl->alive;
-    auto* impl = m_impl;
-    DeferredCall::callLater([alive, impl, shape]() {
-      if (alive->load() && impl->cursorCb) {
-        impl->cursorCb(shape);
+    void OnPaint(
+        CefRefPtr<CefBrowser> /*browser*/, PaintElementType type, const RectList& /*dirtyRects*/, const void* buffer,
+        int width, int height
+    ) override {
+      (void)type;
+      (void)buffer;
+      (void)width;
+      (void)height;
+      if (!m_impl->loggedCpuPaint.exchange(true)) {
+        kLog.error("CEF delivered a CPU OSR frame despite shared textures being required ({}x{})", width, height);
       }
-    });
-    return true; // we render the cursor via the Wayland cursor-shape protocol
-  }
-
-  // CefLifeSpanHandler
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    m_impl->browser = browser;
-    browser->GetHost()->WasHidden(!m_impl->attached);
-    browser->GetHost()->WasResized();
-    if (m_impl->attached) {
-      browser->GetHost()->Invalidate(PET_VIEW);
-      browser->GetHost()->SetFocus(true);
-    }
-    m_impl->startExternalScheduler();
-    kLog.info("CEF browser created");
-  }
-  void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override {
-    m_impl->stopExternalScheduler();
-    m_impl->rendererRecovery.reset();
-    m_impl->browser = nullptr;
-  }
-
-  // CefRequestHandler
-  void OnRenderViewReady(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    const bool recovered =
-        m_impl->rendererRecovery.state() != CefRendererRecovery::State::Ready;
-    m_impl->rendererRecovery.onRenderViewReady();
-    if (!m_impl->attached || browser == nullptr) {
-      return;
-    }
-    browser->GetHost()->WasResized();
-    browser->GetHost()->Invalidate(PET_VIEW);
-    browser->GetHost()->SetFocus(true);
-    m_impl->startExternalScheduler();
-    m_impl->requestExternalBeginFrame(true);
-    if (recovered) {
-      kLog.info("CEF renderer recovery produced a ready render view");
-    }
-  }
-
-  void OnRenderProcessTerminated(
-      CefRefPtr<CefBrowser> browser, TerminationStatus status, int errorCode,
-      const CefString& errorString
-  ) override {
-    CEF_REQUIRE_UI_THREAD();
-    m_impl->stopExternalScheduler();
-    if (m_impl->gpuBridge != nullptr) {
-      m_impl->gpuBridge->discardPendingFrame();
     }
 
-    const auto action = m_impl->rendererRecovery.onTerminated();
-    kLog.error(
-        "CEF renderer terminated: status={} code={} error={} recovery={}",
-        static_cast<int>(status), errorCode, errorString.ToString(),
-        action == CefRendererRecovery::Action::Reload ? "reload" : "stopped"
-    );
-    if (action != CefRendererRecovery::Action::Reload || browser == nullptr) {
-      return;
+    // CEF's fds are borrowed for this callback only. The bridge duplicates a
+    // DMA-BUF only on an import-cache miss. The normal path samples that cached
+    // import directly and returns a release fence after Graphite submission;
+    // sampling submission returns a token-correlated release fence to CEF.
+    void OnAcceleratedPaint(
+        CefRefPtr<CefBrowser> browser, PaintElementType type, const RectList& /*dirtyRects*/,
+        const CefAcceleratedPaintInfo& info
+    ) override {
+      NOCTALIA_TRACE_ZONE("CEF OnAcceleratedPaint");
+      CEF_REQUIRE_UI_THREAD();
+      bool adopted = false;
+      try {
+        if (type != PET_VIEW) {
+          return;
+        }
+        if (m_impl->gpuBridge == nullptr) {
+          kLog.error("received accelerated CEF frame before the Vulkan bridge was attached");
+          return;
+        }
+        tracy_latency::acceleratedPaintArrived();
+        BorrowedDmabufFrame frame;
+        frame.transportEpoch = info.extra.transport_epoch;
+        frame.width = info.extra.coded_size.width > 0
+            ? info.extra.coded_size.width
+            : static_cast<int>(static_cast<float>(m_impl->logicalWidth) * m_impl->deviceScale);
+        frame.height = info.extra.coded_size.height > 0
+            ? info.extra.coded_size.height
+            : static_cast<int>(static_cast<float>(m_impl->logicalHeight) * m_impl->deviceScale);
+        if (!info.extra.has_capture_counter) {
+          kLog.error("CEF accelerated frame did not include a capture counter");
+          return;
+        }
+        frame.captureCounter = info.extra.capture_counter;
+        frame.outputGeneration = info.extra.output_generation;
+        frame.outputSlot = info.extra.output_slot;
+        frame.contentSerial = info.extra.content_serial;
+        frame.fourcc = drmFourccFromCef(info.format);
+        frame.modifier = info.modifier;
+        frame.queueFamilyIndex = info.extra.queue_family_index;
+        frame.imageLayout = info.extra.image_layout;
+        frame.acquireFenceFd = info.acquire_fence_fd;
+        frame.planeCount = std::min(info.plane_count, 4);
+        if (!m_impl->loggedAcceleratedPaint.exchange(true)) {
+          kLog.info(
+              "received first accelerated CEF frame: {}x{}, fourcc=0x{:08x}, modifier=0x{:016x}, planes={}",
+              frame.width, frame.height, frame.fourcc, frame.modifier, frame.planeCount
+          );
+        }
+        for (int i = 0; i < frame.planeCount; ++i) {
+          frame.planes[i].fd = info.planes[i].fd;
+          frame.planes[i].stride = info.planes[i].stride;
+          frame.planes[i].offset = info.planes[i].offset;
+        }
+        if (!m_impl->gpuBridge->acceptFrame(frame)) {
+          tracy_latency::acceleratedPaintFailed();
+          kLog.error("failed to accept CEF DMA-BUF through Vulkan: {}", m_impl->gpuBridge->lastError());
+          if (browser != nullptr
+              && frame.transportEpoch != 0
+              && frame.captureCounter >= 0
+              && frame.acquireFenceFd >= 0) {
+            browser->GetHost()->SetAcceleratedPaintReleaseFence(
+                frame.transportEpoch, frame.captureCounter, frame.acquireFenceFd
+            );
+          }
+          m_impl->requestExternalBeginFrame(true);
+          return;
+        }
+        adopted = true;
+        NOCTALIA_TRACE_FRAME("CEF accelerated frame accepted");
+        NOCTALIA_TRACE_PLOT("CEF frame width", static_cast<std::int64_t>(frame.width));
+        NOCTALIA_TRACE_PLOT("CEF frame height", static_cast<std::int64_t>(frame.height));
+        if (m_impl->textureChanged) {
+          ++m_impl->supersededReadyFrames;
+          NOCTALIA_TRACE_PLOT(
+              "CEF ready frames superseded before adoption", static_cast<std::int64_t>(m_impl->supersededReadyFrames)
+          );
+        }
+        m_impl->texture = m_impl->gpuBridge->texture();
+        m_impl->textureChanged = true;
+        if (m_impl->frameReady) {
+          m_impl->frameReady();
+        }
+      } catch (const std::exception& exception) {
+        kLog.error("CEF accelerated-paint callback failed: {}", exception.what());
+        if (!adopted
+            && browser != nullptr
+            && info.extra.transport_epoch != 0
+            && info.extra.has_capture_counter
+            && info.acquire_fence_fd >= 0) {
+          browser->GetHost()->SetAcceleratedPaintReleaseFence(
+              info.extra.transport_epoch, info.extra.capture_counter, info.acquire_fence_fd
+          );
+        }
+      } catch (...) {
+        kLog.error("CEF accelerated-paint callback failed with an unknown exception");
+        if (!adopted
+            && browser != nullptr
+            && info.extra.transport_epoch != 0
+            && info.extra.has_capture_counter
+            && info.acquire_fence_fd >= 0) {
+          browser->GetHost()->SetAcceleratedPaintReleaseFence(
+              info.extra.transport_epoch, info.extra.capture_counter, info.acquire_fence_fd
+          );
+        }
+      }
     }
 
-    auto alive = m_impl->alive;
-    auto* impl = m_impl;
-    const int browserId = browser->GetIdentifier();
-    const std::uint64_t recoveryGeneration = m_impl->rendererRecovery.generation();
-    DeferredCall::callLater([alive, impl, browserId, recoveryGeneration]() {
-      if (!alive->load() || impl->browser == nullptr
-          || impl->browser->GetIdentifier() != browserId
-          || !impl->rendererRecovery.isPending(recoveryGeneration)) {
+    bool OnCursorChange(
+        CefRefPtr<CefBrowser> /*browser*/, CefCursorHandle /*cursor*/, cef_cursor_type_t type,
+        const CefCursorInfo& /*info*/
+    ) override {
+      const std::uint32_t shape = cursorShapeFromCef(type);
+      if (m_impl->lastCursorType != static_cast<int>(type) || m_impl->lastCursorShape != shape) {
+        kLog.debug("CEF cursor changed: type={} shape={}", static_cast<int>(type), shape);
+        m_impl->lastCursorType = static_cast<int>(type);
+        m_impl->lastCursorShape = shape;
+      }
+      auto alive = m_impl->alive;
+      auto* impl = m_impl;
+      DeferredCall::callLater([alive, impl, shape]() {
+        if (alive->load() && impl->cursorCb) {
+          impl->cursorCb(shape);
+        }
+      });
+      return true; // we render the cursor via the Wayland cursor-shape protocol
+    }
+
+    // CefLifeSpanHandler
+    void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+      CEF_REQUIRE_UI_THREAD();
+      m_impl->browser = browser;
+      browser->GetHost()->WasHidden(!m_impl->attached);
+      browser->GetHost()->WasResized();
+      if (m_impl->attached) {
+        browser->GetHost()->Invalidate(PET_VIEW);
+        browser->GetHost()->SetFocus(true);
+      }
+      m_impl->startExternalScheduler();
+      kLog.info("CEF browser created");
+    }
+    void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override {
+      m_impl->stopExternalScheduler();
+      m_impl->rendererRecovery.reset();
+      m_impl->browser = nullptr;
+    }
+
+    // CefRequestHandler
+    void OnRenderViewReady(CefRefPtr<CefBrowser> browser) override {
+      CEF_REQUIRE_UI_THREAD();
+      const bool recovered = m_impl->rendererRecovery.state() != CefRendererRecovery::State::Ready;
+      m_impl->rendererRecovery.onRenderViewReady();
+      if (!m_impl->attached || browser == nullptr) {
         return;
       }
-      // Reload uses the existing persistent request context and HTTP cache.
-      // The new render view's ready callback restarts external begin frames.
-      impl->browser->Reload();
-    });
-  }
-
-  // CefLoadHandler
-  void OnLoadingStateChange(
-      CefRefPtr<CefBrowser> /*browser*/, bool isLoading, bool /*canGoBack*/, bool /*canGoForward*/
-  ) override {
-    kLog.info("CEF loading state changed: {}", isLoading ? "loading" : "idle");
-    m_impl->requestExternalBeginFrame(isLoading);
-  }
-
-  void OnLoadEnd(
-      CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, int httpStatusCode
-  ) override {
-    if (frame->IsMain()) {
-      kLog.info("CEF main frame loaded: status={} url={}", httpStatusCode, frame->GetURL().ToString());
+      browser->GetHost()->WasResized();
+      browser->GetHost()->Invalidate(PET_VIEW);
+      browser->GetHost()->SetFocus(true);
+      m_impl->startExternalScheduler();
+      m_impl->requestExternalBeginFrame(true);
+      if (recovered) {
+        kLog.info("CEF renderer recovery produced a ready render view");
+      }
     }
-  }
 
-  void OnLoadError(
-      CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, ErrorCode errorCode,
-      const CefString& errorText, const CefString& failedUrl
-  ) override {
-    if (frame->IsMain()) {
+    void OnRenderProcessTerminated(
+        CefRefPtr<CefBrowser> browser, TerminationStatus status, int errorCode, const CefString& errorString
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      m_impl->stopExternalScheduler();
+      if (m_impl->gpuBridge != nullptr) {
+        m_impl->gpuBridge->discardPendingFrame();
+      }
+
+      const auto action = m_impl->rendererRecovery.onTerminated();
       kLog.error(
-          "CEF main frame load failed: code={} error={} url={}", static_cast<int>(errorCode),
-          errorText.ToString(), failedUrl.ToString()
+          "CEF renderer terminated: status={} code={} error={} recovery={}", static_cast<int>(status), errorCode,
+          errorString.ToString(), action == CefRendererRecovery::Action::Reload ? "reload" : "stopped"
       );
-    }
-  }
+      if (action != CefRendererRecovery::Action::Reload || browser == nullptr) {
+        return;
+      }
 
-private:
-  CefService::Impl* m_impl;
-  IMPLEMENT_REFCOUNTING(NoctaliaCefClient);
-};
+      auto alive = m_impl->alive;
+      auto* impl = m_impl;
+      const int browserId = browser->GetIdentifier();
+      const std::uint64_t recoveryGeneration = m_impl->rendererRecovery.generation();
+      DeferredCall::callLater([alive, impl, browserId, recoveryGeneration]() {
+        if (!alive->load()
+            || impl->browser == nullptr
+            || impl->browser->GetIdentifier() != browserId
+            || !impl->rendererRecovery.isPending(recoveryGeneration)) {
+          return;
+        }
+        // Reload uses the existing persistent request context and HTTP cache.
+        // The new render view's ready callback restarts external begin frames.
+        impl->browser->Reload();
+      });
+    }
+
+    // CefLoadHandler
+    void OnLoadingStateChange(
+        CefRefPtr<CefBrowser> /*browser*/, bool isLoading, bool /*canGoBack*/, bool /*canGoForward*/
+    ) override {
+      kLog.info("CEF loading state changed: {}", isLoading ? "loading" : "idle");
+      m_impl->requestExternalBeginFrame(isLoading);
+    }
+
+    void OnLoadEnd(CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
+      if (frame->IsMain()) {
+        kLog.info("CEF main frame loaded: status={} url={}", httpStatusCode, frame->GetURL().ToString());
+      }
+    }
+
+    void OnLoadError(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, ErrorCode errorCode, const CefString& errorText,
+        const CefString& failedUrl
+    ) override {
+      if (frame->IsMain()) {
+        kLog.error(
+            "CEF main frame load failed: code={} error={} url={}", static_cast<int>(errorCode), errorText.ToString(),
+            failedUrl.ToString()
+        );
+      }
+    }
+
+  private:
+    CefService::Impl* m_impl;
+    IMPLEMENT_REFCOUNTING(NoctaliaCefClient);
+  };
 
 } // namespace
 
@@ -717,13 +733,9 @@ CefService::CefService(std::string cefDir, std::string helperPath) : m_impl(std:
   m_impl->helperPath = helperPath.empty() ? helperNextToSelf() : std::move(helperPath);
 }
 
-CefService::~CefService() {
-  shutdown();
-}
+CefService::~CefService() { shutdown(); }
 
-bool CefService::initialized() const noexcept {
-  return m_impl->initialized;
-}
+bool CefService::initialized() const noexcept { return m_impl->initialized; }
 
 bool CefService::initialize() {
   if (m_impl->initialized) {
@@ -733,15 +745,12 @@ bool CefService::initialize() {
   CefMainArgs mainArgs(0, nullptr);
 
   auto scheduleWork = m_impl->scheduleWork;
-  m_impl->app = new NoctaliaCefApp([scheduleWork = std::move(scheduleWork)](
-                                       std::int64_t delayMs
-                                   ) {
+  m_impl->app = new NoctaliaCefApp([scheduleWork = std::move(scheduleWork)](std::int64_t delayMs) {
     scheduleWork->dispatch(delayMs);
   });
 
   const std::string rootCachePath = userCachePath();
-  if (const char* widevine = std::getenv("NOCTALIA_CEF_WIDEVINE");
-      widevine != nullptr && widevine[0] != '\0') {
+  if (const char* widevine = std::getenv("NOCTALIA_CEF_WIDEVINE"); widevine != nullptr && widevine[0] != '\0') {
     std::string widevineError;
     if (!prepareNoctaliaWidevineHint(rootCachePath, widevine, widevineError)) {
       kLog.error("{}", widevineError);
@@ -783,13 +792,12 @@ void CefService::attachGraphicsDevice(GraphicsDevice& graphics) {
     throw std::runtime_error("CEF requires the Vulkan external-memory GraphicsDevice contract");
   }
   m_impl->gpuBridge = std::make_unique<CefGpuFrameBridge>(
-      graphics, &graphics.textureManager(),
-      [this](std::int64_t captureCounter, int fd) {
+      graphics, graphics.textureManager(), [this](std::uint64_t transportEpoch, std::int64_t captureCounter, int fd) {
         if (m_impl->browser == nullptr) {
           kLog.warn("dropping CEF release fence for closed browser frame {}", captureCounter);
           return;
         }
-        m_impl->browser->GetHost()->SetAcceleratedPaintReleaseFence(captureCounter, fd);
+        m_impl->browser->GetHost()->SetAcceleratedPaintReleaseFence(transportEpoch, captureCounter, fd);
       }
   );
 }
@@ -842,11 +850,10 @@ void CefService::shutdown() {
     kLog.info(
         "CEF GPU bridge summary: accepted={}, directStaged={}, "
         "directSampled={}, directDiscarded={}, releaseFences={}, imports={}/{}, "
-        "activeImports={}, cacheHits={}, cacheMisses={}",
-        stats.framesAccepted, stats.directFramesStaged,
-        stats.directFramesSampled, stats.directFramesDiscarded,
-        stats.releaseFenceFdsExported, stats.importsCreated, stats.importsDestroyed,
-        stats.activeImports, stats.importCacheHits, stats.importCacheMisses
+        "activeImports={}, cacheHits={}, cacheMisses={}, cacheEvictions={}",
+        stats.framesAccepted, stats.directFramesStaged, stats.directFramesSampled, stats.directFramesDiscarded,
+        stats.releaseFenceFdsExported, stats.importsCreated, stats.importsDestroyed, stats.activeImports,
+        stats.importCacheHits, stats.importCacheMisses, stats.importCacheEvictions
     );
   }
   m_impl->gpuBridge.reset();
@@ -882,12 +889,10 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   if (!CefBrowserHost::CreateBrowser(windowInfo, m_impl->client, url, browserSettings, nullptr, nullptr)) {
     kLog.error("CEF browser creation request was rejected");
   } else {
-    kLog.info("CEF browser creation requested: {}x{} fps={} scheduler={} url={}",
-              m_impl->logicalWidth,
-              m_impl->logicalHeight,
-              kCefWindowlessFrameRate,
-              "wayland-frame-callback",
-              url);
+    kLog.info(
+        "CEF browser creation requested: {}x{} fps={} scheduler={} url={}", m_impl->logicalWidth, m_impl->logicalHeight,
+        kCefWindowlessFrameRate, "wayland-frame-callback", url
+    );
   }
 }
 
@@ -959,9 +964,7 @@ void CefService::flushMouseMove() {
   }
 }
 
-void CefService::sendMouseButton(
-    float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers
-) {
+void CefService::sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers) {
   if (!m_impl->browser) {
     return;
   }
@@ -1072,22 +1075,35 @@ void CefService::setDisplayAttached(bool attached) {
     kLog.warn("CEF browser host unavailable while changing display attachment to {}", attached);
     return;
   }
-  host->WasHidden(!attached);
   if (attached) {
+    m_impl->frameScheduler.resume();
+    if (m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining) {
+      return;
+    }
+    host->WasHidden(false);
     host->Invalidate(PET_VIEW);
     host->SetFocus(true);
-    m_impl->startExternalScheduler();
+    m_impl->requestExternalBeginFrame(true);
   } else {
-    m_impl->stopExternalScheduler();
+    m_impl->beginFrameAckWatchdog.stop();
+    const bool abortRequired = m_impl->frameScheduler.suspend();
+    m_impl->pointerMotion.reset();
     if (m_impl->gpuBridge != nullptr) {
       m_impl->gpuBridge->discardPendingFrame();
     }
+    if (abortRequired) {
+      if (!host->AbortPendingExternalBeginFrame()) {
+        kLog.error("CEF rejected external BeginFrame abort while detaching display");
+        m_impl->frameScheduler.forceSuspend();
+        host->WasHidden(true);
+      }
+      return;
+    }
+    host->WasHidden(true);
   }
 }
 
-void CefService::onPresentation(const SurfacePresentationFeedback& feedback) {
-  m_impl->onPresentation(feedback);
-}
+void CefService::onPresentation(const SurfacePresentationFeedback& feedback) { m_impl->onPresentation(feedback); }
 
 bool CefService::onFrameOpportunity() {
   const bool forwardedPointerMotion = m_impl->flushPointerMotion();
@@ -1096,9 +1112,8 @@ bool CefService::onFrameOpportunity() {
   }
   const auto priorState = m_impl->frameScheduler.state();
   const std::int64_t nowNs = steadyNowNs();
-  auto request = forwardedPointerMotion
-      ? m_impl->frameScheduler.requestUrgent(nowNs)
-      : m_impl->frameScheduler.onFrameOpportunity(nowNs);
+  auto request = forwardedPointerMotion ? m_impl->frameScheduler.requestUrgent(nowNs)
+                                        : m_impl->frameScheduler.onFrameOpportunity(nowNs);
   if (request) {
     m_impl->submitExternalBeginFrame(*request);
   } else if (priorState == CefExternalFrameScheduler::State::InFlight) {
@@ -1123,9 +1138,7 @@ bool CefService::uploadIfDirty(TextureManager& textures) {
   return std::exchange(m_impl->textureChanged, false);
 }
 
-TextureHandle CefService::currentTexture() const noexcept {
-  return m_impl->texture;
-}
+TextureHandle CefService::currentTexture() const noexcept { return m_impl->texture; }
 
 void CefService::invalidateGpuTexture() {
   if (m_impl->gpuBridge != nullptr) {
@@ -1138,15 +1151,11 @@ void CefService::invalidateGpuTexture() {
   }
 }
 
-void CefService::setFrameReadyCallback(std::function<void()> cb) {
-  m_impl->frameReady = std::move(cb);
-}
+void CefService::setFrameReadyCallback(std::function<void()> cb) { m_impl->frameReady = std::move(cb); }
 
 void CefService::setFrameOpportunityCallback(std::function<void()> cb) {
   m_impl->frameOpportunity = std::move(cb);
   m_impl->armFrameOpportunity();
 }
 
-void CefService::setCursorCallback(std::function<void(std::uint32_t)> cb) {
-  m_impl->cursorCb = std::move(cb);
-}
+void CefService::setCursorCallback(std::function<void(std::uint32_t)> cb) { m_impl->cursorCb = std::move(cb); }

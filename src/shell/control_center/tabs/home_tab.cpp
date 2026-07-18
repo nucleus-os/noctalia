@@ -4,6 +4,7 @@
 #include "core/build_info.h"
 #include "core/deferred_call.h"
 #include "core/input/keybind_matcher.h"
+#include "core/log.h"
 #include "cursor-shape-v1-client-protocol.h"
 #include "dbus/accounts/accounts_service.h"
 #include "dbus/mpris/mpris_art.h"
@@ -40,6 +41,7 @@ using namespace control_center;
 
 namespace {
 
+  constexpr Logger kLog("control-center");
   constexpr float kHomeAvatarScale = 2.6f;
   // Avatar sources above this size decode noticeably slowly; warn so users understand why.
   constexpr std::uintmax_t kHomeAvatarSourceWarnBytes = 8ULL * 1024ULL * 1024ULL;

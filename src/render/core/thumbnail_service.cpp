@@ -403,15 +403,6 @@ void ThumbnailService::abandonGpuResources() noexcept {
   }
 }
 
-void ThumbnailService::abandonGpuResources() noexcept {
-  for (auto& [key, entry] : m_entries) {
-    (void)key;
-    entry.handle = {};
-    entry.failed = false;
-  }
-  m_textureManager = nullptr;
-}
-
 void ThumbnailService::doAddPollFds(std::vector<pollfd>& fds) {
   if (m_eventFd < 0) {
     return;

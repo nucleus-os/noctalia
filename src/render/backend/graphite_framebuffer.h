@@ -27,6 +27,7 @@ public:
   [[nodiscard]] TextureId colorTexture() const noexcept override;
   [[nodiscard]] std::uint32_t width() const noexcept override { return m_width; }
   [[nodiscard]] std::uint32_t height() const noexcept override { return m_height; }
+  void abandon() noexcept override;
 
   [[nodiscard]] SkCanvas* canvas() const noexcept;
   [[nodiscard]] SkSurface* readbackSurfaceForTesting() const noexcept { return m_surface.get(); }

@@ -85,7 +85,6 @@ public:
   [[nodiscard]] bool uploadPending(TextureManager& textures);
   void abandonGpuResources() noexcept;
   void invalidateGpuResources(TextureManager& textures);
-  void abandonGpuResources() noexcept;
 
   [[nodiscard]] int pollTimeoutMs() const override { return -1; }
   void dispatch(const std::vector<pollfd>& fds, std::size_t startIdx) override;

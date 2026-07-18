@@ -157,7 +157,7 @@ bool GraphiteRenderBackend::beginFrame(RenderTarget& target) {
   m_target = &target;
   m_scissor.reset();
   m_blendMode = RenderBlendMode::PremultipliedAlpha;
-  m_externalSynchronizations.clear();
+  m_externalSubmissions.clear();
   m_canvas->save();
   m_frameSaved = true;
   const float scaleX = target.logicalWidth() > 0
@@ -185,15 +185,30 @@ void GraphiteRenderBackend::endFrame(RenderTarget& target) {
   m_surfaceCanvas = nullptr;
   m_boundFramebuffer = nullptr;
   m_target = nullptr;
-  bool released = false;
-  const RenderFrameStatus status = surfaceTarget(target).target().endFrame([this, &released] {
-    releaseExternalTextures();
-    released = true;
-  });
-  if (!released) {
+  std::vector<VkSemaphore> externalWaits;
+  std::vector<VkSemaphore> externalSignals;
+  externalWaits.reserve(m_externalSubmissions.size());
+  externalSignals.reserve(m_externalSubmissions.size());
+  for (const auto& submission : m_externalSubmissions) {
+    if (submission.dependency.waitSemaphore != VK_NULL_HANDLE) {
+      externalWaits.push_back(submission.dependency.waitSemaphore);
+    }
+    if (submission.dependency.signalSemaphore != VK_NULL_HANDLE) {
+      externalSignals.push_back(submission.dependency.signalSemaphore);
+    }
+  }
+  bool submitted = false;
+  const RenderFrameStatus status = surfaceTarget(target).target().endFrame(
+      externalWaits, externalSignals,
+      [this, &submitted] {
+        finishExternalTextures(true);
+        submitted = true;
+      }
+  );
+  if (!submitted) {
     // If recording/submission failed, no sampling occurred, but an ownership
     // acquire may already have been queued and must still be balanced.
-    releaseExternalTextures();
+    finishExternalTextures(false);
   }
   if (status == RenderFrameStatus::DeviceLost) {
     if (!surfaceTarget(target).target().deviceLossWasInjected()) {
@@ -211,6 +226,12 @@ RenderDeviceStatus GraphiteRenderBackend::deviceStatus() const noexcept {
 }
 
 void GraphiteRenderBackend::invalidateGpuResources() { m_graphics.textureManager().invalidateAll(); }
+
+void GraphiteRenderBackend::abandonAfterGraphicsReset() noexcept {
+  m_graphics.textureManager().abandonGpuResources();
+  cleanup();
+  m_deviceLost = true;
+}
 
 std::unique_ptr<RenderSurfaceTarget> GraphiteRenderBackend::createSurfaceTarget(wl_surface* surface) {
   return std::make_unique<GraphiteRenderSurfaceTarget>(m_graphics, surface);
@@ -1006,21 +1027,27 @@ TextureManager& GraphiteRenderBackend::textureManager() { return m_graphics.text
 bool GraphiteRenderBackend::prepareExternalTexture(TextureId texture) {
   auto* synchronization = m_graphics.textureManager().externalSynchronization(texture);
   if (synchronization == nullptr
-      || std::ranges::find(m_externalSynchronizations, synchronization) != m_externalSynchronizations.end()) {
+      || std::ranges::any_of(m_externalSubmissions, [synchronization](const ExternalSubmission& submission) {
+           return submission.synchronization == synchronization;
+         })) {
     return true;
   }
-  if (!synchronization->prepareForGraphiteSampling()) {
+  GraphiteSubmissionDependency dependency;
+  if (!synchronization->prepareForGraphiteSampling(dependency)) {
     return false;
   }
-  m_externalSynchronizations.push_back(synchronization);
+  m_externalSubmissions.push_back({
+      .synchronization = synchronization,
+      .dependency = dependency,
+  });
   return true;
 }
 
-void GraphiteRenderBackend::releaseExternalTextures() {
-  for (auto* synchronization : m_externalSynchronizations) {
-    synchronization->releaseAfterGraphiteSampling();
+void GraphiteRenderBackend::finishExternalTextures(bool submitted) {
+  for (const auto& submission : m_externalSubmissions) {
+    submission.synchronization->finishGraphiteSampling(submission.dependency, submitted);
   }
-  m_externalSynchronizations.clear();
+  m_externalSubmissions.clear();
 }
 
 std::unique_ptr<RenderBackend> createGraphiteRenderBackend(GraphicsDevice& graphics) {

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 
 class GraphicsDevice;
 class SkCanvas;
@@ -57,7 +58,10 @@ public:
 
   [[nodiscard]] bool ready() const noexcept;
   [[nodiscard]] SkCanvas* beginFrame(RenderFrameStatus& status);
-  [[nodiscard]] RenderFrameStatus endFrame(const std::function<void()>& recordingSubmitted = {});
+  [[nodiscard]] RenderFrameStatus endFrame(
+      std::span<const VkSemaphore> waitSemaphores = {}, std::span<const VkSemaphore> signalSemaphores = {},
+      const std::function<void()>& recordingSubmitted = {}
+  );
   // True only for the validation seam which reports device loss after a real,
   // synchronously completed submit. Such a target must use orderly teardown
   // rather than abandoning genuinely lost-device synchronization objects.

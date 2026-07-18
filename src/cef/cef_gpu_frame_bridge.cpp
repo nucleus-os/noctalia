@@ -2,10 +2,6 @@
 
 #include "core/log.h"
 #include "core/tracy.h"
-#include "render/backend/graphite_texture_manager.h"
-#include "render/graphics_device.h"
-#include "render/vulkan/vulkan_result.h"
-
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkRefCnt.h"
@@ -15,6 +11,9 @@
 #include "include/gpu/graphite/Context.h"
 #include "include/gpu/graphite/Image.h"
 #include "include/gpu/graphite/vk/VulkanGraphiteTypes.h"
+#include "render/backend/graphite_texture_manager.h"
+#include "render/graphics_device.h"
+#include "render/vulkan/vulkan_result.h"
 
 #include <algorithm>
 #include <array>
@@ -22,6 +21,7 @@
 #include <cstring>
 #include <format>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -30,10 +30,8 @@
 
 namespace {
   constexpr Logger kLog("cef-vulkan");
-  constexpr VkExternalMemoryHandleTypeFlagBits kDmabufHandle =
-      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-  constexpr VkExternalSemaphoreHandleTypeFlagBits kSyncFdHandle =
-      VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+  constexpr VkExternalMemoryHandleTypeFlagBits kDmabufHandle = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+  constexpr VkExternalSemaphoreHandleTypeFlagBits kSyncFdHandle = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
   constexpr std::size_t kMaxCachedImports = 5;
   constexpr std::size_t kFrameSlots = 3;
   // Match Chromium's VulkanImage::CreateFromGpuMemoryBufferHandle contract.
@@ -42,13 +40,16 @@ namespace {
   // VkImage. Recreating the imported image with the producer's complete usage
   // mask avoids describing the same DMA-BUF through an incompatible image
   // contract on the consumer device.
-  constexpr VkImageUsageFlags kCefImportedImageUsage =
-      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-      | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  constexpr VkImageUsageFlags kCefImportedImageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+      | VK_IMAGE_USAGE_SAMPLED_BIT
+      | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+      | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
   constexpr std::uint32_t fourcc(char a, char b, char c, char d) {
-    return static_cast<std::uint32_t>(a) | (static_cast<std::uint32_t>(b) << 8U)
-        | (static_cast<std::uint32_t>(c) << 16U) | (static_cast<std::uint32_t>(d) << 24U);
+    return static_cast<std::uint32_t>(a)
+        | (static_cast<std::uint32_t>(b) << 8U)
+        | (static_cast<std::uint32_t>(c) << 16U)
+        | (static_cast<std::uint32_t>(d) << 24U);
   }
   constexpr std::uint32_t kDrmArgb8888 = fourcc('A', 'R', '2', '4');
   constexpr std::uint32_t kDrmAbgr8888 = fourcc('A', 'B', '2', '4');
@@ -65,14 +66,12 @@ namespace {
     }
   }
 
-  std::uint32_t chooseMemoryType(
-      VkPhysicalDevice physicalDevice, std::uint32_t typeBits, VkMemoryPropertyFlags preferred
-  ) {
+  std::uint32_t
+  chooseMemoryType(VkPhysicalDevice physicalDevice, std::uint32_t typeBits, VkMemoryPropertyFlags preferred) {
     VkPhysicalDeviceMemoryProperties properties{};
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &properties);
     for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
-      if ((typeBits & (1U << index)) != 0
-          && (properties.memoryTypes[index].propertyFlags & preferred) == preferred) {
+      if ((typeBits & (1U << index)) != 0 && (properties.memoryTypes[index].propertyFlags & preferred) == preferred) {
         return index;
       }
     }
@@ -100,9 +99,6 @@ namespace {
         vkFreeMemory(device, memory, nullptr);
       } else if (duplicatedFd >= 0) {
         ::close(duplicatedFd);
-        if (stats != nullptr) {
-          ++stats->dmabufFdsClosed;
-        }
       }
       if (tracked && stats != nullptr) {
         ++stats->importsDestroyed;
@@ -112,12 +108,15 @@ namespace {
   };
 
   struct ImportKey {
+    std::uint64_t transportEpoch = 0;
     std::uint64_t fileDevice = 0;
     std::uint64_t inode = 0;
     int width = 0;
     int height = 0;
     std::uint32_t fourcc = 0;
     std::uint64_t modifier = 0;
+    std::uint32_t queueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint32_t stride = 0;
     std::uint64_t offset = 0;
 
@@ -135,19 +134,40 @@ namespace {
     std::uint64_t lastCompletionValue = 0;
   };
 
-}
+} // namespace
 
 struct CefGpuFrameBridge::Impl {
+  struct PendingRelease {
+    std::uint64_t transportEpoch = 0;
+    std::int64_t captureCounter = -1;
+    int fd = -1;
+  };
+
   struct FrameSlot {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     VkCommandBuffer releaseCommandBuffer = VK_NULL_HANDLE;
     VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
+    VkSemaphore acquireCompleteSemaphore = VK_NULL_HANDLE;
+    VkSemaphore samplingCompleteSemaphore = VK_NULL_HANDLE;
     VkSemaphore releaseSemaphore = VK_NULL_HANDLE;
     std::uint64_t completionValue = 0;
   };
 
+  struct PendingFrame {
+    FrameSlot* slot = nullptr;
+    CachedImport* imported = nullptr;
+    std::uint64_t transportEpoch = 0;
+    std::int64_t captureCounter = -1;
+    std::uint64_t outputGeneration = 0;
+    std::uint64_t contentSerial = 0;
+    bool prepared = false;
+    bool acquireCompletionWait = false;
+    bool sampled = false;
+    std::uint64_t graphiteCompletionValue = 0;
+  };
+
   GraphicsDevice& graphics;
-  GraphiteTextureManager* textures = nullptr;
+  GraphiteTextureManager& textures;
   VkCommandPool commandPool = VK_NULL_HANDLE;
   std::array<FrameSlot, kFrameSlots> frameSlots{};
   std::size_t nextFrameSlot = 0;
@@ -159,36 +179,28 @@ struct CefGpuFrameBridge::Impl {
   PFN_vkGetMemoryFdPropertiesKHR getMemoryFdProperties = nullptr;
   PFN_vkImportSemaphoreFdKHR importSemaphoreFd = nullptr;
   PFN_vkGetSemaphoreFdKHR getSemaphoreFd = nullptr;
-  int releaseFenceFd = -1;
 
-  sk_sp<SkImage> skImage;
   TextureHandle textureHandle;
-  VkFormat format = VK_FORMAT_UNDEFINED;
-  int imageWidth = 0;
-  int imageHeight = 0;
-  static constexpr std::uint32_t importedQueueFamily = VK_QUEUE_FAMILY_FOREIGN_EXT;
   std::uint64_t importUseSequence = 0;
   std::vector<CachedImport> importCache;
-  FrameSlot* pendingSlot = nullptr;
-  CachedImport* pendingImport = nullptr;
-  std::int64_t pendingCaptureCounter = -1;
-  bool pendingPrepared = false;
-  bool pendingSampled = false;
+  std::optional<PendingFrame> pendingFrame;
+  std::uint64_t lastOutputGeneration = 0;
+  std::uint64_t lastContentSerial = 0;
+  std::uint64_t lastTransportEpoch = 0;
   CefGpuFrameBridgeStats lifetimeStats;
   std::string error;
   std::mutex mutex;
 
   explicit Impl(
-      GraphicsDevice& device, GraphiteTextureManager* manager,
-      ReleaseFenceCallback callback, GraphiteExternalImageSynchronization* owner
+      GraphicsDevice& device, GraphiteTextureManager& manager, ReleaseFenceCallback callback,
+      GraphiteExternalImageSynchronization* owner
   )
-      : graphics(device), textures(manager), releaseFenceCallback(std::move(callback)),
-        synchronizationOwner(owner) {
+      : graphics(device), textures(manager), releaseFenceCallback(std::move(callback)), synchronizationOwner(owner) {
     if (!graphics.valid() || !graphics.cefExternalMemoryEnabled()) {
       throw std::runtime_error("CEF GPU bridge requires a Vulkan device with external-memory support");
     }
-    if (textures == nullptr) {
-      throw std::runtime_error("CEF GPU bridge requires the Graphite texture manager");
+    if (!releaseFenceCallback) {
+      throw std::runtime_error("CEF GPU bridge requires a release-fence callback");
     }
     kLog.info("CEF bridge enabled direct Graphite DMA-BUF sampling");
     getMemoryFdProperties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(
@@ -197,15 +209,13 @@ struct CefGpuFrameBridge::Impl {
     if (getMemoryFdProperties == nullptr) {
       throw std::runtime_error("Vulkan loader did not expose vkGetMemoryFdPropertiesKHR");
     }
-    importSemaphoreFd = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
-        vkGetDeviceProcAddr(graphics.device(), "vkImportSemaphoreFdKHR")
-    );
+    importSemaphoreFd =
+        reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(vkGetDeviceProcAddr(graphics.device(), "vkImportSemaphoreFdKHR"));
     if (importSemaphoreFd == nullptr) {
       throw std::runtime_error("Vulkan loader did not expose vkImportSemaphoreFdKHR");
     }
-    getSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
-        vkGetDeviceProcAddr(graphics.device(), "vkGetSemaphoreFdKHR")
-    );
+    getSemaphoreFd =
+        reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(vkGetDeviceProcAddr(graphics.device(), "vkGetSemaphoreFdKHR"));
     if (getSemaphoreFd == nullptr) {
       throw std::runtime_error("Vulkan loader did not expose vkGetSemaphoreFdKHR");
     }
@@ -239,7 +249,6 @@ struct CefGpuFrameBridge::Impl {
         vkCreateSemaphore(graphics.device(), &timelineInfo, nullptr, &completionTimeline),
         "vkCreateSemaphore(CEF completion timeline)"
     );
-    ++lifetimeStats.completionTimelinesCreated;
     const VkSemaphoreCreateInfo semaphoreInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         .pNext = nullptr,
@@ -257,23 +266,22 @@ struct CefGpuFrameBridge::Impl {
       frameSlots[index].commandBuffer = commandBuffers[index];
       frameSlots[index].releaseCommandBuffer = commandBuffers[index + frameSlots.size()];
       requireVulkan(
-          vkCreateSemaphore(
-              graphics.device(), &semaphoreInfo, nullptr, &frameSlots[index].acquireSemaphore
-          ),
+          vkCreateSemaphore(graphics.device(), &semaphoreInfo, nullptr, &frameSlots[index].acquireSemaphore),
           "vkCreateSemaphore(CEF acquire ring)"
       );
-      ++lifetimeStats.acquireSemaphoresCreated;
-      ++lifetimeStats.activeAcquireSemaphores;
       requireVulkan(
-          vkCreateSemaphore(
-              graphics.device(), &releaseSemaphoreInfo, nullptr,
-              &frameSlots[index].releaseSemaphore
-          ),
+          vkCreateSemaphore(graphics.device(), &semaphoreInfo, nullptr, &frameSlots[index].acquireCompleteSemaphore),
+          "vkCreateSemaphore(CEF acquire completion ring)"
+      );
+      requireVulkan(
+          vkCreateSemaphore(graphics.device(), &semaphoreInfo, nullptr, &frameSlots[index].samplingCompleteSemaphore),
+          "vkCreateSemaphore(CEF sampling completion ring)"
+      );
+      requireVulkan(
+          vkCreateSemaphore(graphics.device(), &releaseSemaphoreInfo, nullptr, &frameSlots[index].releaseSemaphore),
           "vkCreateSemaphore(CEF release ring)"
       );
-      ++lifetimeStats.releaseSemaphoresCreated;
     }
-    lifetimeStats.peakAcquireSemaphores = lifetimeStats.activeAcquireSemaphores;
   }
 
   ~Impl() { cleanup(); }
@@ -292,7 +300,7 @@ struct CefGpuFrameBridge::Impl {
     }
   }
 
-  void waitForCompletion(std::uint64_t value, bool importWait = false) {
+  void waitForCompletion(std::uint64_t value) {
     if (value == 0 || completionTimeline == VK_NULL_HANDLE) {
       return;
     }
@@ -303,13 +311,8 @@ struct CefGpuFrameBridge::Impl {
         .pValues = &value,
     };
     requireVulkan(
-        vkWaitSemaphores(graphics.device(), &waitInfo, UINT64_MAX),
-        "vkWaitSemaphores(CEF completion timeline)"
+        vkWaitSemaphores(graphics.device(), &waitInfo, UINT64_MAX), "vkWaitSemaphores(CEF completion timeline)"
     );
-    ++lifetimeStats.completionValuesWaited;
-    if (importWait) {
-      ++lifetimeStats.importCompletionWaits;
-    }
   }
 
   FrameSlot& acquireFrameSlot() {
@@ -320,13 +323,10 @@ struct CefGpuFrameBridge::Impl {
   }
 
   void releaseTexture() {
-    if (textureHandle.valid() && textures != nullptr) {
-      textures->unload(textureHandle);
+    if (textureHandle.valid()) {
+      textures.unload(textureHandle);
     }
-    skImage.reset();
-    format = VK_FORMAT_UNDEFINED;
-    imageWidth = 0;
-    imageHeight = 0;
+    textureHandle = {};
   }
 
   void cleanup() {
@@ -335,21 +335,13 @@ struct CefGpuFrameBridge::Impl {
     }
     if (!deviceAbandoned) {
       try {
-        releasePendingDirectFrame(pendingSampled);
+        deliverRelease(releasePendingDirectFrame());
       } catch (const std::exception& exception) {
         kLog.error("failed to release pending direct CEF frame during cleanup: {}", exception.what());
       }
       (void)vkDeviceWaitIdle(graphics.device());
     } else {
-      pendingSlot = nullptr;
-      pendingImport = nullptr;
-      pendingCaptureCounter = -1;
-      pendingPrepared = false;
-      pendingSampled = false;
-    }
-    if (releaseFenceFd >= 0) {
-      close(releaseFenceFd);
-      releaseFenceFd = -1;
+      pendingFrame.reset();
     }
     releaseTexture();
     importCache.clear();
@@ -357,13 +349,18 @@ struct CefGpuFrameBridge::Impl {
       if (slot.acquireSemaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(graphics.device(), slot.acquireSemaphore, nullptr);
         slot.acquireSemaphore = VK_NULL_HANDLE;
-        ++lifetimeStats.acquireSemaphoresDestroyed;
-        --lifetimeStats.activeAcquireSemaphores;
+      }
+      if (slot.acquireCompleteSemaphore != VK_NULL_HANDLE) {
+        vkDestroySemaphore(graphics.device(), slot.acquireCompleteSemaphore, nullptr);
+        slot.acquireCompleteSemaphore = VK_NULL_HANDLE;
+      }
+      if (slot.samplingCompleteSemaphore != VK_NULL_HANDLE) {
+        vkDestroySemaphore(graphics.device(), slot.samplingCompleteSemaphore, nullptr);
+        slot.samplingCompleteSemaphore = VK_NULL_HANDLE;
       }
       if (slot.releaseSemaphore != VK_NULL_HANDLE) {
         vkDestroySemaphore(graphics.device(), slot.releaseSemaphore, nullptr);
         slot.releaseSemaphore = VK_NULL_HANDLE;
-        ++lifetimeStats.releaseSemaphoresDestroyed;
       }
       slot.commandBuffer = VK_NULL_HANDLE;
       slot.releaseCommandBuffer = VK_NULL_HANDLE;
@@ -372,12 +369,24 @@ struct CefGpuFrameBridge::Impl {
     if (completionTimeline != VK_NULL_HANDLE) {
       vkDestroySemaphore(graphics.device(), completionTimeline, nullptr);
       completionTimeline = VK_NULL_HANDLE;
-      ++lifetimeStats.completionTimelinesDestroyed;
     }
     if (commandPool != VK_NULL_HANDLE) {
       vkDestroyCommandPool(graphics.device(), commandPool, nullptr);
       commandPool = VK_NULL_HANDLE;
     }
+  }
+
+  void deliverRelease(std::optional<PendingRelease> release) noexcept {
+    if (!release || release->fd < 0) {
+      return;
+    }
+    try {
+      releaseFenceCallback(release->transportEpoch, release->captureCounter, release->fd);
+    } catch (...) {
+      // An embedder callback must never unwind through bridge teardown or a CEF
+      // callback boundary.
+    }
+    close(release->fd);
   }
 
   bool modifierSupported(VkFormat candidateFormat, std::uint64_t modifier) const {
@@ -393,8 +402,9 @@ struct CefGpuFrameBridge::Impl {
     list.pDrmFormatModifierProperties = modifiers.data();
     vkGetPhysicalDeviceFormatProperties2(graphics.physicalDevice(), candidateFormat, &properties);
     return std::ranges::any_of(modifiers, [modifier](const auto& candidate) {
-      return candidate.drmFormatModifier == modifier && candidate.drmFormatModifierPlaneCount == 1
-          && (candidate.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) != 0;
+      return candidate.drmFormatModifier == modifier
+          && candidate.drmFormatModifierPlaneCount == 1
+          && (candidate.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
     });
   }
 
@@ -450,20 +460,26 @@ struct CefGpuFrameBridge::Impl {
     if (frame.acquireFenceFd < 0) {
       throw std::runtime_error("CEF DMA-BUF did not provide a producer acquire fence");
     }
+    if (frame.imageLayout != VK_IMAGE_LAYOUT_GENERAL) {
+      throw std::runtime_error(std::format("CEF DMA-BUF has unsupported handoff layout {}", frame.imageLayout));
+    }
+    if (frame.queueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL_KHR) {
+      throw std::runtime_error(
+          std::format("CEF DMA-BUF has unsupported handoff queue family {}", frame.queueFamilyIndex)
+      );
+    }
     if (frame.planes[0].stride < static_cast<std::uint32_t>(frame.width) * 4U) {
       throw std::runtime_error("CEF DMA-BUF stride is smaller than its pixel width");
     }
     if (!modifierSupported(candidateFormat, frame.modifier)) {
-      throw std::runtime_error("CEF DMA-BUF modifier is not transfer-source capable on the selected GPU");
+      throw std::runtime_error("CEF DMA-BUF modifier is not sampleable on the selected GPU");
     }
     if (!externalImportSupported(candidateFormat, frame.modifier)) {
       throw std::runtime_error("CEF DMA-BUF format/modifier is not importable as external Vulkan memory");
     }
   }
 
-  std::unique_ptr<ImportedSource> importSource(
-      const BorrowedDmabufFrame& frame, VkFormat candidateFormat
-  ) {
+  std::unique_ptr<ImportedSource> importSource(const BorrowedDmabufFrame& frame, VkFormat candidateFormat) {
     NOCTALIA_TRACE_ZONE("CEF import DMA-BUF image");
     auto source = std::make_unique<ImportedSource>();
     source->device = graphics.device();
@@ -471,12 +487,10 @@ struct CefGpuFrameBridge::Impl {
     source->tracked = true;
     ++lifetimeStats.importsCreated;
     ++lifetimeStats.activeImports;
-    lifetimeStats.peakImports = std::max(lifetimeStats.peakImports, lifetimeStats.activeImports);
     source->duplicatedFd = ::dup(frame.planes[0].fd);
     if (source->duplicatedFd < 0) {
       throw std::runtime_error(std::format("dup(CEF DMA-BUF) failed: {}", std::strerror(errno)));
     }
-    ++lifetimeStats.dmabufFdsDuplicated;
 
     const VkSubresourceLayout planeLayout{
         .offset = frame.planes[0].offset,
@@ -531,13 +545,14 @@ struct CefGpuFrameBridge::Impl {
     const std::uint32_t compatibleMemoryTypes =
         requirements.memoryRequirements.memoryTypeBits & fdProperties.memoryTypeBits;
     if (compatibleMemoryTypes == 0) {
-      throw std::runtime_error(std::format(
-          "CEF DMA-BUF has no memory type compatible with the modifier image (image=0x{:08x}, fd=0x{:08x})",
-          requirements.memoryRequirements.memoryTypeBits, fdProperties.memoryTypeBits
-      ));
+      throw std::runtime_error(
+          std::format(
+              "CEF DMA-BUF has no memory type compatible with the modifier image (image=0x{:08x}, fd=0x{:08x})",
+              requirements.memoryRequirements.memoryTypeBits, fdProperties.memoryTypeBits
+          )
+      );
     }
-    const std::uint32_t memoryTypeIndex =
-        chooseMemoryType(graphics.physicalDevice(), compatibleMemoryTypes, 0);
+    const std::uint32_t memoryTypeIndex = chooseMemoryType(graphics.physicalDevice(), compatibleMemoryTypes, 0);
     const VkImportMemoryFdInfoKHR importInfo{
         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
         .handleType = kDmabufHandle,
@@ -558,28 +573,29 @@ struct CefGpuFrameBridge::Impl {
     if (allocation == VK_SUCCESS) {
       // Vulkan consumes the imported descriptor on successful allocation.
       source->duplicatedFd = -1;
-      ++lifetimeStats.dmabufFdsTransferred;
     }
     requireVulkan(allocation, "vkAllocateMemory(CEF import)");
     requireVulkan(
-        vkBindImageMemory(graphics.device(), source->image, source->memory, 0),
-        "vkBindImageMemory(CEF import)"
+        vkBindImageMemory(graphics.device(), source->image, source->memory, 0), "vkBindImageMemory(CEF import)"
     );
     return source;
   }
 
   ImportKey importKey(const BorrowedDmabufFrame& frame) const {
-    struct stat fdStat {};
+    struct stat fdStat{};
     if (fstat(frame.planes[0].fd, &fdStat) != 0) {
       throw std::runtime_error(std::format("fstat(CEF DMA-BUF) failed: {}", std::strerror(errno)));
     }
     return {
+        .transportEpoch = frame.transportEpoch,
         .fileDevice = static_cast<std::uint64_t>(fdStat.st_dev),
         .inode = static_cast<std::uint64_t>(fdStat.st_ino),
         .width = frame.width,
         .height = frame.height,
         .fourcc = frame.fourcc,
         .modifier = frame.modifier,
+        .queueFamilyIndex = frame.queueFamilyIndex,
+        .imageLayout = frame.imageLayout,
         .stride = frame.planes[0].stride,
         .offset = frame.planes[0].offset,
     };
@@ -587,21 +603,18 @@ struct CefGpuFrameBridge::Impl {
 
   void wrapImportedSource(CachedImport& cached, VkFormat candidateFormat) {
     const skgpu::graphite::VulkanTextureInfo textureInfo(
-        VK_SAMPLE_COUNT_1_BIT, skgpu::Mipmapped::kNo, 0, candidateFormat,
-        VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT, kCefImportedImageUsage,
-        VK_SHARING_MODE_EXCLUSIVE, VK_IMAGE_ASPECT_COLOR_BIT,
-        skgpu::VulkanYcbcrConversionInfo{}
+        VK_SAMPLE_COUNT_1_BIT, skgpu::Mipmapped::kNo, 0, candidateFormat, VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        kCefImportedImageUsage, VK_SHARING_MODE_EXCLUSIVE, VK_IMAGE_ASPECT_COLOR_BIT, skgpu::VulkanYcbcrConversionInfo{}
     );
     cached.backendTexture = skgpu::graphite::BackendTextures::MakeVulkan(
-        SkISize::Make(cached.key.width, cached.key.height), textureInfo,
-        VK_IMAGE_LAYOUT_GENERAL, graphics.graphicsQueueFamily(), cached.source->image, {}
+        SkISize::Make(cached.key.width, cached.key.height), textureInfo, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        graphics.graphicsQueueFamily(), cached.source->image, {}
     );
     if (!cached.backendTexture.isValid()) {
       throw std::runtime_error("Skia rejected a cached CEF DMA-BUF import");
     }
     cached.skImage = SkImages::WrapTexture(
-        graphics.recorder(), cached.backendTexture, kPremul_SkAlphaType,
-        SkColorSpace::MakeSRGB()
+        graphics.recorder(), cached.backendTexture, kPremul_SkAlphaType, SkColorSpace::MakeSRGB()
     );
     if (cached.skImage == nullptr) {
       throw std::runtime_error("Skia failed to wrap a cached CEF DMA-BUF import");
@@ -615,22 +628,18 @@ struct CefGpuFrameBridge::Impl {
     if (found != importCache.end()) {
       ++lifetimeStats.importCacheHits;
       found->lastUsed = ++importUseSequence;
-      NOCTALIA_TRACE_PLOT(
-          "CEF DMA-BUF import cache hits",
-          static_cast<std::int64_t>(lifetimeStats.importCacheHits)
-      );
+      NOCTALIA_TRACE_PLOT("CEF DMA-BUF import cache hits", static_cast<std::int64_t>(lifetimeStats.importCacheHits));
       return *found;
     }
 
     ++lifetimeStats.importCacheMisses;
     if (importCache.size() >= kMaxCachedImports) {
       const auto oldest = std::ranges::min_element(importCache, {}, &CachedImport::lastUsed);
-      waitForCompletion(oldest->lastCompletionValue, true);
+      waitForCompletion(oldest->lastCompletionValue);
       importCache.erase(oldest);
       ++lifetimeStats.importCacheEvictions;
       NOCTALIA_TRACE_PLOT(
-          "CEF DMA-BUF import cache evictions",
-          static_cast<std::int64_t>(lifetimeStats.importCacheEvictions)
+          "CEF DMA-BUF import cache evictions", static_cast<std::int64_t>(lifetimeStats.importCacheEvictions)
       );
     }
     CachedImport cached{
@@ -640,14 +649,8 @@ struct CefGpuFrameBridge::Impl {
     };
     wrapImportedSource(cached, candidateFormat);
     importCache.push_back(std::move(cached));
-    NOCTALIA_TRACE_PLOT(
-        "CEF DMA-BUF import cache misses",
-        static_cast<std::int64_t>(lifetimeStats.importCacheMisses)
-    );
-    NOCTALIA_TRACE_PLOT(
-        "CEF DMA-BUF import cache entries",
-        static_cast<std::int64_t>(importCache.size())
-    );
+    NOCTALIA_TRACE_PLOT("CEF DMA-BUF import cache misses", static_cast<std::int64_t>(lifetimeStats.importCacheMisses));
+    NOCTALIA_TRACE_PLOT("CEF DMA-BUF import cache entries", static_cast<std::int64_t>(importCache.size()));
     return importCache.back();
   }
 
@@ -657,7 +660,6 @@ struct CefGpuFrameBridge::Impl {
     if (duplicatedFd < 0) {
       throw std::runtime_error(std::format("dup(CEF acquire fence) failed: {}", std::strerror(errno)));
     }
-    ++lifetimeStats.fenceFdsDuplicated;
     const VkImportSemaphoreFdInfoKHR importInfo{
         .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,
         .semaphore = semaphore,
@@ -669,39 +671,33 @@ struct CefGpuFrameBridge::Impl {
     if (imported == VK_SUCCESS) {
       // A successful SYNC_FD import transfers descriptor ownership to Vulkan.
       duplicatedFd = -1;
-      ++lifetimeStats.fenceFdsTransferred;
     }
     if (duplicatedFd >= 0) {
       ::close(duplicatedFd);
-      ++lifetimeStats.fenceFdsClosed;
     }
     requireVulkan(imported, "vkImportSemaphoreFdKHR(CEF acquire)");
     return semaphore;
   }
 
-  void recordDirectAcquire(VkCommandBuffer commandBuffer, VkImage image) {
+  void recordDirectAcquire(
+      VkCommandBuffer commandBuffer, VkImage image, std::uint32_t handoffQueueFamily, VkImageLayout handoffLayout
+  ) {
     NOCTALIA_TRACE_ZONE("CEF record direct-sampling acquire");
-    requireVulkan(
-        vkResetCommandBuffer(commandBuffer, 0),
-        "vkResetCommandBuffer(CEF direct acquire)"
-    );
+    requireVulkan(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer(CEF direct acquire)");
     const VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    requireVulkan(
-        vkBeginCommandBuffer(commandBuffer, &beginInfo),
-        "vkBeginCommandBuffer(CEF direct acquire)"
-    );
+    requireVulkan(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(CEF direct acquire)");
     const VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
         .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = importedQueueFamily,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+        .oldLayout = handoffLayout,
+        .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .srcQueueFamilyIndex = handoffQueueFamily,
         .dstQueueFamilyIndex = graphics.graphicsQueueFamily(),
         .image = image,
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
@@ -712,36 +708,29 @@ struct CefGpuFrameBridge::Impl {
         .pImageMemoryBarriers = &barrier,
     };
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
-    requireVulkan(
-        vkEndCommandBuffer(commandBuffer),
-        "vkEndCommandBuffer(CEF direct acquire)"
-    );
+    requireVulkan(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(CEF direct acquire)");
   }
 
-  void recordDirectRelease(VkCommandBuffer commandBuffer, VkImage image) {
+  void recordDirectRelease(
+      VkCommandBuffer commandBuffer, VkImage image, std::uint32_t handoffQueueFamily, VkImageLayout handoffLayout
+  ) {
     NOCTALIA_TRACE_ZONE("CEF record direct-sampling release");
-    requireVulkan(
-        vkResetCommandBuffer(commandBuffer, 0),
-        "vkResetCommandBuffer(CEF direct release)"
-    );
+    requireVulkan(vkResetCommandBuffer(commandBuffer, 0), "vkResetCommandBuffer(CEF direct release)");
     const VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    requireVulkan(
-        vkBeginCommandBuffer(commandBuffer, &beginInfo),
-        "vkBeginCommandBuffer(CEF direct release)"
-    );
+    requireVulkan(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer(CEF direct release)");
     const VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_NONE,
         .dstAccessMask = VK_ACCESS_2_NONE,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .newLayout = handoffLayout,
         .srcQueueFamilyIndex = graphics.graphicsQueueFamily(),
-        .dstQueueFamilyIndex = importedQueueFamily,
+        .dstQueueFamilyIndex = handoffQueueFamily,
         .image = image,
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
     };
@@ -751,28 +740,34 @@ struct CefGpuFrameBridge::Impl {
         .pImageMemoryBarriers = &barrier,
     };
     vkCmdPipelineBarrier2(commandBuffer, &dependency);
-    requireVulkan(
-        vkEndCommandBuffer(commandBuffer),
-        "vkEndCommandBuffer(CEF direct release)"
-    );
+    requireVulkan(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer(CEF direct release)");
   }
 
   bool preparePendingDirectFrame() {
-    if (pendingSlot == nullptr || pendingImport == nullptr) {
+    if (!pendingFrame) {
       return false;
     }
-    if (pendingPrepared) {
+    PendingFrame& pending = *pendingFrame;
+    if (pending.prepared) {
       return true;
     }
-    recordDirectAcquire(pendingSlot->commandBuffer, pendingImport->source->image);
+    recordDirectAcquire(
+        pending.slot->commandBuffer, pending.imported->source->image, pending.imported->key.queueFamilyIndex,
+        static_cast<VkImageLayout>(pending.imported->key.imageLayout)
+    );
     const VkSemaphoreSubmitInfo waitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-        .semaphore = pendingSlot->acquireSemaphore,
-        .stageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .semaphore = pending.slot->acquireSemaphore,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
     const VkCommandBufferSubmitInfo commandInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-        .commandBuffer = pendingSlot->commandBuffer,
+        .commandBuffer = pending.slot->commandBuffer,
+    };
+    const VkSemaphoreSubmitInfo signalInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = pending.slot->acquireCompleteSemaphore,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
     const VkSubmitInfo2 submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
@@ -780,31 +775,58 @@ struct CefGpuFrameBridge::Impl {
         .pWaitSemaphoreInfos = &waitInfo,
         .commandBufferInfoCount = 1,
         .pCommandBufferInfos = &commandInfo,
+        .signalSemaphoreInfoCount = 1,
+        .pSignalSemaphoreInfos = &signalInfo,
     };
     requireVulkan(
-        vkQueueSubmit2(graphics.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE),
-        "vkQueueSubmit2(CEF direct acquire)"
+        vkQueueSubmit2(graphics.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE), "vkQueueSubmit2(CEF direct acquire)"
     );
-    pendingPrepared = true;
+    pending.prepared = true;
+    pending.acquireCompletionWait = true;
     return true;
   }
 
-  void releasePendingDirectFrame(bool sampled) {
-    if (pendingSlot == nullptr || pendingImport == nullptr) {
-      return;
+  [[nodiscard]] std::optional<PendingRelease> releasePendingDirectFrame() {
+    if (!pendingFrame) {
+      return std::nullopt;
+    }
+    if (pendingFrame->outputGeneration == 0 || pendingFrame->contentSerial == 0) {
+      throw std::runtime_error("pending CEF frame lost its output identity");
     }
     if (!preparePendingDirectFrame()) {
-      return;
+      return std::nullopt;
     }
-    FrameSlot& slot = *pendingSlot;
-    CachedImport& imported = *pendingImport;
-    const std::int64_t captureCounter = pendingCaptureCounter;
-    recordDirectRelease(slot.releaseCommandBuffer, imported.source->image);
+    PendingFrame pending = *pendingFrame;
+    FrameSlot& slot = *pending.slot;
+    CachedImport& imported = *pending.imported;
+    recordDirectRelease(
+        slot.releaseCommandBuffer, imported.source->image, imported.key.queueFamilyIndex,
+        static_cast<VkImageLayout>(imported.key.imageLayout)
+    );
     const std::uint64_t completionValue = ++nextCompletionValue;
     const VkCommandBufferSubmitInfo commandInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
         .commandBuffer = slot.releaseCommandBuffer,
     };
+    const VkSemaphoreSubmitInfo graphiteWaitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = completionTimeline,
+        .value = pending.graphiteCompletionValue,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    };
+    const VkSemaphoreSubmitInfo acquireWaitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = slot.acquireCompleteSemaphore,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    };
+    std::array<VkSemaphoreSubmitInfo, 2> waits{};
+    std::uint32_t waitCount = 0;
+    if (pending.acquireCompletionWait) {
+      waits[waitCount++] = acquireWaitInfo;
+    }
+    if (pending.graphiteCompletionValue != 0) {
+      waits[waitCount++] = graphiteWaitInfo;
+    }
     const std::array signals{
         VkSemaphoreSubmitInfo{
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -820,58 +842,66 @@ struct CefGpuFrameBridge::Impl {
     };
     const VkSubmitInfo2 submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .waitSemaphoreInfoCount = waitCount,
+        .pWaitSemaphoreInfos = waitCount != 0 ? waits.data() : nullptr,
         .commandBufferInfoCount = 1,
         .pCommandBufferInfos = &commandInfo,
         .signalSemaphoreInfoCount = static_cast<std::uint32_t>(signals.size()),
         .pSignalSemaphoreInfos = signals.data(),
     };
     requireVulkan(
-        vkQueueSubmit2(graphics.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE),
-        "vkQueueSubmit2(CEF direct release)"
+        vkQueueSubmit2(graphics.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE), "vkQueueSubmit2(CEF direct release)"
     );
     slot.completionValue = completionValue;
     imported.lastCompletionValue = completionValue;
-    ++lifetimeStats.completionValuesSubmitted;
     const VkSemaphoreGetFdInfoKHR releaseFdInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
         .semaphore = slot.releaseSemaphore,
         .handleType = kSyncFdHandle,
     };
     int fd = -1;
-    requireVulkan(
-        getSemaphoreFd(graphics.device(), &releaseFdInfo, &fd),
-        "vkGetSemaphoreFdKHR(CEF direct release)"
-    );
+    requireVulkan(getSemaphoreFd(graphics.device(), &releaseFdInfo, &fd), "vkGetSemaphoreFdKHR(CEF direct release)");
     ++lifetimeStats.releaseFenceFdsExported;
-    if (sampled) {
+    if (pending.sampled) {
       ++lifetimeStats.directFramesSampled;
     } else {
       ++lifetimeStats.directFramesDiscarded;
     }
-    pendingSlot = nullptr;
-    pendingImport = nullptr;
-    pendingCaptureCounter = -1;
-    pendingPrepared = false;
-    pendingSampled = false;
-    if (releaseFenceCallback) {
-      releaseFenceCallback(captureCounter, fd);
-      close(fd);
-    } else {
-      if (releaseFenceFd >= 0) {
-        close(releaseFenceFd);
-      }
-      releaseFenceFd = fd;
-    }
+    pendingFrame.reset();
+    return PendingRelease{
+        .transportEpoch = pending.transportEpoch,
+        .captureCounter = pending.captureCounter,
+        .fd = fd,
+    };
   }
 
-  bool accept(const BorrowedDmabufFrame& frame) {
+  bool accept(const BorrowedDmabufFrame& frame) noexcept {
     NOCTALIA_TRACE_ZONE("CEF GPU frame bridge accept");
-    std::scoped_lock lock(mutex);
+    std::optional<PendingRelease> release;
     try {
+      std::unique_lock lock(mutex);
       const VkFormat candidateFormat = formatForFourcc(frame.fourcc);
       validate(frame, candidateFormat);
+      if (frame.transportEpoch == 0) {
+        throw std::runtime_error("CEF direct-sampling frame has no transport epoch");
+      }
       if (frame.captureCounter < 0) {
         throw std::runtime_error("CEF direct-sampling frame has no capture counter");
+      }
+      if (frame.outputGeneration == 0 || frame.contentSerial == 0) {
+        throw std::runtime_error("CEF direct-sampling frame has incomplete output identity");
+      }
+      if (frame.transportEpoch < lastTransportEpoch) {
+        throw std::runtime_error("CEF direct-sampling frame has a stale transport epoch");
+      }
+      if (frame.transportEpoch == lastTransportEpoch
+          && (frame.outputGeneration < lastOutputGeneration
+              || (frame.outputGeneration == lastOutputGeneration && frame.contentSerial <= lastContentSerial))) {
+        throw std::runtime_error("CEF direct-sampling frame identity is stale or reordered");
+      }
+      if (frame.transportEpoch > lastTransportEpoch) {
+        lastOutputGeneration = 0;
+        lastContentSerial = 0;
       }
       // A newer paint can supersede a frame before the scene draws it. It still
       // needs a balanced acquire/release so Viz can recycle it.
@@ -879,123 +909,159 @@ struct CefGpuFrameBridge::Impl {
       // is rebound below. The scene may be redrawn for reasons unrelated to a
       // new CEF paint, so releasing immediately after its first sample would
       // leave the texture handle pointing at memory CEF is free to rewrite.
-      releasePendingDirectFrame(pendingSampled);
+      release = releasePendingDirectFrame();
       FrameSlot& slot = acquireFrameSlot();
       CachedImport& source = cachedSource(frame, candidateFormat);
       (void)importAcquireFence(frame, slot.acquireSemaphore);
-      pendingSlot = &slot;
-      pendingImport = &source;
-      pendingCaptureCounter = frame.captureCounter;
-      pendingPrepared = false;
-      pendingSampled = false;
+      pendingFrame = PendingFrame{
+          .slot = &slot,
+          .imported = &source,
+          .transportEpoch = frame.transportEpoch,
+          .captureCounter = frame.captureCounter,
+          .outputGeneration = frame.outputGeneration,
+          .contentSerial = frame.contentSerial,
+      };
+      lastOutputGeneration = frame.outputGeneration;
+      lastContentSerial = frame.contentSerial;
+      lastTransportEpoch = frame.transportEpoch;
       if (!textureHandle.valid()) {
-        textureHandle = textures->adoptExternalImage(
-            source.skImage, frame.width, frame.height, TextureFilter::Linear,
-            synchronizationOwner
+        textureHandle = textures.adoptExternalImage(
+            source.skImage, frame.width, frame.height, TextureFilter::Linear, synchronizationOwner
         );
         if (!textureHandle.valid()) {
           throw std::runtime_error("failed to register direct CEF image with texture manager");
         }
-      } else if (!textures->rebindExternalImage(
-                     textureHandle, source.skImage, frame.width, frame.height
-                 )) {
+      } else if (!textures.rebindExternalImage(textureHandle, source.skImage, frame.width, frame.height)) {
         throw std::runtime_error("failed to rebind direct CEF image");
       }
-      format = candidateFormat;
-      imageWidth = frame.width;
-      imageHeight = frame.height;
-      skImage = source.skImage;
       ++lifetimeStats.framesAccepted;
       ++lifetimeStats.directFramesStaged;
-      NOCTALIA_TRACE_PLOT(
-          "CEF direct frames staged",
-          static_cast<std::int64_t>(lifetimeStats.directFramesStaged)
-      );
+      NOCTALIA_TRACE_PLOT("CEF direct frames staged", static_cast<std::int64_t>(lifetimeStats.directFramesStaged));
       error.clear();
+      lock.unlock();
+      deliverRelease(std::move(release));
       return true;
     } catch (const std::exception& exception) {
       setError(exception.what());
+      deliverRelease(std::move(release));
+      return false;
+    } catch (...) {
+      setError("unknown failure while accepting CEF DMA-BUF");
+      deliverRelease(std::move(release));
       return false;
     }
   }
 };
 
 CefGpuFrameBridge::CefGpuFrameBridge(
-    GraphicsDevice& graphics, GraphiteTextureManager* textures,
-    ReleaseFenceCallback releaseFenceCallback
+    GraphicsDevice& graphics, GraphiteTextureManager& textures, ReleaseFenceCallback releaseFenceCallback
 )
-    : m_impl(std::make_unique<Impl>(
-          graphics, textures, std::move(releaseFenceCallback), this
-      )) {}
+    : m_impl(std::make_unique<Impl>(graphics, textures, std::move(releaseFenceCallback), this)) {}
 
 CefGpuFrameBridge::~CefGpuFrameBridge() = default;
 
-bool CefGpuFrameBridge::acceptFrame(const BorrowedDmabufFrame& frame) {
-  return m_impl->accept(frame);
-}
+bool CefGpuFrameBridge::acceptFrame(const BorrowedDmabufFrame& frame) noexcept { return m_impl->accept(frame); }
 
-int CefGpuFrameBridge::takeReleaseFenceFd() noexcept {
-  std::scoped_lock lock(m_impl->mutex);
-  return std::exchange(m_impl->releaseFenceFd, -1);
-}
-
-bool CefGpuFrameBridge::prepareForGraphiteSampling() {
+bool CefGpuFrameBridge::prepareForGraphiteSampling(GraphiteSubmissionDependency& dependency) {
   std::scoped_lock lock(m_impl->mutex);
   try {
-    return m_impl->preparePendingDirectFrame();
+    if (!m_impl->preparePendingDirectFrame() || !m_impl->pendingFrame) {
+      return false;
+    }
+    const Impl::PendingFrame& pending = *m_impl->pendingFrame;
+    dependency.waitSemaphore = pending.acquireCompletionWait ? pending.slot->acquireCompleteSemaphore : VK_NULL_HANDLE;
+    dependency.signalSemaphore = pending.slot->samplingCompleteSemaphore;
+    return true;
   } catch (const std::exception& exception) {
     m_impl->setError(exception.what());
     return false;
   }
 }
 
-void CefGpuFrameBridge::releaseAfterGraphiteSampling() {
+void CefGpuFrameBridge::finishGraphiteSampling(const GraphiteSubmissionDependency& dependency, bool submitted) {
   std::scoped_lock lock(m_impl->mutex);
-  if (m_impl->pendingSlot != nullptr) {
+  if (m_impl->pendingFrame
+      && submitted
+      && dependency.signalSemaphore == m_impl->pendingFrame->slot->samplingCompleteSemaphore) {
+    Impl::PendingFrame& pending = *m_impl->pendingFrame;
+    if (dependency.waitSemaphore == pending.slot->acquireCompleteSemaphore) {
+      pending.acquireCompletionWait = false;
+    }
+    const std::uint64_t completionValue = ++m_impl->nextCompletionValue;
+    const VkSemaphoreSubmitInfo waitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = dependency.signalSemaphore,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    };
+    const VkSemaphoreSubmitInfo signalInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = m_impl->completionTimeline,
+        .value = completionValue,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    };
+    const VkSubmitInfo2 submitInfo{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .waitSemaphoreInfoCount = 1,
+        .pWaitSemaphoreInfos = &waitInfo,
+        .signalSemaphoreInfoCount = 1,
+        .pSignalSemaphoreInfos = &signalInfo,
+    };
+    const VkResult result = vkQueueSubmit2(m_impl->graphics.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS) {
+      m_impl->setError(std::format("vkQueueSubmit2(CEF Graphite completion) failed: {}", vulkanResultName(result)));
+      return;
+    }
+    // Translate the exact binary semaphore signaled by Graphite into the
+    // bridge timeline. One imported image can remain the live scene texture
+    // across many redraws, so its eventual EXTERNAL release waits for the
+    // newest Graphite submission that sampled it.
+    pending.graphiteCompletionValue = completionValue;
     // Retain ownership of the currently displayed buffer. It is released when
     // acceptFrame atomically rebinds the texture to its replacement.
-    m_impl->pendingSampled = true;
+    pending.sampled = true;
   }
 }
 
 void CefGpuFrameBridge::discardPendingFrame() {
-  std::scoped_lock lock(m_impl->mutex);
+  std::optional<Impl::PendingRelease> release;
   try {
-    m_impl->releasePendingDirectFrame(m_impl->pendingSampled);
+    {
+      std::scoped_lock lock(m_impl->mutex);
+      release = m_impl->releasePendingDirectFrame();
+    }
   } catch (const std::exception& exception) {
     m_impl->setError(exception.what());
+  } catch (...) {
+    m_impl->setError("unknown failure while discarding CEF DMA-BUF");
   }
+  m_impl->deliverRelease(std::move(release));
 }
 
 void CefGpuFrameBridge::abandonDevice() noexcept {
   std::scoped_lock lock(m_impl->mutex);
   m_impl->deviceAbandoned = true;
-  m_impl->pendingSlot = nullptr;
-  m_impl->pendingImport = nullptr;
-  m_impl->pendingCaptureCounter = -1;
-  m_impl->pendingPrepared = false;
-  m_impl->pendingSampled = false;
+  m_impl->pendingFrame.reset();
 }
 
 void CefGpuFrameBridge::invalidate() {
-  std::scoped_lock lock(m_impl->mutex);
+  std::optional<Impl::PendingRelease> release;
   try {
-    m_impl->releasePendingDirectFrame(m_impl->pendingSampled);
+    {
+      std::scoped_lock lock(m_impl->mutex);
+      release = m_impl->releasePendingDirectFrame();
+      m_impl->waitForGraphiteUse();
+      m_impl->releaseTexture();
+      m_impl->importCache.clear();
+    }
   } catch (const std::exception& exception) {
     m_impl->setError(exception.what());
+  } catch (...) {
+    m_impl->setError("unknown failure while invalidating CEF DMA-BUF bridge");
   }
-  m_impl->waitForGraphiteUse();
-  m_impl->releaseTexture();
-  m_impl->importCache.clear();
+  m_impl->deliverRelease(std::move(release));
 }
 
-SkImage* CefGpuFrameBridge::image() const noexcept { return m_impl->skImage.get(); }
 TextureHandle CefGpuFrameBridge::texture() const noexcept { return m_impl->textureHandle; }
-int CefGpuFrameBridge::width() const noexcept { return m_impl->imageWidth; }
-int CefGpuFrameBridge::height() const noexcept { return m_impl->imageHeight; }
-std::uint64_t CefGpuFrameBridge::acceptedFrameCount() const noexcept {
-  return m_impl->lifetimeStats.framesAccepted;
-}
 CefGpuFrameBridgeStats CefGpuFrameBridge::stats() const noexcept {
   std::scoped_lock lock(m_impl->mutex);
   return m_impl->lifetimeStats;

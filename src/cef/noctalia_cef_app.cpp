@@ -1,7 +1,6 @@
 #include "cef/noctalia_cef_app.h"
 
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -133,30 +132,11 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
   // enabling it in the browser process.
   appendCommaSeparatedSwitchValue(cmd, "disable-features", "ImmersiveReadAnything");
   appendCommaSeparatedSwitchValue(cmd, "enable-features", "OverlayScrollbar");
-  // GPU compositing remains enabled: production OSR requires shared textures.
-  // Keep ANGLE on Vulkan so CEF allocates exportable native pixmaps instead of
-  // taking its GL framebuffer path, which cannot back accelerated OSR on the
-  // NVIDIA Wayland configuration used by Noctalia.
-  const char* ozonePlatform = std::getenv("NOCTALIA_CEF_OZONE_PLATFORM");
-  if (ozonePlatform == nullptr || ozonePlatform[0] == '\0') {
-    ozonePlatform = "wayland";
-  }
-  cmd->AppendSwitchWithValue("ozone-platform", ozonePlatform);
-  const char* angleBackend = std::getenv("NOCTALIA_CEF_ANGLE");
-  if (angleBackend == nullptr || angleBackend[0] == '\0') {
-    angleBackend = "vulkan";
-  }
-  cmd->AppendSwitchWithValue("use-angle", angleBackend);
-  // ANGLE's Vulkan backend writes directly into the exportable Wayland native
-  // pixmap. Chromium's separate native-Vulkan compositor is not supported by
-  // Ozone Wayland here and NVIDIA services it through a shadow representation;
-  // the exported DMA-BUF then remains zero to external Vulkan consumers.
-  // Keep native Chromium Vulkan as an explicit diagnostic opt-in only.
-  const char* nativeVulkan = std::getenv("NOCTALIA_CEF_NATIVE_VULKAN");
-  if (std::strcmp(angleBackend, "vulkan") == 0
-      && nativeVulkan != nullptr && std::strcmp(nativeVulkan, "1") == 0) {
-    appendCommaSeparatedSwitchValue(cmd, "enable-features", "Vulkan");
-  }
+  // The accelerated OSR contract is Wayland + ANGLE Vulkan. ANGLE writes into
+  // the exportable native pixmap consumed by Noctalia; Chromium's separate
+  // native-Vulkan compositor is not part of this path.
+  cmd->AppendSwitchWithValue("ozone-platform", "wayland");
+  cmd->AppendSwitchWithValue("use-angle", "vulkan");
 }
 
 void NoctaliaCefApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) {

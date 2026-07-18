@@ -52,11 +52,10 @@ public:
   [[nodiscard]] virtual TextureHandle
   createEmpty(int width, int height, TextureDataFormat format, TextureFilter filter = TextureFilter::Linear) = 0;
 
-  // Streaming BGRA surface for high-rate full-frame sources (embedded browser).
-  // createBgraSurface allocates the texture once; updateBgraSurface re-uploads a
-  // full BGRA frame in place — no reallocation, and no CPU swizzle where
-  // GL_EXT_texture_format_BGRA8888 is available. The frame must match the
-  // surface dimensions and be tightly packed (stride == width*4).
+  // Streaming BGRA surface for high-rate full-frame sources.
+  // createBgraSurface allocates the texture once; updateBgraSurface re-uploads
+  // a full BGRA frame in place. The frame must match the surface dimensions
+  // and be tightly packed (stride == width*4).
   [[nodiscard]] virtual TextureHandle createBgraSurface(int width, int height) = 0;
   virtual bool updateBgraSurface(TextureHandle& handle, const std::uint8_t* data, int width, int height) = 0;
 
@@ -72,8 +71,6 @@ public:
   // Forget GL names without deleting them. Used after a robust-context reset,
   // when every object in the old share group is already invalid.
   virtual void abandonGpuResources() noexcept = 0;
-
-  virtual void probeExtensions() = 0;
 
 protected:
   TextureManager() = default;

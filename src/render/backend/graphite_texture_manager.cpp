@@ -566,6 +566,25 @@ void GraphiteTextureManager::cleanup() {
   }
 }
 
+void GraphiteTextureManager::abandonGpuResources() noexcept {
+  if (m_impl == nullptr) {
+    return;
+  }
+  for (auto& entry : m_impl->entries) {
+    entry.image.reset();
+    entry.backendTexture = {};
+    entry.width = 0;
+    entry.height = 0;
+    entry.externalSynchronization = nullptr;
+    entry.generation = 0;
+  }
+  m_impl->freeSlots.clear();
+  m_impl->freeSlots.reserve(m_impl->entries.size());
+  for (std::uint32_t slot = 0; slot < m_impl->entries.size(); ++slot) {
+    m_impl->freeSlots.push_back(slot);
+  }
+}
+
 SkImage* GraphiteTextureManager::image(TextureId id) const noexcept {
   const auto* entry = m_impl != nullptr ? m_impl->lookup(id) : nullptr;
   return entry != nullptr ? entry->image.get() : nullptr;

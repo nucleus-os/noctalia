@@ -4,19 +4,28 @@
 #include "render/backend/graphite_resource_observer.h"
 #include "render/core/texture_manager.h"
 
+#include <vulkan/vulkan.h>
+
 #include <memory>
 
 class GraphicsDevice;
 class SkImage;
 
+struct GraphiteSubmissionDependency {
+  VkSemaphore waitSemaphore = VK_NULL_HANDLE;
+  VkSemaphore signalSemaphore = VK_NULL_HANDLE;
+};
+
 // Synchronizes an externally-owned Vulkan image with the Graphite queue. The
 // prepare call happens only for a frame that actually records a draw using the
-// image; release happens immediately after that recording is submitted.
+// image. Its semaphores are attached to that exact Graphite recording.
 class GraphiteExternalImageSynchronization {
 public:
   virtual ~GraphiteExternalImageSynchronization() = default;
-  [[nodiscard]] virtual bool prepareForGraphiteSampling() = 0;
-  virtual void releaseAfterGraphiteSampling() = 0;
+  [[nodiscard]] virtual bool prepareForGraphiteSampling(GraphiteSubmissionDependency& dependency) = 0;
+  // Called after the recording that referenced the image either reached
+  // Graphite's submission queue or failed before submission.
+  virtual void finishGraphiteSampling(const GraphiteSubmissionDependency& dependency, bool submitted) = 0;
 };
 
 class GraphiteTextureManager final : public TextureManager {
@@ -50,7 +59,7 @@ public:
   ) override;
   void unload(TextureHandle& handle) override;
   void cleanup() override;
-  void probeExtensions() override {}
+  void abandonGpuResources() noexcept override;
 
   [[nodiscard]] SkImage* image(TextureId id) const noexcept;
   [[nodiscard]] TextureFilter filter(TextureId id) const noexcept;

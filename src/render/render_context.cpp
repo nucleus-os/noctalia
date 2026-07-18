@@ -97,7 +97,6 @@ void RenderContext::initializeGraphite(GraphicsDevice& graphics) {
   cleanup();
   m_deviceLossHandled = false;
   m_backend = createGraphiteRenderBackend(graphics);
-  m_backend->textureManager().probeExtensions();
   m_textRenderer.initialize(m_backend.get());
   m_glyphRenderer.initialize(paths::assetPath("fonts/tabler.ttf").string(), m_backend.get());
   m_textFontFamily = "sans-serif";

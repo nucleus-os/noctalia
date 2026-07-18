@@ -43,6 +43,16 @@ void GraphiteFramebuffer::onGraphiteTextureManagerDestroying() noexcept {
   m_snapshotGeneration = 0;
 }
 
+void GraphiteFramebuffer::abandon() noexcept {
+  if (m_textures != nullptr) {
+    m_textures->removeObserver(*this);
+  }
+  m_surface.reset();
+  m_color = {};
+  m_textures = nullptr;
+  m_snapshotGeneration = 0;
+}
+
 TextureId GraphiteFramebuffer::colorTexture() const noexcept { return refreshSnapshot() ? m_color.id : TextureId{}; }
 
 SkCanvas* GraphiteFramebuffer::canvas() const noexcept {

@@ -87,26 +87,34 @@ int main() {
   assert(sixty->deadlineDeltaNs == 15'666'667);
   assert(!scheduler.acknowledge(sixty->id, true, 242'000'000));
 
-  // Urgency survives opportunity coalescing and wakes an idle-suppressed page.
-  for (std::uint32_t i = 0; i < CefExternalFrameScheduler::kIdleNoDamageThreshold; ++i) {
+  // No-damage acknowledgments must not stop the compositor-paced callback
+  // chain. Future BeginFrames are what advance autonomous web animations and
+  // discover their future damage.
+  for (std::uint32_t i = 0; i < 8; ++i) {
     const auto quiet = scheduler.onFrameOpportunity(220'000'000 + i * 7'000'000);
     assert(quiet);
     assert(!scheduler.acknowledge(quiet->id, false, 221'000'000 + i * 7'000'000));
+    assert(scheduler.needsFrameOpportunity());
   }
-  assert(scheduler.idleSuppressed());
-  assert(!scheduler.needsFrameOpportunity());
-  assert(!scheduler.onFrameOpportunity(260'000'000));
   const auto urgent = scheduler.requestUrgent(261'000'000);
   assert(urgent && urgent->urgent);
-  assert(!scheduler.idleSuppressed());
   assert(scheduler.needsFrameOpportunity());
 
-  // Detach invalidates the in-flight generation and ignores its late ack.
+  // Detach drains the accepted request before crossing the lifecycle
+  // generation. No new frame opportunity is allowed while it drains.
   const auto oldGeneration = urgent->generation;
-  scheduler.suspend();
+  assert(scheduler.suspend());
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Draining);
   assert(!scheduler.needsFrameOpportunity());
-  assert(!scheduler.acknowledge(urgent->id, true, 262'000'000));
+  assert(!scheduler.requestUrgent(261'500'000));
+
+  // Reopening during the drain records intent but cannot overlap the accepted
+  // Chromium transaction. Its matching callback starts the new generation.
   scheduler.resume();
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Draining);
+  assert(scheduler.generation() == oldGeneration);
+  assert(!scheduler.acknowledge(urgent->id, false, 262'000'000));
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Idle);
   const auto afterResume = scheduler.requestNormal(263'000'000);
   assert(afterResume);
   assert(afterResume->generation != oldGeneration);
@@ -129,49 +137,11 @@ int main() {
   assert(scheduler.needsFrameOpportunity());
   assert(!scheduler.acknowledge(newOutput->id, true, 272'000'000));
 
-  // Idle probes bypass suppression exactly once and real damage restores the
-  // compositor-paced active path.
-  for (std::uint32_t i = 0; i < CefExternalFrameScheduler::kIdleNoDamageThreshold; ++i) {
-    const auto quiet = scheduler.onFrameOpportunity(300'000'000 + i * 7'000'000);
-    assert(quiet);
-    assert(!scheduler.acknowledge(quiet->id, false, 301'000'000 + i * 7'000'000));
-  }
-  const auto probe = scheduler.requestIdleProbe(340'000'000);
-  assert(probe);
-  assert(!scheduler.needsFrameOpportunity());
-  const auto probeGeneration = probe->generation;
-  assert(!scheduler.acknowledge(probe->id, true, 341'000'000));
-  assert(!scheduler.idleSuppressed());
-  assert(scheduler.needsFrameOpportunity());
-  const auto restarted = scheduler.onFrameOpportunity(347'000'000);
-  assert(restarted);
-  assert(restarted->generation == probeGeneration);
-  assert(!scheduler.acknowledge(restarted->id, false, 348'000'000));
-
-  // A no-damage idle probe remains quiescent and does not accidentally restart
-  // the compositor callback chain.
-  for (std::uint32_t i = scheduler.consecutiveNoDamage();
-       i < CefExternalFrameScheduler::kIdleNoDamageThreshold; ++i) {
-    const auto quiet = scheduler.onFrameOpportunity(350'000'000 + i * 7'000'000);
-    assert(quiet);
-    assert(!scheduler.acknowledge(quiet->id, false, 351'000'000 + i * 7'000'000));
-  }
-  assert(scheduler.idleSuppressed());
-  const auto quietProbe = scheduler.requestIdleProbe(390'000'000);
-  assert(quietProbe);
-  assert(!scheduler.acknowledge(quietProbe->id, false, 391'000'000));
-  assert(scheduler.idleSuppressed());
-  assert(!scheduler.needsFrameOpportunity());
-
-  // Urgent input arriving behind an idle probe is sticky. The probe's
-  // no-damage acknowledgment must immediately produce the urgent successor.
-  const auto busyProbe = scheduler.requestIdleProbe(400'000'000);
-  assert(busyProbe);
-  assert(!scheduler.requestUrgent(401'000'000));
-  const auto urgentAfterProbe =
-      scheduler.acknowledge(busyProbe->id, false, 402'000'000);
-  assert(urgentAfterProbe);
-  assert(urgentAfterProbe->urgent);
-  assert(!scheduler.idleSuppressed());
-  assert(scheduler.needsFrameOpportunity());
+  // Terminal teardown can invalidate an accepted request immediately because
+  // Chromium is destroying the callback owner at the same boundary.
+  const auto terminal = scheduler.requestNormal(273'000'000);
+  assert(terminal);
+  scheduler.forceSuspend();
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Suspended);
+  assert(!scheduler.acknowledge(terminal->id, false, 274'000'000));
 }

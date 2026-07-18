@@ -267,7 +267,7 @@ namespace {
     const auto pinned = [](PanelPlacement placement, const std::string& position) {
       return placement == PanelPlacement::Floating && position != "auto";
     };
-    if (panelId == "control-center") {
+    if (panelId == "control-center" || panelId == "apple-music") {
       return !pinned(pc.controlCenterPlacement, pc.controlCenterPosition) && pc.openNearClickControlCenter;
     }
     if (panelId == "launcher") {

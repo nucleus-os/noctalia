@@ -15,6 +15,7 @@ public:
     Suspended,
     Idle,
     InFlight,
+    Draining,
   };
 
   struct Request {
@@ -25,12 +26,14 @@ public:
     bool urgent = false;
   };
 
-  static constexpr std::uint32_t kIdleNoDamageThreshold = 4;
-
   explicit CefExternalFrameScheduler(std::int64_t fallbackIntervalNs)
       : m_fallbackIntervalNs(std::max<std::int64_t>(1, fallbackIntervalNs)) {}
 
   void resume() noexcept {
+    if (m_state == State::Draining) {
+      m_resumeAfterDrain = true;
+      return;
+    }
     ++m_generation;
     m_state = State::Idle;
     m_pending = {};
@@ -41,19 +44,29 @@ public:
     // and sequence from the new surface's feedback.
     m_lastPresentedNs = 0;
     m_lastPresentationSequence = 0;
-    m_consecutiveNoDamage = 0;
-    m_idleSuppressed = false;
   }
 
-  void suspend() noexcept {
+  [[nodiscard]] bool suspend() noexcept {
+    m_pending = {};
+    m_resumeAfterDrain = false;
+    m_lastPresentedNs = 0;
+    m_lastPresentationSequence = 0;
+    if (m_state == State::InFlight) {
+      m_state = State::Draining;
+      return true;
+    }
+    forceSuspend();
+    return false;
+  }
+
+  void forceSuspend() noexcept {
     ++m_generation;
     m_state = State::Suspended;
     m_pending = {};
     m_inFlightId = 0;
+    m_resumeAfterDrain = false;
     m_lastPresentedNs = 0;
     m_lastPresentationSequence = 0;
-    m_consecutiveNoDamage = 0;
-    m_idleSuppressed = false;
   }
 
   void onPresentation(const SurfacePresentationFeedback& feedback) noexcept {
@@ -73,56 +86,45 @@ public:
   // Records a compositor-paced opportunity. If Chromium is busy, only the
   // newest opportunity survives, while urgency is sticky until serviced.
   [[nodiscard]] std::optional<Request> onFrameOpportunity(std::int64_t nowNs) noexcept {
-    return request(nowNs, false, false);
+    return request(nowNs, false);
   }
 
   // Input, navigation, resize and explicit invalidation may request work
   // immediately instead of waiting for the next Wayland callback.
   [[nodiscard]] std::optional<Request> requestUrgent(std::int64_t nowNs) noexcept {
-    return request(nowNs, true, false);
+    return request(nowNs, true);
   }
 
   [[nodiscard]] std::optional<Request> requestNormal(std::int64_t nowNs) noexcept {
-    return request(nowNs, false, false);
-  }
-
-  // A slow idle probe is distinct from an acknowledgment watchdog. It advances
-  // a quiet page once so newly activated autonomous animation can be detected.
-  [[nodiscard]] std::optional<Request> requestIdleProbe(std::int64_t nowNs) noexcept {
-    return request(nowNs, false, true);
+    return request(nowNs, false);
   }
 
   [[nodiscard]] std::optional<Request> acknowledge(
-      std::uint64_t requestId, bool hasDamage, std::int64_t nowNs
+      std::uint64_t requestId, bool /*hasDamage*/, std::int64_t nowNs
   ) noexcept {
-    if (m_state != State::InFlight || requestId != m_inFlightId) {
+    if ((m_state != State::InFlight && m_state != State::Draining) || requestId != m_inFlightId) {
+      return std::nullopt;
+    }
+
+    if (m_state == State::Draining) {
+      const bool resumeAfterDrain = m_resumeAfterDrain;
+      if (resumeAfterDrain) {
+        m_state = State::Suspended;
+        resume();
+      } else {
+        forceSuspend();
+      }
       return std::nullopt;
     }
 
     m_state = State::Idle;
     m_inFlightId = 0;
-    if (hasDamage) {
-      m_consecutiveNoDamage = 0;
-      m_idleSuppressed = false;
-    } else {
-      m_consecutiveNoDamage = std::min(
-          m_consecutiveNoDamage + 1, kIdleNoDamageThreshold
-      );
-      m_idleSuppressed = m_consecutiveNoDamage >= kIdleNoDamageThreshold;
-    }
 
     if (!m_pending.valid) {
       return std::nullopt;
     }
     const bool urgent = m_pending.urgent;
     m_pending = {};
-    if (m_idleSuppressed && !urgent) {
-      return std::nullopt;
-    }
-    if (urgent) {
-      m_idleSuppressed = false;
-      m_consecutiveNoDamage = 0;
-    }
     return begin(nowNs, urgent);
   }
 
@@ -141,17 +143,10 @@ public:
 
   [[nodiscard]] State state() const noexcept { return m_state; }
   [[nodiscard]] bool isInFlight(std::uint64_t requestId) const noexcept {
-    return m_state == State::InFlight && m_inFlightId == requestId;
+    return (m_state == State::InFlight || m_state == State::Draining) && m_inFlightId == requestId;
   }
-  [[nodiscard]] bool idleSuppressed() const noexcept { return m_idleSuppressed; }
-  // True while the owning Wayland surface should keep a compositor-paced
-  // callback chain alive. Quiescent idle probes bypass suppression directly
-  // and re-arm the chain only when Chromium acknowledges real damage.
   [[nodiscard]] bool needsFrameOpportunity() const noexcept {
-    return m_state != State::Suspended && !m_idleSuppressed;
-  }
-  [[nodiscard]] std::uint32_t consecutiveNoDamage() const noexcept {
-    return m_consecutiveNoDamage;
+    return m_state == State::Idle || m_state == State::InFlight;
   }
   [[nodiscard]] std::uint64_t generation() const noexcept { return m_generation; }
   [[nodiscard]] std::int64_t intervalNs() const noexcept {
@@ -164,16 +159,8 @@ private:
     bool urgent = false;
   };
 
-  [[nodiscard]] std::optional<Request> request(
-      std::int64_t nowNs, bool urgent, bool bypassIdleSuppression
-  ) noexcept {
-    if (m_state == State::Suspended) {
-      return std::nullopt;
-    }
-    if (urgent) {
-      m_idleSuppressed = false;
-      m_consecutiveNoDamage = 0;
-    } else if (m_idleSuppressed && !bypassIdleSuppression) {
+  [[nodiscard]] std::optional<Request> request(std::int64_t nowNs, bool urgent) noexcept {
+    if (m_state == State::Suspended || m_state == State::Draining) {
       return std::nullopt;
     }
     if (m_state == State::InFlight) {
@@ -218,6 +205,5 @@ private:
   std::uint64_t m_generation = 0;
   std::uint64_t m_nextRequestId = 0;
   std::uint64_t m_inFlightId = 0;
-  std::uint32_t m_consecutiveNoDamage = 0;
-  bool m_idleSuppressed = false;
+  bool m_resumeAfterDrain = false;
 };

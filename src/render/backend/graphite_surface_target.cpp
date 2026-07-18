@@ -679,7 +679,11 @@ struct GraphiteSurfaceTarget::Impl {
     return image.surface->getCanvas();
   }
 
-  RenderFrameStatus end(const std::function<void()>& recordingSubmitted) {
+  RenderFrameStatus end(
+      std::span<const VkSemaphore> externalWaitSemaphores,
+      std::span<const VkSemaphore> externalSignalSemaphores,
+      const std::function<void()>& recordingSubmitted
+  ) {
     NOCTALIA_TRACE_ZONE("Graphite WSI end frame");
     if (currentFrame == nullptr || currentImage == nullptr || generation == nullptr) {
       return RenderFrameStatus::Failed;
@@ -694,14 +698,28 @@ struct GraphiteSurfaceTarget::Impl {
       currentImage = nullptr;
       return RenderFrameStatus::Failed;
     }
-    auto signalSemaphore = skgpu::graphite::BackendSemaphores::MakeVulkan(currentImage->presentSemaphore);
+    std::vector<skgpu::graphite::BackendSemaphore> waitSemaphores;
+    waitSemaphores.reserve(externalWaitSemaphores.size());
+    for (VkSemaphore semaphore : externalWaitSemaphores) {
+      waitSemaphores.push_back(skgpu::graphite::BackendSemaphores::MakeVulkan(semaphore));
+    }
+    std::vector<skgpu::graphite::BackendSemaphore> signalSemaphores;
+    signalSemaphores.reserve(externalSignalSemaphores.size() + 1U);
+    signalSemaphores.push_back(
+        skgpu::graphite::BackendSemaphores::MakeVulkan(currentImage->presentSemaphore)
+    );
+    for (VkSemaphore semaphore : externalSignalSemaphores) {
+      signalSemaphores.push_back(skgpu::graphite::BackendSemaphores::MakeVulkan(semaphore));
+    }
     auto presentState = skgpu::MutableTextureStates::MakeVulkan(
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, graphics.graphicsQueueFamily()
     );
     skgpu::graphite::InsertRecordingInfo insertInfo;
     insertInfo.fRecording = recording.get();
-    insertInfo.fNumSignalSemaphores = 1;
-    insertInfo.fSignalSemaphores = &signalSemaphore;
+    insertInfo.fNumWaitSemaphores = waitSemaphores.size();
+    insertInfo.fWaitSemaphores = waitSemaphores.data();
+    insertInfo.fNumSignalSemaphores = signalSemaphores.size();
+    insertInfo.fSignalSemaphores = signalSemaphores.data();
     insertInfo.fTargetSurface = currentImage->surface.get();
     insertInfo.fTargetTextureState = &presentState;
     {
@@ -917,8 +935,13 @@ SkCanvas* GraphiteSurfaceTarget::beginFrame(RenderFrameStatus& status) {
   return m_impl != nullptr ? m_impl->begin(status) : nullptr;
 }
 
-RenderFrameStatus GraphiteSurfaceTarget::endFrame(const std::function<void()>& recordingSubmitted) {
-  return m_impl != nullptr ? m_impl->end(recordingSubmitted) : RenderFrameStatus::Failed;
+RenderFrameStatus GraphiteSurfaceTarget::endFrame(
+    std::span<const VkSemaphore> waitSemaphores, std::span<const VkSemaphore> signalSemaphores,
+    const std::function<void()>& recordingSubmitted
+) {
+  return m_impl != nullptr
+      ? m_impl->end(waitSemaphores, signalSemaphores, recordingSubmitted)
+      : RenderFrameStatus::Failed;
 }
 
 bool GraphiteSurfaceTarget::deviceLossWasInjected() const noexcept {
