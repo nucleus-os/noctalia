@@ -2,8 +2,8 @@
 
 #include "config/config_types.h"
 #include "core/ui_phase.h"
-#include "render/scene/node.h"
 #include "render/presentation_timing.h"
+#include "render/scene/node.h"
 #include "wayland/layer_surface.h"
 
 #include <algorithm>
@@ -58,6 +58,17 @@ public:
   // preferred size is then only the fallback if no size is ever assigned.
   [[nodiscard]] virtual bool fillsWidth() const noexcept { return false; }
   [[nodiscard]] virtual bool fillsHeight() const noexcept { return false; }
+  // Full-output presentation is distinct from fill sizing: it covers the
+  // complete output, including areas reserved by bars and other layer-shell
+  // clients. Panels must explicitly opt in before PanelManager accepts a
+  // fullscreen request.
+  [[nodiscard]] virtual bool supportsFullscreenPresentation() const noexcept { return false; }
+  [[nodiscard]] virtual bool fullscreenPresentation() const noexcept { return false; }
+  virtual void setFullscreenPresentation(bool fullscreen) noexcept { (void)fullscreen; }
+  // Keeps an external producer live while this panel's scene moves between
+  // two presentation surfaces. The replacement scene clears the transfer in
+  // onOpen(); ordinary closes retain their normal detach behavior.
+  virtual void setPresentationTransfer(bool transferring) noexcept { (void)transferring; }
   [[nodiscard]] virtual bool hasDecoration() const { return true; }
   // Most decorated panels inset their content from the background edge. Media
   // surfaces can opt out and provide their own rounded clipping for a

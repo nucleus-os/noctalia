@@ -908,6 +908,14 @@ void CefService::shutdown() {
 }
 
 void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
+  // Once the browser exists, resize() owns viewport changes and must compare
+  // the requested dimensions with the dimensions CEF currently knows. Do not
+  // overwrite that state here: CefSurfaceNode deliberately calls
+  // ensureBrowser() followed by resize(), and doing so would make resize()
+  // incorrectly suppress WasResized().
+  if (m_impl->browser) {
+    return;
+  }
   m_impl->logicalWidth = logicalWidth > 0 ? logicalWidth : m_impl->logicalWidth;
   m_impl->logicalHeight = logicalHeight > 0 ? logicalHeight : m_impl->logicalHeight;
   if (m_impl->gpuBridge == nullptr) {
@@ -915,9 +923,6 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
     return;
   }
   if (!m_impl->initialized && !initialize()) {
-    return;
-  }
-  if (m_impl->browser) {
     return;
   }
   m_impl->client = new NoctaliaCefClient(m_impl.get());

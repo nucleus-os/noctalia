@@ -3,6 +3,7 @@
 #include "system/app_identity.h"
 #include "system/internal_app_metadata.h"
 #include "util/string_utils.h"
+#include "wayland/internal_toplevel.h"
 #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
 
 #include <algorithm>
@@ -67,6 +68,9 @@ namespace {
   };
 
   std::string effectiveAppId(const std::string& appId, const std::string& title) {
+    if (internal_toplevel::hiddenFromShellAppModel(appId)) {
+      return {};
+    }
     if (!appId.empty()) {
       return appId;
     }
@@ -109,10 +113,14 @@ std::optional<ActiveToplevel> WaylandToplevels::current() const {
   if (it == m_handles.end()) {
     return std::nullopt;
   }
+  const auto appId = effectiveAppId(it->second.appId, it->second.title);
+  if (appId.empty()) {
+    return std::nullopt;
+  }
   return ActiveToplevel{
       .title = it->second.title,
-      .appId = it->second.appId,
-      .identifier = it->second.appId + ":" + it->second.title,
+      .appId = appId,
+      .identifier = appId + ":" + it->second.title,
       .handle = m_currentHandle,
   };
 }
@@ -415,7 +423,7 @@ zwlr_foreign_toplevel_handle_v1* WaylandToplevels::latestActivatedHandle() const
   std::uint64_t bestGeneration = 0;
 
   for (const auto& [handle, state] : m_handles) {
-    if (!state.activated) {
+    if (!state.activated || effectiveAppId(state.appId, state.title).empty()) {
       continue;
     }
     if (bestHandle == nullptr || state.generation > bestGeneration) {

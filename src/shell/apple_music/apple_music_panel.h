@@ -17,6 +17,11 @@ public:
 
   [[nodiscard]] float preferredWidth() const override { return scaled(1120.0f); }
   [[nodiscard]] float preferredHeight() const override { return scaled(720.0f); }
+  [[nodiscard]] bool supportsFullscreenPresentation() const noexcept override { return true; }
+  [[nodiscard]] bool fullscreenPresentation() const noexcept override { return m_fullscreen; }
+  void setFullscreenPresentation(bool fullscreen) noexcept override;
+  void setPresentationTransfer(bool transferring) noexcept override { m_presentationTransfer = transferring; }
+  [[nodiscard]] bool hasDecoration() const override { return !m_fullscreen; }
   [[nodiscard]] bool usesContentPadding() const noexcept override { return false; }
   [[nodiscard]] bool detachedBackgroundInheritsSourceBarOpacity() const noexcept override { return true; }
   [[nodiscard]] LayerShellLayer layer() const override { return LayerShellLayer::Overlay; }
@@ -33,4 +38,6 @@ private:
   CefService& m_service;
   CefSurfaceNode* m_surface = nullptr;
   bool m_initialNavigationRequested = false;
+  bool m_fullscreen = false;
+  bool m_presentationTransfer = false;
 };

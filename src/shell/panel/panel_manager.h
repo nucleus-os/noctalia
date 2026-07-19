@@ -41,8 +41,16 @@ struct PanelOpenRequest {
   float anchorY = 0.0f;
   bool hasExplicitAnchor = false;
   bool hasAnchorPosition = false;
+  bool animateOpen = true;
   std::string_view context;
   std::string_view sourceBarName;
+};
+
+struct PanelOutputRect {
+  float x = 0.0f;
+  float y = 0.0f;
+  float width = 0.0f;
+  float height = 0.0f;
 };
 
 class PanelManager : public PopupGrabHost {
@@ -94,6 +102,9 @@ public:
   void togglePanel(const std::string& panelId, PanelOpenRequest request);
   // IPC-friendly overload: asks CompositorPlatform for preferred interactive output.
   void togglePanel(const std::string& panelId);
+  // Switch an opt-in, currently open panel between its normal and full-output
+  // presentations. Fullscreen cannot be entered from a closed panel.
+  bool togglePanelFullscreen(const std::string& panelId);
   void clearClipboardHistory();
 
   bool onPointerEvent(const PointerEvent& event);
@@ -126,8 +137,8 @@ public:
   void onConfigReloaded();
   void onIconThemeChanged();
   void focusArea(InputArea* area);
-  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept { return m_inputDispatcher; }
-  [[nodiscard]] const InputDispatcher& inputDispatcher() const noexcept { return m_inputDispatcher; }
+  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept;
+  [[nodiscard]] const InputDispatcher& inputDispatcher() const noexcept;
   void requestUpdateOnly();
   void requestLayout();
   // Requests a redraw on the active panel surface without re-running panel
@@ -148,6 +159,8 @@ public:
   void registerIpc(IpcService& ipc);
 
 private:
+  class AppleMusicFullscreenHost;
+
   static PanelManager* s_instance;
 
   void buildScene(std::uint32_t width, std::uint32_t height);
@@ -172,6 +185,9 @@ private:
   void applyAttachedDecorationStyle();
   // Submit a wl_region matching the panel body after applying the current reveal clip.
   void applyPanelCompositorBlur(int bodyX, int bodyY, int bodyW, int bodyH, int clipX, int clipY, int clipW, int clipH);
+  bool beginAppleMusicFullscreen();
+  void finishAppleMusicFullscreen(bool reopenPanel);
+  void completeAppleMusicFullscreenHandoff();
 
   CompositorPlatform* m_platform = nullptr;
   ConfigService* m_config = nullptr;
@@ -238,10 +254,17 @@ private:
   std::string m_attachedBarPosition; // "top" / "bottom" / "left" / "right" while attached, empty otherwise
   std::string m_sourceBarName;       // name of the bar that opened the current panel
   std::optional<AttachedPanelGeometry> m_attachedPanelGeometry;
+  std::optional<PanelOutputRect> m_panelOutputRect;
+  std::unique_ptr<AppleMusicFullscreenHost> m_appleMusicFullscreenHost;
+  // During fullscreen exit, keep the restored toplevel's last committed
+  // buffer mapped until the replacement layer panel has actually presented.
+  std::unique_ptr<AppleMusicFullscreenHost> m_retiredAppleMusicFullscreenHost;
+  Timer m_appleMusicHandoffTimer;
   bool m_pointerInside = false;
   bool m_inTransition = false;
   bool m_closing = false;
   bool m_attachedToBar = false;
+  bool m_animateOpen = true;
   bool m_attachedOpenAnimationPending = false;
   std::size_t m_attachedPopupCount = 0;
   ContextMenuPopup* m_activePopup = nullptr;

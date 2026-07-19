@@ -30,11 +30,15 @@ public:
   bool initialize(wl_output* output, ToplevelSurfaceConfig config);
 
   void setClosedCallback(std::function<void()> callback);
+  void setFullscreenChangedCallback(std::function<void(bool)> callback);
   void setMinSize(std::uint32_t minWidth, std::uint32_t minHeight);
   void clampToMinSize(std::uint32_t minWidth, std::uint32_t minHeight);
   void beginMove(std::uint32_t serial);
+  void setFullscreen(wl_output* output = nullptr);
+  void unsetFullscreen();
 
   [[nodiscard]] xdg_surface* xdgSurface() const noexcept { return m_xdgSurface; }
+  [[nodiscard]] bool fullscreen() const noexcept { return m_fullscreen; }
 
   static void handleXdgSurfaceConfigure(void* data, xdg_surface* surface, std::uint32_t serial);
   static void handleToplevelConfigure(
@@ -51,8 +55,10 @@ private:
   xdg_surface* m_xdgSurface = nullptr;
   xdg_toplevel* m_toplevel = nullptr;
   std::function<void()> m_closedCallback;
+  std::function<void(bool)> m_fullscreenChangedCallback;
   std::uint32_t m_pendingWidth = 0;
   std::uint32_t m_pendingHeight = 0;
   std::int32_t m_lastToplevelWidth = 0;
   std::int32_t m_lastToplevelHeight = 0;
+  bool m_fullscreen = false;
 };

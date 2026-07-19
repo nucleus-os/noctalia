@@ -40,5 +40,21 @@ int main() {
   assert(toplevels.containsWlrHandle(handle));
   assert(!toplevels.containsWlrHandle(reinterpret_cast<zwlr_foreign_toplevel_handle_v1*>(0x2)));
 
+  auto* internalHandle = reinterpret_cast<zwlr_foreign_toplevel_handle_v1*>(0x3);
+  auto [internal, internalInserted] =
+      toplevels.m_handles.try_emplace(internalHandle, WaylandToplevels::ToplevelState{});
+  assert(internalInserted);
+  internal->second.title = "Apple Music";
+  internal->second.appId = "dev.noctalia.AppleMusicFullscreen";
+  internal->second.order = toplevels.m_nextOrder++;
+  internal->second.activated = true;
+  toplevels.m_currentHandle = internalHandle;
+
+  const auto appIds = toplevels.allAppIds();
+  assert(appIds.size() == 1);
+  assert(appIds[0] == "Sample.ChatDesktop");
+  assert(toplevels.windowsForApp("dev-noctalia-applemusicfullscreen", "").empty());
+  assert(!toplevels.current().has_value());
+
   return 0;
 }

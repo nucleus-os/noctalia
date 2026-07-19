@@ -93,6 +93,10 @@ bool ToplevelSurface::initialize(wl_output* output, ToplevelSurfaceConfig config
 
 void ToplevelSurface::setClosedCallback(std::function<void()> callback) { m_closedCallback = std::move(callback); }
 
+void ToplevelSurface::setFullscreenChangedCallback(std::function<void(bool)> callback) {
+  m_fullscreenChangedCallback = std::move(callback);
+}
+
 void ToplevelSurface::setMinSize(std::uint32_t minWidth, std::uint32_t minHeight) {
   if (m_toplevel != nullptr) {
     xdg_toplevel_set_min_size(m_toplevel, static_cast<std::int32_t>(minWidth), static_cast<std::int32_t>(minHeight));
@@ -110,6 +114,22 @@ void ToplevelSurface::clampToMinSize(std::uint32_t minWidth, std::uint32_t minHe
 void ToplevelSurface::beginMove(std::uint32_t serial) {
   if (m_toplevel != nullptr) {
     xdg_toplevel_move(m_toplevel, m_connection.seat(), serial);
+  }
+}
+
+void ToplevelSurface::setFullscreen(wl_output* output) {
+  if (m_toplevel != nullptr) {
+    xdg_toplevel_set_fullscreen(m_toplevel, output);
+    wl_surface_commit(m_surface);
+    wl_display_flush(m_connection.display());
+  }
+}
+
+void ToplevelSurface::unsetFullscreen() {
+  if (m_toplevel != nullptr) {
+    xdg_toplevel_unset_fullscreen(m_toplevel);
+    wl_surface_commit(m_surface);
+    wl_display_flush(m_connection.display());
   }
 }
 
@@ -131,7 +151,7 @@ void ToplevelSurface::handleXdgSurfaceConfigure(void* data, xdg_surface* surface
 }
 
 void ToplevelSurface::handleToplevelConfigure(
-    void* data, xdg_toplevel* /*toplevel*/, std::int32_t width, std::int32_t height, wl_array* /*states*/
+    void* data, xdg_toplevel* /*toplevel*/, std::int32_t width, std::int32_t height, wl_array* states
 ) {
   auto* self = static_cast<ToplevelSurface*>(data);
   self->m_lastToplevelWidth = width;
@@ -141,6 +161,24 @@ void ToplevelSurface::handleToplevelConfigure(
   }
   if (height > 0) {
     self->m_pendingHeight = static_cast<std::uint32_t>(height);
+  }
+
+  bool fullscreen = false;
+  if (states != nullptr) {
+    auto* state = static_cast<std::uint32_t*>(states->data);
+    const auto count = states->size / sizeof(std::uint32_t);
+    for (std::size_t i = 0; i < count; ++i) {
+      if (state[i] == XDG_TOPLEVEL_STATE_FULLSCREEN) {
+        fullscreen = true;
+        break;
+      }
+    }
+  }
+  if (fullscreen != self->m_fullscreen) {
+    self->m_fullscreen = fullscreen;
+    if (self->m_fullscreenChangedCallback) {
+      self->m_fullscreenChangedCallback(fullscreen);
+    }
   }
 }
 

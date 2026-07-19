@@ -23,10 +23,7 @@ void AppleMusicPanel::create() {
       []() {
         NOCTALIA_TRACE_ZONE("Apple Music CEF frame-ready request");
         ++g_cefFrameReadyRequests;
-        NOCTALIA_TRACE_PLOT(
-            "Apple Music CEF frame-ready requests",
-            static_cast<std::int64_t>(g_cefFrameReadyRequests)
-        );
+        NOCTALIA_TRACE_PLOT("Apple Music CEF frame-ready requests", static_cast<std::int64_t>(g_cefFrameReadyRequests));
         tracy_latency::redrawQueued();
         // A CEF frame must run AppleMusicPanel::doUpdate() so the scene adopts
         // the new texture. requestFrameTick() only advances animations and can
@@ -46,11 +43,12 @@ void AppleMusicPanel::onOpen(std::string_view /*context*/) {
     m_initialNavigationRequested = true;
   }
   m_service.setDisplayAttached(true);
+  m_presentationTransfer = false;
 }
 
 void AppleMusicPanel::onClose() {
   if (m_surface != nullptr) {
-    m_surface->detach();
+    m_surface->detach(m_presentationTransfer);
     m_surface = nullptr;
   }
 }
@@ -69,9 +67,7 @@ void AppleMusicPanel::onPresentation(const SurfacePresentationFeedback& feedback
   m_service.onPresentation(feedback);
 }
 
-InputArea* AppleMusicPanel::initialFocusArea() const {
-  return m_surface != nullptr ? m_surface->inputArea() : nullptr;
-}
+InputArea* AppleMusicPanel::initialFocusArea() const { return m_surface != nullptr ? m_surface->inputArea() : nullptr; }
 
 void AppleMusicPanel::doLayout(Renderer& renderer, float width, float height) {
   if (m_surface == nullptr) {
@@ -79,7 +75,7 @@ void AppleMusicPanel::doLayout(Renderer& renderer, float width, float height) {
   }
   m_surface->setPosition(0.0f, 0.0f);
   m_surface->setSize(width, height);
-  m_surface->setCornerRadius(Style::scaledRadiusXl(contentScale()));
+  m_surface->setCornerRadius(m_fullscreen ? 0.0f : Style::scaledRadiusXl(contentScale()));
   m_surface->layout(renderer);
 }
 
@@ -88,4 +84,8 @@ void AppleMusicPanel::doUpdate(Renderer& renderer) {
   if (m_surface != nullptr && m_surface->syncTexture(renderer.textureManager())) {
     m_surface->markPaintDirty();
   }
+}
+
+void AppleMusicPanel::setFullscreenPresentation(bool fullscreen) noexcept {
+  m_fullscreen = fullscreen;
 }

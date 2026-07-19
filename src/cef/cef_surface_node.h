@@ -27,9 +27,10 @@ public:
       std::function<void()> requestRedraw, std::function<void()> requestFrameOpportunity,
       std::function<void()> refreshCursor
   );
-  // Detach the display: the browser keeps running (audio continues) but stops
-  // painting until re-attached.
-  void detach();
+  // Detach this scene consumer. During an atomic presentation transfer the
+  // browser remains display-attached while callbacks move to the replacement
+  // node; ordinary detach hides it and enters the parked-frame policy.
+  void detach(bool preserveDisplayAttachment = false);
 
   // Adopt the latest browser frame into the image texture. The caller must be
   // inside the Graphite frame that will sample it. Returns true when a fresh

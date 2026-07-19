@@ -3,6 +3,7 @@
 #include "ext-foreign-toplevel-list-v1-client-protocol.h"
 #include "system/app_identity.h"
 #include "util/string_utils.h"
+#include "wayland/internal_toplevel.h"
 
 #include <algorithm>
 #include <cctype>
@@ -50,7 +51,9 @@ namespace {
       .identifier = handleIdentifier,
   };
 
-  std::string effectiveAppId(const std::string& appId, const std::string& /*title*/) { return appId; }
+  std::string effectiveAppId(const std::string& appId, const std::string& /*title*/) {
+    return internal_toplevel::hiddenFromShellAppModel(appId) ? std::string{} : appId;
+  }
 
 } // namespace
 

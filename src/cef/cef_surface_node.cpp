@@ -13,38 +13,35 @@
 #include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace {
-// wl axis value -> CEF wheel delta. wl positive = scroll down; Chromium wheel
-// deltaY positive = scroll up, so negate. ~120 units per detent.
-constexpr float kWheelStep = 120.0f;
+  // wl axis value -> CEF wheel delta. wl positive = scroll down; Chromium wheel
+  // deltaY positive = scroll up, so negate. ~120 units per detent.
+  constexpr float kWheelStep = 120.0f;
 
-int cefButtonFromLinux(std::uint32_t button) {
-  switch (button) {
-    case BTN_MIDDLE: return 1;
-    case BTN_RIGHT: return 2;
+  int cefButtonFromLinux(std::uint32_t button) {
+    switch (button) {
+    case BTN_MIDDLE:
+      return 1;
+    case BTN_RIGHT:
+      return 2;
     case BTN_LEFT:
-    default: return 0;
+    default:
+      return 0;
+    }
   }
-}
 
-bool isHistoryBackButton(std::uint32_t button) {
-  return button == BTN_SIDE || button == BTN_BACK;
-}
+  bool isHistoryBackButton(std::uint32_t button) { return button == BTN_SIDE || button == BTN_BACK; }
 
-bool isHistoryForwardButton(std::uint32_t button) {
-  return button == BTN_EXTRA || button == BTN_FORWARD;
-}
+  bool isHistoryForwardButton(std::uint32_t button) { return button == BTN_EXTRA || button == BTN_FORWARD; }
 
-bool isHistoryBackKey(const InputArea::KeyData& key) {
-  return key.sym == XKB_KEY_XF86Back || (key.sym == XKB_KEY_Left && key.modifiers == KeyMod::Alt);
-}
+  bool isHistoryBackKey(const InputArea::KeyData& key) {
+    return key.sym == XKB_KEY_XF86Back || (key.sym == XKB_KEY_Left && key.modifiers == KeyMod::Alt);
+  }
 
-bool isHistoryForwardKey(const InputArea::KeyData& key) {
-  return key.sym == XKB_KEY_XF86Forward || (key.sym == XKB_KEY_Right && key.modifiers == KeyMod::Alt);
-}
+  bool isHistoryForwardKey(const InputArea::KeyData& key) {
+    return key.sym == XKB_KEY_XF86Forward || (key.sym == XKB_KEY_Right && key.modifiers == KeyMod::Alt);
+  }
 
-bool isAltModifierKey(const InputArea::KeyData& key) {
-  return key.sym == XKB_KEY_Alt_L || key.sym == XKB_KEY_Alt_R;
-}
+  bool isAltModifierKey(const InputArea::KeyData& key) { return key.sym == XKB_KEY_Alt_L || key.sym == XKB_KEY_Alt_R; }
 } // namespace
 
 CefSurfaceNode::CefSurfaceNode(CefService& service) : m_service(service) {
@@ -59,9 +56,7 @@ CefSurfaceNode::CefSurfaceNode(CefService& service) : m_service(service) {
   wireInput();
 }
 
-CefSurfaceNode::~CefSurfaceNode() {
-  detach();
-}
+CefSurfaceNode::~CefSurfaceNode() { detach(); }
 
 void CefSurfaceNode::setCornerRadius(float radius) {
   if (m_image != nullptr) {
@@ -169,12 +164,14 @@ void CefSurfaceNode::attach(
   }
 }
 
-void CefSurfaceNode::detach() {
+void CefSurfaceNode::detach(bool preserveDisplayAttachment) {
   if (!m_attached) {
     return;
   }
   m_attached = false;
-  m_service.setDisplayAttached(false);
+  if (!preserveDisplayAttachment) {
+    m_service.setDisplayAttached(false);
+  }
   m_service.setFrameReadyCallback(nullptr);
   m_service.setFrameOpportunityCallback(nullptr);
   m_service.setCursorCallback(nullptr);
@@ -183,10 +180,16 @@ void CefSurfaceNode::detach() {
 void CefSurfaceNode::doLayout(Renderer& renderer) {
   const auto w = static_cast<int>(width());
   const auto h = static_cast<int>(height());
+  const float renderScale = renderer.renderScale();
 
-  m_service.setDeviceScale(renderer.renderScale());
+  m_service.setDeviceScale(renderScale);
   m_service.ensureBrowser(w, h);
   m_service.resize(w, h);
+  // Keep the last complete browser frame visible while CEF responds to
+  // WasResized(). On an xdg fullscreen transition niri is already scaling the
+  // old endpoint snapshot, so clearing this image would introduce a blank
+  // frame at exactly the wrong point in the animation.
+  (void)syncTexture(renderer.textureManager());
 
   if (m_image != nullptr) {
     m_image->setPosition(0.0f, 0.0f);
