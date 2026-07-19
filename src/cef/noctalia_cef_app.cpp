@@ -132,6 +132,16 @@ void NoctaliaCefApp::OnBeforeCommandLineProcessing(const CefString& processType,
   // enabling it in the browser process.
   appendCommaSeparatedSwitchValue(cmd, "disable-features", "ImmersiveReadAnything");
   appendCommaSeparatedSwitchValue(cmd, "enable-features", "OverlayScrollbar");
+  if (const char* vaapiDriver = std::getenv("LIBVA_DRIVER_NAME");
+      vaapiDriver != nullptr && std::string_view(vaapiDriver) == "nvidia") {
+    appendCommaSeparatedSwitchValue(cmd, "enable-features", "VaapiOnNvidiaGPUs");
+    appendCommaSeparatedSwitchValue(cmd, "enable-features", "VaapiIgnoreDriverChecks");
+    // Chromium's Linux Vulkan media client requires ANGLE to own the Vulkan
+    // device/queue used for decoded SharedImages. Selecting ANGLE's Vulkan
+    // backend with --use-angle alone does not enable these feature gates.
+    appendCommaSeparatedSwitchValue(cmd, "enable-features", "DefaultANGLEVulkan");
+    appendCommaSeparatedSwitchValue(cmd, "enable-features", "VulkanFromANGLE");
+  }
   if (const char* validation = std::getenv("NOCTALIA_VULKAN_VALIDATION");
       validation != nullptr && validation[0] == '1') {
     appendCommaSeparatedSwitchValue(

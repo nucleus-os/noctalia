@@ -622,6 +622,20 @@ namespace {
     }
 
     // CefLifeSpanHandler
+    bool OnBeforePopup(
+        CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> /*frame*/, int popupId, const CefString& /*targetUrl*/,
+        const CefString& /*targetFrameName*/, WindowOpenDisposition targetDisposition, bool userGesture,
+        const CefPopupFeatures& /*popupFeatures*/, CefWindowInfo& /*windowInfo*/, CefRefPtr<CefClient>& /*client*/,
+        CefBrowserSettings& /*settings*/, CefRefPtr<CefDictionaryValue>& /*extraInfo*/, bool* /*noJavascriptAccess*/
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      kLog.warn(
+          "blocked unhosted CEF popup: opener={} popup={} disposition={} userGesture={}",
+          browser != nullptr ? browser->GetIdentifier() : -1, popupId, static_cast<int>(targetDisposition), userGesture
+      );
+      return true;
+    }
+
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
       CEF_REQUIRE_UI_THREAD();
       m_impl->browser = browser;

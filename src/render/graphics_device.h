@@ -36,6 +36,7 @@ struct GraphicsDeviceCandidate {
 struct GraphicsDeviceIdentity {
   std::array<std::uint8_t, VK_UUID_SIZE> uuid{};
   std::string drmRenderNode;
+  std::uint32_t vendorId = 0;
 };
 
 // One process-wide Vulkan device and one main-thread Graphite recorder. Vulkan

@@ -26,7 +26,7 @@ configure m=mode install_prefix=prefix:
     export CXX="${CXX:-$toolchain_root/bin/clang++}"
     export LD_LIBRARY_PATH="$cpp_deps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     args=(
-        --buildtype={{ if m == "release" { "release" } else { "debug" }}
+        --buildtype={{ if m == "release" { "release" } else { "debug" } }}
         -Dcpp_std={{cpp-std}}
         -Dnucleus_render_sdk_path="$render_sdk"
         -Dnucleus_cpp_deps_path="$cpp_deps"

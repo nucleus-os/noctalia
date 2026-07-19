@@ -178,6 +178,7 @@ GraphicsDeviceIdentity GraphicsDevice::identity() const {
   GraphicsDeviceIdentity result;
   std::ranges::copy(idProperties.deviceUUID, result.uuid.begin());
   result.drmRenderNode = "/dev/dri/renderD" + std::to_string(drmProperties.renderMinor);
+  result.vendorId = properties.properties.vendorID;
   return result;
 }
 

@@ -114,6 +114,7 @@
 namespace {
   constexpr Logger kLog("app");
   constexpr std::string_view kPolkitAuthorityBusName = "org.freedesktop.PolicyKit1";
+  constexpr std::uint32_t kNvidiaPciVendorId = 0x10de;
 
   void signal_handler(int signum) {
     if (signum == SIGTERM || signum == SIGINT) {
@@ -137,13 +138,77 @@ namespace {
     return result;
   }
 
+  void setEnvironmentOrThrow(const char* name, const std::string& value) {
+    if (setenv(name, value.c_str(), 1) != 0) {
+      throw std::runtime_error(std::string("failed to set ") + name);
+    }
+  }
+
+  bool containsNvidiaVaapiDriver(const std::filesystem::path& directory) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(directory / "nvidia_drv_video.so", error);
+  }
+
+  std::optional<std::filesystem::path> findNvidiaVaapiDriverDirectory() {
+    if (const char* overridePath = std::getenv("NOCTALIA_NVIDIA_VAAPI_DRIVER_PATH");
+        overridePath != nullptr && overridePath[0] != '\0') {
+      std::filesystem::path directory(overridePath);
+      if (containsNvidiaVaapiDriver(directory)) {
+        return directory;
+      }
+      kLog.warn("NVIDIA VA-API driver override is unavailable: {}", directory.string());
+      return std::nullopt;
+    }
+
+    std::error_code executableError;
+    const std::filesystem::path executable = std::filesystem::read_symlink("/proc/self/exe", executableError);
+    if (!executableError) {
+      const std::filesystem::path installPrefix = executable.parent_path().parent_path();
+      const std::filesystem::path installedDirectory = installPrefix / "lib/noctalia/vaapi/nvidia/current/lib/dri";
+      if (containsNvidiaVaapiDriver(installedDirectory)) {
+        return installedDirectory;
+      }
+    }
+
+    // A build-tree executable can still consume the normal per-user private
+    // deployment without requiring a source-tree-specific path.
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+      const std::filesystem::path userDirectory =
+          std::filesystem::path(home) / ".local/lib/noctalia/vaapi/nvidia/current/lib/dri";
+      if (containsNvidiaVaapiDriver(userDirectory)) {
+        return userDirectory;
+      }
+    }
+    return std::nullopt;
+  }
+
+  void configureCefNvidiaVideoDecode(const GraphicsDeviceIdentity& identity) {
+    if (identity.vendorId != kNvidiaPciVendorId) {
+      return;
+    }
+
+    const std::optional<std::filesystem::path> driverDirectory = findNvidiaVaapiDriverDirectory();
+    if (!driverDirectory) {
+      kLog.warn("NVIDIA VA-API driver not enabled: no private driver deployment is available");
+      return;
+    }
+
+    setEnvironmentOrThrow("LIBVA_DRIVER_NAME", "nvidia");
+    setEnvironmentOrThrow("LIBVA_DRIVERS_PATH", driverDirectory->string());
+    setEnvironmentOrThrow("NVD_BACKEND", "direct");
+    setEnvironmentOrThrow("NVD_DRM_DEVICE", identity.drmRenderNode);
+    kLog.info(
+        "enabled CEF NVIDIA VA-API driver from {} with packed image export on {}", driverDirectory->string(),
+        identity.drmRenderNode
+    );
+  }
+
   void publishCefGraphicsDevice(const GraphicsDevice& graphics) {
     const GraphicsDeviceIdentity identity = graphics.identity();
     const std::string uuid = uuidHex(identity.uuid);
-    if (setenv("NOCTALIA_CEF_VULKAN_DEVICE_UUID", uuid.c_str(), 1) != 0
-        || setenv("NOCTALIA_CEF_DRM_RENDER_NODE", identity.drmRenderNode.c_str(), 1) != 0) {
-      throw std::runtime_error("failed to publish the CEF graphics-device contract");
-    }
+    setEnvironmentOrThrow("NOCTALIA_CEF_VULKAN_DEVICE_UUID", uuid);
+    setEnvironmentOrThrow("NOCTALIA_CEF_DRM_RENDER_NODE", identity.drmRenderNode);
+    configureCefNvidiaVideoDecode(identity);
     kLog.info("pinned CEF to Vulkan UUID={} renderNode={}", uuid, identity.drmRenderNode);
   }
 } // namespace
