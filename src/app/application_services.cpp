@@ -1283,6 +1283,11 @@ void Application::initSessionBusServices() {
       applyMprisConfig();
       m_configService.addReloadCallback(applyMprisConfig);
       m_mprisService->setChangeCallback([this, shouldRefreshControlCenter]() {
+        const auto& players = m_mprisService->players();
+        const auto embeddedPlayer = players.find(currentProcessChromiumMprisBusName());
+        m_cefService->setBackgroundPlaybackActive(
+            embeddedPlayer != players.end() && embeddedPlayer->second.playbackStatus == "Playing"
+        );
         m_bar.refresh();
         m_desktopWidgetsController.requestUpdate();
         m_mediaOsd.onMprisChanged(*m_mprisService);

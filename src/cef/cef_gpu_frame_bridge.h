@@ -75,8 +75,9 @@ public:
   [[nodiscard]] bool acceptFrame(const BorrowedDmabufFrame& frame) noexcept;
   [[nodiscard]] bool prepareForGraphiteSampling(GraphiteSubmissionDependency& dependency) override;
   void finishGraphiteSampling(const GraphiteSubmissionDependency& dependency, bool submitted) override;
-  // Balances and releases a frame that will not be drawn (for example when a
-  // panel is detached after CEF has delivered a paint).
+  // Balances and releases a frame that cannot remain a future display source,
+  // such as renderer failure or explicit GPU invalidation. Ordinary panel
+  // detach deliberately retains the current frame for immediate reopen.
   void discardPendingFrame();
   // Lost-device teardown: drop pending ownership without queue waits/submits.
   void abandonDevice() noexcept;

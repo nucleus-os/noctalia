@@ -40,6 +40,8 @@ namespace {
   constexpr Logger kLog("cef");
   constexpr int kCefWindowlessFrameRate = 120;
   constexpr std::int64_t kFallbackBeginFrameIntervalNs = 1'000'000'000LL / kCefWindowlessFrameRate;
+  constexpr std::int64_t kBackgroundBeginFrameIntervalNs = 1'000'000'000LL;
+  constexpr auto kBackgroundBeginFrameInterval = std::chrono::milliseconds(1000);
   constexpr std::int64_t kBeginFrameAckRecoveryNs = 2'000'000'000;
 
   std::int64_t steadyNowNs() {
@@ -249,11 +251,13 @@ struct CefService::Impl {
 
   bool initialized = false;
   bool attached = false;
+  bool backgroundPlaybackActive = false;
   std::uint32_t presentationRefreshNs = 0;
   int configuredFrameRate = kCefWindowlessFrameRate;
   CefExternalFrameScheduler frameScheduler{kFallbackBeginFrameIntervalNs};
   CefRendererRecovery rendererRecovery;
   Timer beginFrameAckWatchdog;
+  Timer backgroundFrameHeartbeat;
   std::string pendingUrl;
   int logicalWidth = 1280;
   int logicalHeight = 720;
@@ -278,6 +282,27 @@ struct CefService::Impl {
   // Guards deferred main-thread callbacks against use-after-free during shutdown.
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
 
+  [[nodiscard]] bool frameProductionEnabled() const noexcept { return attached || backgroundPlaybackActive; }
+
+  [[nodiscard]] bool parkedPlaybackRefreshEnabled() const noexcept { return !attached && backgroundPlaybackActive; }
+
+  void startBackgroundFrameHeartbeat() {
+    if (!parkedPlaybackRefreshEnabled() || browser == nullptr) {
+      backgroundFrameHeartbeat.stop();
+      return;
+    }
+    if (backgroundFrameHeartbeat.active()) {
+      return;
+    }
+    auto token = alive;
+    backgroundFrameHeartbeat.startRepeating(kBackgroundBeginFrameInterval, [this, token]() {
+      if (!token->load() || !parkedPlaybackRefreshEnabled() || browser == nullptr) {
+        return;
+      }
+      requestExternalBeginFrame(false);
+    });
+  }
+
   void armFrameOpportunity() {
     if (attached && browser != nullptr && frameScheduler.needsFrameOpportunity() && frameOpportunity) {
       frameOpportunity();
@@ -286,24 +311,24 @@ struct CefService::Impl {
 
   void armPointerMotionOpportunity() {
     // Pointer motion is normally drained by the compositor-paced frame
-    // callback. Unlike animation demand, new input must also wake that callback
-    // after repeated no-damage acknowledgements have idled the CEF scheduler.
-    // The callback forwards the newest coalesced position before requesting
-    // the urgent external begin frame.
+    // callback. New input also wakes that callback immediately so the callback
+    // forwards the newest coalesced position before requesting the urgent
+    // external begin frame.
     if (attached && browser != nullptr && frameOpportunity) {
       frameOpportunity();
     }
   }
 
   void submitExternalBeginFrame(const CefExternalFrameScheduler::Request& request) {
-    if (!attached || browser == nullptr || request.generation != frameScheduler.generation()) {
+    if (!frameProductionEnabled() || browser == nullptr || request.generation != frameScheduler.generation()) {
       frameScheduler.abandon(request.id);
       return;
     }
 
+    const bool parkedRefresh = parkedPlaybackRefreshEnabled();
     CefExternalBeginFrameArgs args;
-    args.deadline_delta_ns = request.deadlineDeltaNs;
-    args.interval_ns = request.intervalNs;
+    args.deadline_delta_ns = parkedRefresh ? kBackgroundBeginFrameIntervalNs : request.deadlineDeltaNs;
+    args.interval_ns = parkedRefresh ? kBackgroundBeginFrameIntervalNs : request.intervalNs;
     CefRefPtr<CefExternalBeginFrameCallback> callback =
         new NoctaliaExternalBeginFrameCallback(this, alive, request.id, request.generation);
     const bool accepted = browser->GetHost()->SendExternalBeginFrameWithTiming(args, callback);
@@ -336,7 +361,7 @@ struct CefService::Impl {
               "aborting the pending Chromium BeginFrame in place",
               request.id
           );
-          if (attached && browser != nullptr) {
+          if (frameProductionEnabled() && browser != nullptr) {
             if (!browser->GetHost()->AbortPendingExternalBeginFrame()) {
               kLog.error("CEF rejected pending external BeginFrame abort");
             }
@@ -356,9 +381,10 @@ struct CefService::Impl {
     if (wasDraining) {
       if (browser != nullptr) {
         CefRefPtr<CefBrowserHost> host = browser->GetHost();
-        if (attached) {
+        if (frameProductionEnabled()) {
           host->WasHidden(false);
           host->Invalidate(PET_VIEW);
+          host->SetFocus(attached);
           requestExternalBeginFrame(true);
         } else {
           host->WasHidden(true);
@@ -373,7 +399,7 @@ struct CefService::Impl {
   }
 
   void requestExternalBeginFrame(bool urgent) {
-    if (!attached || browser == nullptr) {
+    if (!frameProductionEnabled() || browser == nullptr) {
       return;
     }
     const auto priorState = frameScheduler.state();
@@ -408,16 +434,18 @@ struct CefService::Impl {
   }
 
   void startExternalScheduler() {
-    if (!attached || browser == nullptr) {
+    if (!frameProductionEnabled() || browser == nullptr) {
       return;
     }
     if (frameScheduler.state() == CefExternalFrameScheduler::State::Suspended) {
       frameScheduler.resume();
     }
     requestExternalBeginFrame(false);
+    startBackgroundFrameHeartbeat();
   }
 
   void stopExternalScheduler() {
+    backgroundFrameHeartbeat.stop();
     beginFrameAckWatchdog.stop();
     frameScheduler.forceSuspend();
     pointerMotion.reset();
@@ -639,11 +667,11 @@ namespace {
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
       CEF_REQUIRE_UI_THREAD();
       m_impl->browser = browser;
-      browser->GetHost()->WasHidden(!m_impl->attached);
+      browser->GetHost()->WasHidden(!m_impl->frameProductionEnabled());
       browser->GetHost()->WasResized();
-      if (m_impl->attached) {
+      if (m_impl->frameProductionEnabled()) {
         browser->GetHost()->Invalidate(PET_VIEW);
-        browser->GetHost()->SetFocus(true);
+        browser->GetHost()->SetFocus(m_impl->attached);
       }
       m_impl->startExternalScheduler();
       kLog.info("CEF browser created");
@@ -659,12 +687,13 @@ namespace {
       CEF_REQUIRE_UI_THREAD();
       const bool recovered = m_impl->rendererRecovery.state() != CefRendererRecovery::State::Ready;
       m_impl->rendererRecovery.onRenderViewReady();
-      if (!m_impl->attached || browser == nullptr) {
+      if (!m_impl->frameProductionEnabled() || browser == nullptr) {
         return;
       }
       browser->GetHost()->WasResized();
       browser->GetHost()->Invalidate(PET_VIEW);
-      browser->GetHost()->SetFocus(true);
+      browser->GetHost()->WasHidden(false);
+      browser->GetHost()->SetFocus(m_impl->attached);
       m_impl->startExternalScheduler();
       m_impl->requestExternalBeginFrame(true);
       if (recovered) {
@@ -832,6 +861,7 @@ void CefService::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
   m_impl->texture = {};
   m_impl->textureChanged = true;
   if (m_impl->browser != nullptr) {
+    m_impl->browser->GetHost()->WasHidden(!m_impl->frameProductionEnabled());
     m_impl->browser->GetHost()->Invalidate(PET_VIEW);
     m_impl->browser->GetHost()->WasResized();
     m_impl->startExternalScheduler();
@@ -1091,7 +1121,11 @@ void CefService::setDisplayAttached(bool attached) {
     return;
   }
   if (attached) {
-    m_impl->frameScheduler.resume();
+    m_impl->backgroundFrameHeartbeat.stop();
+    if (m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Suspended
+        || m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining) {
+      m_impl->frameScheduler.resume();
+    }
     if (m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining) {
       return;
     }
@@ -1099,15 +1133,27 @@ void CefService::setDisplayAttached(bool attached) {
     host->Invalidate(PET_VIEW);
     host->SetFocus(true);
     m_impl->requestExternalBeginFrame(true);
+  } else if (m_impl->backgroundPlaybackActive) {
+    // Keep Chromium logically visible but unfocused so a compositor-less,
+    // acknowledged 1 Hz BeginFrame can keep the parked playback UI current.
+    // The newest exported DMA-BUF stays leased and becomes the immediate
+    // reopen frame; no Noctalia surface is rendered while the panel is closed.
+    host->SetFocus(false);
+    host->WasHidden(false);
+    if (m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Suspended
+        || m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining) {
+      m_impl->frameScheduler.resume();
+    }
+    m_impl->startBackgroundFrameHeartbeat();
   } else {
+    m_impl->backgroundFrameHeartbeat.stop();
     m_impl->beginFrameAckWatchdog.stop();
+    const bool abortAlreadyPending = m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining;
     const bool abortRequired = m_impl->frameScheduler.suspend();
     m_impl->pointerMotion.reset();
-    if (m_impl->gpuBridge != nullptr) {
-      m_impl->gpuBridge->discardPendingFrame();
-    }
+    host->SetFocus(false);
     if (abortRequired) {
-      if (!host->AbortPendingExternalBeginFrame()) {
+      if (!abortAlreadyPending && !host->AbortPendingExternalBeginFrame()) {
         kLog.error("CEF rejected external BeginFrame abort while detaching display");
         m_impl->frameScheduler.forceSuspend();
         host->WasHidden(true);
@@ -1115,6 +1161,60 @@ void CefService::setDisplayAttached(bool attached) {
       return;
     }
     host->WasHidden(true);
+  }
+}
+
+void CefService::setBackgroundPlaybackActive(bool active) {
+  const bool changed = m_impl->backgroundPlaybackActive != active;
+  m_impl->backgroundPlaybackActive = active;
+
+  if (!changed && !active) {
+    return;
+  }
+
+  if (m_impl->attached || m_impl->browser == nullptr) {
+    m_impl->backgroundFrameHeartbeat.stop();
+    return;
+  }
+
+  CefRefPtr<CefBrowserHost> host = m_impl->browser->GetHost();
+  if (!host) {
+    kLog.warn("CEF browser host unavailable while changing background playback state to {}", active);
+    return;
+  }
+
+  if (active) {
+    host->SetFocus(false);
+    host->WasHidden(false);
+    if (m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Suspended
+        || m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining) {
+      m_impl->frameScheduler.resume();
+    }
+    m_impl->startBackgroundFrameHeartbeat();
+    // MPRIS change callbacks are significant rather than position ticks.
+    // Force one immediate frame for a new track/artwork or playback transition.
+    if (m_impl->frameScheduler.state() != CefExternalFrameScheduler::State::Draining) {
+      host->Invalidate(PET_VIEW);
+      m_impl->requestExternalBeginFrame(true);
+    }
+  } else {
+    m_impl->backgroundFrameHeartbeat.stop();
+    m_impl->beginFrameAckWatchdog.stop();
+    const bool abortAlreadyPending = m_impl->frameScheduler.state() == CefExternalFrameScheduler::State::Draining;
+    const bool abortRequired = m_impl->frameScheduler.suspend();
+    if (abortRequired) {
+      if (!abortAlreadyPending && !host->AbortPendingExternalBeginFrame()) {
+        kLog.error("CEF rejected external BeginFrame abort while parking inactive playback");
+        m_impl->frameScheduler.forceSuspend();
+        host->WasHidden(true);
+      }
+    } else {
+      host->WasHidden(true);
+    }
+  }
+
+  if (changed) {
+    kLog.info("CEF detached playback refresh {}", active ? "enabled at 1 Hz" : "disabled");
   }
 }
 

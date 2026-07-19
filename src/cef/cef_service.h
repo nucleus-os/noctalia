@@ -66,9 +66,15 @@ public:
   void goForward();
   void setFocus(bool focused);
 
-  // Keep the browser alive but stop painting when its display is detached
-  // (panel closed); repaint + focus on re-attach.
+  // Keep the browser and its most recently exported frame alive when its
+  // display is detached. Re-attachment can therefore show safe pixels
+  // immediately while CEF produces a fresh frame.
   void setDisplayAttached(bool attached);
+  // Keep a detached Apple Music renderer visually current at a bounded 1 Hz
+  // only while this process's Chromium MPRIS player is actively playing.
+  // Repeated true updates also request an immediate parked refresh so track
+  // and artwork changes do not wait for the next heartbeat.
+  void setBackgroundPlaybackActive(bool active);
   // Called from the owning Wayland surface's wl_surface.frame callback. This
   // is the normal clock for external CEF begin frames while the panel paints.
   // Returns true only while another compositor-paced opportunity is needed.

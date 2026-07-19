@@ -133,11 +133,16 @@ destruction, controller disconnection, and teardown. Completion clears
 transaction state before invoking the callback so reentrancy cannot complete a
 newer request accidentally.
 
-Panel detach stops new opportunities and enters a draining state. If a request
-is in flight, Noctalia asks the existing Viz controller to abort that exact
-request and delays `WasHidden(true)` until its ordinary completion callback.
-Reopen during the drain records resume intent and starts a new scheduler
-generation only after the old transaction terminates.
+Panel detach retains the currently displayed DMA-BUF lease so a rebuilt panel
+scene can show safe pixels immediately. If this process's Chromium MPRIS player
+is playing, CEF remains logically visible but unfocused and an acknowledged
+one-Hz heartbeat keeps that parked frame current without rendering a Noctalia
+surface. Paused, stopped, and absent-player states stop the heartbeat and enter
+the normal draining/hidden state. If a request is in flight, Noctalia asks the
+existing Viz controller to abort that exact request and delays
+`WasHidden(true)` until its ordinary completion callback. Reopen during the
+drain records resume intent and starts a new scheduler generation only after
+the old transaction terminates.
 
 The watchdog is recovery-only. It requests an in-place abort and never destroys
 the live output transport merely to clear local scheduler state.
@@ -157,11 +162,13 @@ boundaries do not allow exceptions to escape.
 
 ## Lifecycle and recovery
 
-On normal hide or detach, any adopted frame is released through the normal GPU
-fence path. On Vulkan device loss, Noctalia abandons device-local bridge
-objects without submitting to the lost queue, invalidates the texture handle,
-rebuilds the shared device and Graphite context, recreates the bridge, and
-requests a fresh CEF frame.
+On normal hide or detach, the latest adopted frame remains leased and immutable
+until a replacement is atomically rebound. Renderer failure, explicit GPU
+invalidation, and terminal teardown release or abandon it as appropriate. On
+Vulkan device loss, Noctalia abandons device-local bridge objects without
+submitting to the lost queue, invalidates the texture handle, rebuilds the
+shared device and Graphite context, recreates the bridge, and requests a fresh
+CEF frame.
 
 CEF profile state is persistent and independent of the graphics device.
 Browser recreation is last-resort containment for a terminal renderer/browser

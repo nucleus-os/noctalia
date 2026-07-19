@@ -119,12 +119,31 @@ int main() {
   assert(afterResume);
   assert(afterResume->generation != oldGeneration);
 
+  // A background/foreground policy change can withdraw resume intent while
+  // the accepted request is still draining. Keep that transaction alive until
+  // its exact acknowledgment instead of crossing the generation early.
+  assert(!scheduler.acknowledge(afterResume->id, true, 264'000'000));
+  const auto toggled = scheduler.requestNormal(264'500'000);
+  assert(toggled);
+  const auto toggleGeneration = toggled->generation;
+  assert(scheduler.suspend());
+  scheduler.resume();
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Draining);
+  assert(scheduler.suspend());
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Draining);
+  assert(scheduler.generation() == toggleGeneration);
+  assert(!scheduler.acknowledge(toggled->id, false, 265'000'000));
+  assert(scheduler.state() == CefExternalFrameScheduler::State::Suspended);
+  scheduler.resume();
+
   // A new surface/output can restart presentation sequence numbering. The
   // lifecycle boundary must discard the old output phase while preserving the
   // most recently learned interval until fresh feedback arrives.
-  assert(afterResume->intervalNs == k60Hz);
-  assert(afterResume->deadlineDeltaNs == k60Hz);
-  assert(!scheduler.acknowledge(afterResume->id, true, 264'000'000));
+  const auto resumedAfterToggle = scheduler.requestNormal(266'000'000);
+  assert(resumedAfterToggle);
+  assert(resumedAfterToggle->intervalNs == k60Hz);
+  assert(resumedAfterToggle->deadlineDeltaNs == k60Hz);
+  assert(!scheduler.acknowledge(resumedAfterToggle->id, true, 267'000'000));
   scheduler.onPresentation(presentation(270'000'000, 1, k144Hz));
   const auto newOutput = scheduler.onFrameOpportunity(271'000'000);
   assert(newOutput);

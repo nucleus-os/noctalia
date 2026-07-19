@@ -51,7 +51,7 @@ public:
     m_resumeAfterDrain = false;
     m_lastPresentedNs = 0;
     m_lastPresentationSequence = 0;
-    if (m_state == State::InFlight) {
+    if (m_state == State::InFlight || m_state == State::Draining) {
       m_state = State::Draining;
       return true;
     }

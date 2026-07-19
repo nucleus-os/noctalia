@@ -296,10 +296,9 @@ is mandatory.
   `wl_surface.frame` callback into `CefService`. The original paint-inferred
   completion was replaced by CEF's real `BeginFrameAck`: latency-sensitive
   input wakes immediately, duplicate opportunities coalesce, and exact
-  presentation timing reaches Chromium in nanoseconds. No-damage
-  acknowledgments stop both begin frames and the callback-only Wayland tick
-  chain, then back off to slow idle probes. Input, navigation, resize, renderer
-  recovery, or a damage-producing probe re-arms the compositor-paced chain.
+  presentation timing reaches Chromium in nanoseconds. The callback chain
+  remains armed while visible even after no-damage acknowledgments so future
+  autonomous animations cannot become stranded.
   The long watchdog only detects a broken acknowledgment contract and is not
   an active frame clock. Renderer termination suspends the scheduler, performs
   one cached reload, and waits for a real ready render view before resuming; a
@@ -739,17 +738,21 @@ Use an adaptive policy:
 
 - issue immediately after visible input, resize, invalidation, or panel attach;
 - allow only one outstanding begin-frame request and coalesce duplicate input;
-- continue at the synchronized output cadence while accelerated paints keep
-  arriving or known visual animation is active;
-- stop or progressively back off after multiple begin frames produce no damage;
+- continue at the synchronized output cadence while the panel is attached so
+  autonomous web animations cannot become stranded after a no-damage frame;
 - restart promptly when new input or invalidation arrives;
 - stop completely while the browser is hidden with `WasHidden(true)`;
-- treat audio playback alone as insufficient reason to raster at 120 Hz.
+- while detached and the embedded Chromium MPRIS player is `Playing`, keep CEF
+  logically visible but unfocused and request one acknowledged frame per
+  second; retain the latest exported DMA-BUF without presenting a shell
+  surface;
+- treat audio playback alone as insufficient reason to raster at monitor
+  cadence.
 
-Four consecutive acknowledgments with no damage suppress full-rate work. A
-slow idle probe advances Chromium once every 250 ms so autonomous animation can
-restart without committing an unchanged buffer forever. A separate two-second
-acknowledgment watchdog is recovery-only and cannot become a frame clock.
+The detached one-Hz heartbeat is independent of Wayland presentation timing
+and is enabled only for this process's exact Chromium MPRIS identity. A
+separate two-second acknowledgment watchdog is recovery-only and cannot become
+a frame clock.
 
 #### Backend constraints during this work
 
@@ -785,8 +788,9 @@ acknowledgment watchdog is recovery-only and cannot become a frame clock.
    acceptance test.
 5. Presentation-aware external begin-frame scheduling: implemented as the only
    path, with real Chromium acknowledgments and no diagnostic fallback clock.
-6. Immediate input wakeup, single-in-flight coalescing, activity bursts,
-   adaptive no-damage backoff, and hidden-panel suspension: implemented.
+6. Immediate input wakeup, single-in-flight coalescing, retained-frame reopen,
+   MPRIS-gated detached playback refresh, and hidden-panel suspension:
+   implemented.
 7. Keep the change only if deliberate interaction and soak captures lower or
    preserve input-to-visible tails without raising
    idle CPU/GPU use, breaking AAC/Widevine playback, destabilizing DMA-BUF
@@ -881,11 +885,11 @@ pointer-drag correction. Chromium's Linux
 `OverlayScrollbar` feature lets navigation and main-content thumbs float
 without consuming layout width. CEF pointer motion carries held-button flags so
 windowless overlay thumbs receive valid drag sequences. Newly queued motion
-also wakes one compositor callback even after no-damage idle suppression; that
-callback forwards the newest coalesced position before issuing an urgent begin
-frame. Live repeated thumb dragging confirms this prevents drag updates from
-freezing until button release, without changing wheel behavior or replacing
-compositor-paced input coalescing.
+also wakes one compositor callback immediately; that callback forwards the
+newest coalesced position before issuing an urgent begin frame. Live repeated
+thumb dragging confirms this prevents drag updates from freezing until button
+release, without changing wheel behavior or replacing compositor-paced input
+coalescing.
 
 The embedded theme also hides Apple Music's semantic
 `data-testid="native-cta"` “Open in Music” block while retaining the adjacent

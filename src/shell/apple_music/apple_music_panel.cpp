@@ -56,10 +56,10 @@ void AppleMusicPanel::onClose() {
 }
 
 void AppleMusicPanel::onFrameTick(float /*deltaMs*/) {
-  // Direct-sampled DMA-BUFs are released after presentation and may be
-  // rewritten by CEF, so only a newly arrived frame may trigger a redraw.
-  // Callback-only ticks continue while the acknowledged scheduler reports
-  // demand and stop entirely once repeated no-damage acks enter quiescence.
+  // The current direct-sampled DMA-BUF remains leased until its replacement,
+  // so unrelated shell redraws can safely keep showing it. Callback-only
+  // ticks drive the acknowledged scheduler only while this panel is attached;
+  // the service owns the separate MPRIS-gated parked heartbeat.
   if (m_service.onFrameOpportunity()) {
     PanelManager::instance().requestCallbackTick();
   }

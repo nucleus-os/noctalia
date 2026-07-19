@@ -55,8 +55,9 @@ exact refresh interval and a deadline predicted from the latest realized
 presentation phase. CEF's real `BeginFrameAck` completes the one in-flight
 request; paint arrival does not. Opportunities that arrive while Chromium is
 busy are coalesced to the newest request, and input can mark that request
-urgent. Consecutive no-damage acknowledgments enter a slow idle-probe mode.
-Scheduling stops while the panel is hidden.
+urgent. While the panel is detached, scheduling stops unless this process's
+Chromium MPRIS player is actively playing; that parked state uses one
+acknowledged BeginFrame per second and presents no Noctalia surface.
 
 Important zones include:
 
@@ -98,8 +99,8 @@ became visible, not a guaranteed future deadline; the scheduler projects the
 next phase from that proof and rolls an expired target forward by whole refresh
 intervals. CEF uses the surface callback as its active clock. Its long watchdog
 only diagnoses a missing Chromium acknowledgment and cannot release the
-one-in-flight state, while the separate idle probe handles quiet pages without
-committing an unchanged buffer continuously.
+one-in-flight state or become a frame clock. Detached active playback uses the
+separate bounded one-Hz heartbeat described above.
 
 `Graphite swapchain reason` distinguishes initial creation, size changes, and
 acquire/present `OUT_OF_DATE` or `SUBOPTIMAL` results. The apparent second
