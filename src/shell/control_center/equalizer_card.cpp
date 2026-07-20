@@ -3,6 +3,7 @@
 #include "core/ui_phase.h"
 #include "i18n/i18n.h"
 #include "shell/control_center/tab.h"
+#include "shell/panel/panel_manager.h"
 #include "ui/builders.h"
 #include "ui/controls/button.h"
 #include "ui/controls/label.h"
@@ -50,6 +51,29 @@ namespace {
       labels.push_back(i18n::tr(preset.labelKey));
     }
     return labels;
+  }
+
+  // Index of the preset whose curve the live equalizer currently matches, or
+  // npos for a hand-edited ("custom") curve. Tolerances are loose enough to
+  // survive the decimal round-trip through EasyEffects' socket replies.
+  std::size_t matchingPreset(const EqualizerService::State& state) {
+    constexpr double kGainEpsilon = 0.01;
+    constexpr double kFrequencyTolerance = 0.005; // 0.5% relative
+    const auto presets = EqualizerService::presets();
+    for (std::size_t p = 0; p < presets.size(); ++p) {
+      const auto& bands = presets[p].bands;
+      if (bands.size() != state.bands.size()) {
+        continue;
+      }
+      const bool same = std::ranges::equal(bands, state.bands, [](const auto& want, const auto& have) {
+        return std::abs(want.gainDb - have.gainDb) <= kGainEpsilon
+            && std::abs(want.frequencyHz - have.frequencyHz) <= want.frequencyHz * kFrequencyTolerance;
+      });
+      if (same) {
+        return p;
+      }
+    }
+    return static_cast<std::size_t>(-1);
   }
 
   std::string_view statusKey(EqualizerService::Status status) {
@@ -117,6 +141,9 @@ EqualizerCard::EqualizerCard(EqualizerService* service, AudioEffectsProfileKind 
                         m_service->setBandGain(m_kind, static_cast<int>(i), 0.0);
                       }
                     }
+                    // Flattening changes which preset (if any) the curve matches.
+                    markStale();
+                    PanelManager::instance().refresh();
                   },
           })
       )
@@ -187,6 +214,20 @@ void EqualizerCard::reload(Renderer& renderer) {
     }
   }
   m_syncing = false;
+
+  // Select::setOptions() defaults an unset selection to index 0, so without this
+  // a freshly built card would always claim to be on the first preset. Derive it
+  // from the curve we just read instead, and fall back to the placeholder when
+  // the curve matches no preset.
+  if (m_presetSelect != nullptr) {
+    const std::size_t match = matchingPreset(m_state);
+    if (match == static_cast<std::size_t>(-1)) {
+      m_presetSelect->clearSelection();
+    } else {
+      // Silently: selecting here must not re-apply the preset we just read.
+      m_presetSelect->setSelectedIndexSilently(match);
+    }
+  }
 }
 
 void EqualizerCard::rebuildBands(Renderer& renderer) {
@@ -289,6 +330,9 @@ void EqualizerCard::applyPreset(std::size_t index) {
   m_pendingBand = -1;
   if (m_service->applyPreset(m_kind, presets[index])) {
     markStale();
+    // Stale only marks intent; without a refresh the re-read waits for whatever
+    // unrelated event next ticks the panel, so the faders visibly lag the audio.
+    PanelManager::instance().refresh();
   }
 }
 
