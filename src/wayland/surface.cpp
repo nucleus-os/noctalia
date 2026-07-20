@@ -1,5 +1,6 @@
 #include "wayland/surface.h"
 
+#include "core/deferred_call.h"
 #include "core/log.h"
 #include "core/ui_phase.h"
 #include "ext-background-effect-v1-client-protocol.h"
@@ -388,7 +389,7 @@ void Surface::onSurfaceOutputEnter(wl_surface* surface, wl_output* output) {
 
   m_bufferScale = nextScale;
   if ((m_fractionalScale == nullptr || m_viewport == nullptr || m_fractionalScaleNumerator == 0) && m_configured) {
-    onScaleChanged();
+    dispatchScaleChanged();
   }
 }
 
@@ -416,10 +417,72 @@ bool Surface::createWlSurface() {
   return true;
 }
 
+void Surface::beginConfigurationTransaction() {
+  m_configured = false;
+  cancelQueuedFrameWork();
+  cancelQueuedRender();
+}
+
+void Surface::failConfigurationTransaction(std::string_view operation) noexcept {
+  m_configured = false;
+  cancelQueuedFrameWork();
+  cancelQueuedRender();
+  m_frameTickPending = false;
+  m_frameCallbackShouldTick = false;
+  m_nextFrameCallbackShouldTick = false;
+  m_pendingFrameDeltaMs = 0.0f;
+
+  if (m_configureFailureQueued || !m_configureFailureCallback) {
+    return;
+  }
+  m_configureFailureQueued = true;
+
+  try {
+    auto callback = m_configureFailureCallback;
+    const std::weak_ptr<InvalidationToken> token = m_invalidationToken;
+    DeferredCall::callLater([token, callback = std::move(callback)]() mutable {
+      if (!token.expired() && callback) {
+        callback();
+      }
+    });
+  } catch (const std::exception& e) {
+    kLog.error(
+        "{} failure recovery could not be queued for {} ({}): {}", operation, surfaceTraceName(*this),
+        static_cast<const void*>(this), e.what()
+    );
+  } catch (...) {
+    kLog.error(
+        "{} failure recovery could not be queued for {} ({})", operation, surfaceTraceName(*this),
+        static_cast<const void*>(this)
+    );
+  }
+}
+
+void Surface::dispatchConfigure(std::uint32_t width, std::uint32_t height) noexcept {
+  beginConfigurationTransaction();
+  m_width = width;
+  m_height = height;
+
+  try {
+    onConfigure(width, height);
+  } catch (const std::exception& e) {
+    kLog.error(
+        "surface configure failed for {} ({}x{} logical, {}): {}", surfaceTraceName(*this), width, height,
+        static_cast<const void*>(this), e.what()
+    );
+    failConfigurationTransaction("surface configure");
+  } catch (...) {
+    kLog.error(
+        "surface configure failed for {} ({}x{} logical, {}): unknown exception", surfaceTraceName(*this), width,
+        height, static_cast<const void*>(this)
+    );
+    failConfigurationTransaction("surface configure");
+  }
+}
+
 void Surface::onConfigure(std::uint32_t width, std::uint32_t height) {
   m_width = width;
   m_height = height;
-  m_configured = true;
   traceSurfaceEvent(*this, "configure");
 
   const float resizeMs = elapsedMs([this] {
@@ -441,11 +504,16 @@ void Surface::onConfigure(std::uint32_t width, std::uint32_t height) {
         static_cast<const void*>(this), m_width, m_height
     );
   }
+  m_configured = true;
   m_redrawRequested = true;
   queueFrameWork();
 }
 
 void Surface::setConfigureCallback(ConfigureCallback callback) { m_configureCallback = std::move(callback); }
+
+void Surface::setConfigureFailureCallback(ConfigureFailureCallback callback) {
+  m_configureFailureCallback = std::move(callback);
+}
 
 void Surface::setPrepareFrameCallback(PrepareFrameCallback callback) { m_prepareFrameCallback = std::move(callback); }
 
@@ -583,7 +651,32 @@ void Surface::onPreferredFractionalScale(std::uint32_t numerator) {
     return;
   }
 
-  onScaleChanged();
+  dispatchScaleChanged();
+}
+
+void Surface::dispatchScaleChanged() noexcept {
+  if (!m_configured) {
+    return;
+  }
+
+  beginConfigurationTransaction();
+  try {
+    onScaleChanged();
+    m_configured = true;
+    queueFrameWork();
+  } catch (const std::exception& e) {
+    kLog.error(
+        "surface scale change failed for {} ({}x{} logical, {}): {}", surfaceTraceName(*this), m_width, m_height,
+        static_cast<const void*>(this), e.what()
+    );
+    failConfigurationTransaction("surface scale change");
+  } catch (...) {
+    kLog.error(
+        "surface scale change failed for {} ({}x{} logical, {}): unknown exception", surfaceTraceName(*this), m_width,
+        m_height, static_cast<const void*>(this)
+    );
+    failConfigurationTransaction("surface scale change");
+  }
 }
 
 void Surface::onScaleChanged() {

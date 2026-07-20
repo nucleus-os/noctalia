@@ -2099,6 +2099,7 @@ void Bar::createInstance(const WaylandOutput& output, std::size_t barIndex, cons
   instance->surface->setConfigureCallback([this, inst](std::uint32_t width, std::uint32_t height) {
     buildScene(*inst, width, height);
   });
+  instance->surface->setConfigureFailureCallback([this, inst]() { recoverFailedInstance(inst); });
   instance->surface->setPrepareFrameCallback([this, inst](bool needsUpdate, bool needsLayout) {
     prepareFrame(*inst, needsUpdate, needsLayout);
   });
@@ -2118,6 +2119,33 @@ void Bar::createInstance(const WaylandOutput& output, std::size_t barIndex, cons
 
   m_surfaceMap[instance->surface->wlSurface()] = instance.get();
   m_instances.push_back(std::move(instance));
+}
+
+void Bar::recoverFailedInstance(BarInstance* failedInstance) {
+  const auto it = std::ranges::find_if(m_instances, [failedInstance](const auto& instance) {
+    return instance.get() == failedInstance;
+  });
+  if (it == m_instances.end()) {
+    return;
+  }
+
+  const auto outputName = (*it)->outputName;
+  const auto barIndex = (*it)->barIndex;
+  const auto barName = (*it)->barConfig.name;
+  kLog.warn("replacing failed surface generation for #{} \"{}\" on output {}", barIndex, barName, outputName);
+
+  if ((*it)->surface != nullptr) {
+    m_surfaceMap.erase((*it)->surface->wlSurface());
+  }
+  if (m_hoveredInstance == it->get()) {
+    m_hoveredInstance = nullptr;
+  }
+  m_instances.erase(it);
+
+  // Re-evaluate current output/config state instead of cloning the failed
+  // generation: the monitor may have disappeared again before this deferred
+  // recovery runs.
+  syncInstances();
 }
 
 void Bar::destroyInstance(std::uint32_t outputName) {
@@ -2779,6 +2807,7 @@ void Bar::startHideFadeOut(BarInstance& instance) {
 
 void Bar::buildScene(BarInstance& instance, std::uint32_t width, std::uint32_t height) {
   uiAssertNotRendering("Bar::buildScene");
+  instance.sceneReady = false;
   if (m_renderContext == nullptr) {
     return;
   }
@@ -2977,6 +3006,7 @@ void Bar::buildScene(BarInstance& instance, std::uint32_t width, std::uint32_t h
 
   syncBarAutoHideInputRegion(instance);
   syncBarSurfaceChrome(instance);
+  instance.sceneReady = true;
 }
 
 void Bar::updateWidgets(BarInstance& instance) {
@@ -3012,7 +3042,7 @@ void Bar::updateWidgets(BarInstance& instance) {
 }
 
 void Bar::prepareFrame(BarInstance& instance, bool needsUpdate, bool needsLayout) {
-  if (m_renderContext == nullptr || instance.surface == nullptr) {
+  if (m_renderContext == nullptr || instance.surface == nullptr || !instance.sceneReady) {
     return;
   }
 

@@ -179,7 +179,7 @@ bool PopupSurface::resize(std::uint32_t width, std::uint32_t height, bool commit
   // Update our render target immediately so async menu hydration does not leave
   // the next frame clipped to the placeholder popup size while waiting for the
   // compositor's reposition configure.
-  Surface::onConfigure(width, height);
+  dispatchConfigure(width, height);
 
   if (xdg_popup_get_version(m_popup) >= XDG_POPUP_REPOSITION_SINCE_VERSION) {
     xdg_positioner* positioner = createPositioner(m_connection.xdgWmBase(), m_config);
@@ -232,7 +232,7 @@ void PopupSurface::handleXdgSurfaceConfigure(void* data, xdg_surface* surface, s
 
   const std::uint32_t width = self->m_pendingWidth == 0 ? self->m_config.width : self->m_pendingWidth;
   const std::uint32_t height = self->m_pendingHeight == 0 ? self->m_config.height : self->m_pendingHeight;
-  self->Surface::onConfigure(std::max(1U, width), std::max(1U, height));
+  self->dispatchConfigure(std::max(1U, width), std::max(1U, height));
 }
 
 void PopupSurface::handlePopupConfigure(

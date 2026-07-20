@@ -41,6 +41,9 @@ struct BarInstance {
   // sceneRoot must be destroyed before `animations` — ~Node() calls cancelForOwner().
   AnimationManager animations;
   std::unique_ptr<Node> sceneRoot;
+  // A scene generation becomes renderable only after buildScene completes all
+  // construction, widget attachment, layout, and surface-state synchronization.
+  bool sceneReady = false;
   Node* slideRoot = nullptr;
   float slideHiddenDx = 0.0f;
   float slideHiddenDy = 0.0f;

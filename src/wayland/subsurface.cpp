@@ -72,7 +72,7 @@ bool Subsurface::initialize(wl_surface* parentSurface, wl_output* output) {
   wl_surface_commit(m_parentSurface);
 
   setRunning(true);
-  onConfigure(m_config.width, m_config.height);
+  dispatchConfigure(m_config.width, m_config.height);
 
   wl_surface_commit(m_parentSurface);
   return true;

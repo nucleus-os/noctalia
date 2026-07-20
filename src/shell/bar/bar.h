@@ -115,6 +115,7 @@ private:
   [[nodiscard]] static bool instanceNeedsFrameTick(const BarInstance& instance);
   void syncInstances();
   void createInstance(const WaylandOutput& output, std::size_t barIndex, const BarConfig& barConfig);
+  void recoverFailedInstance(BarInstance* failedInstance);
   void destroyInstance(std::uint32_t outputName);
   void populateWidgets(BarInstance& instance);
   void attachWidgetsToSections(BarInstance& instance);

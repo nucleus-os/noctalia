@@ -107,7 +107,7 @@ void ToplevelSurface::clampToMinSize(std::uint32_t minWidth, std::uint32_t minHe
   const auto w = std::max(width(), minWidth);
   const auto h = std::max(height(), minHeight);
   if (w != width() || h != height()) {
-    onConfigure(w, h);
+    dispatchConfigure(w, h);
   }
 }
 
@@ -147,7 +147,7 @@ void ToplevelSurface::handleXdgSurfaceConfigure(void* data, xdg_surface* surface
   }
   width = std::max<std::uint32_t>(1, width);
   height = std::max<std::uint32_t>(1, height);
-  self->Surface::onConfigure(width, height);
+  self->dispatchConfigure(width, height);
 }
 
 void ToplevelSurface::handleToplevelConfigure(

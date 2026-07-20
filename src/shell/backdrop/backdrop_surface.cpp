@@ -43,7 +43,7 @@ void BackdropSurface::onScaleChanged() {
   if (width() == 0 || height() == 0) {
     return;
   }
-  onConfigure(width(), height());
+  dispatchConfigure(width(), height());
 }
 
 void BackdropSurface::render() {

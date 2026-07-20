@@ -470,7 +470,7 @@ void LockSurface::handleConfigure(
     self->m_firstFrameRendered = false;
   }
   ext_session_lock_surface_v1_ack_configure(lockSurface, serial);
-  self->Surface::onConfigure(width, height);
+  self->dispatchConfigure(width, height);
 }
 
 void LockSurface::prepareFrame(bool needsUpdate, bool needsLayout) {

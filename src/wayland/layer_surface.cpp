@@ -128,7 +128,7 @@ void LayerSurface::handleConfigure(
   auto* self = static_cast<LayerSurface*>(data);
   zwlr_layer_surface_v1_ack_configure(layerSurface, serial);
 
-  self->onConfigure(
+  self->dispatchConfigure(
       (width == 0) ? self->m_config.defaultWidth : width, (height == 0) ? self->m_config.defaultHeight : height
   );
 }

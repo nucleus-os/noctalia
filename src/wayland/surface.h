@@ -61,6 +61,7 @@ struct SurfaceIdleProfileSnapshot {
 class Surface {
 public:
   using ConfigureCallback = std::function<void(std::uint32_t width, std::uint32_t height)>;
+  using ConfigureFailureCallback = std::function<void()>;
   using PrepareFrameCallback = std::function<void(bool needsUpdate, bool needsLayout)>;
   using UpdateCallback = std::function<void()>;
   using FrameTickCallback = std::function<void(float deltaMs)>;
@@ -76,6 +77,10 @@ public:
   [[nodiscard]] bool isRunning() const noexcept;
 
   void setConfigureCallback(ConfigureCallback callback);
+  /// Called on the next main-loop iteration after a configure or scale
+  /// transaction fails. The failed surface generation remains unconfigured
+  /// and must be replaced rather than reused.
+  void setConfigureFailureCallback(ConfigureFailureCallback callback);
   void setPrepareFrameCallback(PrepareFrameCallback callback);
   void setUpdateCallback(UpdateCallback callback);
   void setFrameTickCallback(FrameTickCallback callback);
@@ -146,6 +151,10 @@ public:
 
 protected:
   virtual bool createWlSurface();
+  /// Runs the virtual configure handler as one transaction. Protocol listeners
+  /// and internal resize paths must enter through this function so exceptions
+  /// cannot escape across Wayland's C callback boundary.
+  void dispatchConfigure(std::uint32_t width, std::uint32_t height) noexcept;
   virtual void onConfigure(std::uint32_t width, std::uint32_t height);
   virtual void render();
   virtual void onScaleChanged();
@@ -176,6 +185,9 @@ private:
   void renderQueuedFrame();
   bool ensureRenderTargetReady();
   void resizeRenderTarget();
+  void dispatchScaleChanged() noexcept;
+  void beginConfigurationTransaction();
+  void failConfigurationTransaction(std::string_view operation) noexcept;
 
   RenderContext* m_renderContext = nullptr;
   RenderTarget m_renderTarget;
@@ -184,6 +196,7 @@ private:
   std::string m_debugName;
   std::shared_ptr<InvalidationToken> m_invalidationToken = std::make_shared<InvalidationToken>();
   ConfigureCallback m_configureCallback;
+  ConfigureFailureCallback m_configureFailureCallback;
   PrepareFrameCallback m_prepareFrameCallback;
   UpdateCallback m_updateCallback;
   FrameTickCallback m_frameTickCallback;
@@ -205,6 +218,7 @@ private:
   bool m_frameCallbackShouldTick = false;
   bool m_nextFrameCallbackShouldTick = false;
   bool m_renderQueued = false;
+  bool m_configureFailureQueued = false;
   float m_pendingFrameDeltaMs = 0.0f;
   std::uint32_t m_width = 0;
   std::uint32_t m_height = 0;
