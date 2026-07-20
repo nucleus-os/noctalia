@@ -256,11 +256,11 @@ Ubuntu's `v0.0.14`, it contains work directly relevant to this integration:
 - cleanup of failure, rollback, and resolver-thread lifetimes.
 
 The apt package has been removed. The pinned source build is installed only
-under Noctalia's private, versioned prefix:
+under the driver's package-owned, user-private versioned prefix:
 
 ```text
-~/.local/lib/noctalia/vaapi/nvidia/78ab5fc/lib/dri/nvidia_drv_video.so
-~/.local/lib/noctalia/vaapi/nvidia/current -> 78ab5fc
+~/.local/lib/nvidia-vaapi-driver/78ab5fc/lib/dri/nvidia_drv_video.so
+~/.local/lib/nvidia-vaapi-driver/current -> 78ab5fc
 ```
 
 No system VA-API driver file is created or replaced.
@@ -392,7 +392,7 @@ cd ~/Developer/nvidia-vaapi-driver
 The expected driver directory is:
 
 ```text
-~/.local/lib/noctalia/vaapi/nvidia/d9de2ad/lib/dri
+~/.local/lib/nvidia-vaapi-driver/d9de2ad/lib/dri
 ```
 
 The script uses the driver's ordinary Meson release build, publishes the
@@ -410,7 +410,7 @@ Verify that exact artifact against CEF's render node:
 
 ```sh
 LIBVA_DRIVER_NAME=nvidia \
-LIBVA_DRIVERS_PATH="$HOME/.local/lib/noctalia/vaapi/nvidia/current/lib/dri" \
+LIBVA_DRIVERS_PATH="$HOME/.local/lib/nvidia-vaapi-driver/current/lib/dri" \
 NVD_BACKEND=direct \
 NVD_DRM_DEVICE=/dev/dri/renderD129 \
 vainfo --display drm --device /dev/dri/renderD129

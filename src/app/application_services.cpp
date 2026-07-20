@@ -164,7 +164,8 @@ namespace {
     const std::filesystem::path executable = std::filesystem::read_symlink("/proc/self/exe", executableError);
     if (!executableError) {
       const std::filesystem::path installPrefix = executable.parent_path().parent_path();
-      const std::filesystem::path installedDirectory = installPrefix / "lib/noctalia/vaapi/nvidia/current/lib/dri";
+      const std::filesystem::path installedDirectory =
+          installPrefix / "lib/nvidia-vaapi-driver/current/lib/dri";
       if (containsNvidiaVaapiDriver(installedDirectory)) {
         return installedDirectory;
       }
@@ -174,7 +175,7 @@ namespace {
     // deployment without requiring a source-tree-specific path.
     if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
       const std::filesystem::path userDirectory =
-          std::filesystem::path(home) / ".local/lib/noctalia/vaapi/nvidia/current/lib/dri";
+          std::filesystem::path(home) / ".local/lib/nvidia-vaapi-driver/current/lib/dri";
       if (containsNvidiaVaapiDriver(userDirectory)) {
         return userDirectory;
       }
