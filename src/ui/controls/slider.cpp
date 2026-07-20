@@ -66,14 +66,14 @@ Slider::Slider() {
       return;
     }
     applyVisualState();
-    updateFromLocalX(data.localX);
+    updateFromLocal(data.localX, data.localY);
     markPaintDirty();
   });
   area->setOnMotion([this](const InputArea::PointerData& data) {
     if (!m_enabled || m_inputArea == nullptr || !m_inputArea->pressed()) {
       return;
     }
-    updateFromLocalX(data.localX);
+    updateFromLocal(data.localX, data.localY);
   });
   area->setOnAxisHandler([this](const InputArea::PointerData& data) {
     if (!m_enabled || !m_wheelAdjustEnabled || data.axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
@@ -112,12 +112,17 @@ Slider::Slider() {
     if (step <= 0.0) {
       return;
     }
-    if (KeybindMatcher::matches(KeybindAction::Left, key.sym, key.modifiers)) {
+    // Each orientation takes the arrows that point along its own axis.
+    const KeybindAction decreaseAction =
+        m_orientation == SliderOrientation::Vertical ? KeybindAction::Down : KeybindAction::Left;
+    const KeybindAction increaseAction =
+        m_orientation == SliderOrientation::Vertical ? KeybindAction::Up : KeybindAction::Right;
+    if (KeybindMatcher::matches(decreaseAction, key.sym, key.modifiers)) {
       setValue(m_value - step);
       if (m_onDragEnd) {
         m_onDragEnd();
       }
-    } else if (KeybindMatcher::matches(KeybindAction::Right, key.sym, key.modifiers)) {
+    } else if (KeybindMatcher::matches(increaseAction, key.sym, key.modifiers)) {
       setValue(m_value + step);
       if (m_onDragEnd) {
         m_onDragEnd();
@@ -148,6 +153,15 @@ Slider::Slider() {
   m_inputArea->setCursorShape(WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER);
 
   applyVisualState();
+}
+
+void Slider::setOrientation(SliderOrientation orientation) {
+  if (m_orientation == orientation) {
+    return;
+  }
+  m_orientation = orientation;
+  updateGeometry();
+  markLayoutDirty();
 }
 
 void Slider::setRange(double minValue, double maxValue) {
@@ -241,16 +255,45 @@ LayoutSize Slider::doMeasure(Renderer& renderer, const LayoutConstraints& constr
 void Slider::doArrange(Renderer& renderer, const LayoutRect& rect) { arrangeByLayout(renderer, rect); }
 
 void Slider::updateGeometry() {
-  const float widthPx = width() > 0.0f ? width() : Style::sliderDefaultWidth;
-  const float heightPx = std::max({m_thumbSizePx, m_trackHeight, m_controlHeightPx});
-  setSize(widthPx, heightPx);
+  // The cross axis is sized to fit track/thumb; the main axis takes whatever the
+  // parent layout gave us, falling back to the default length.
+  const float thickness = std::max({m_thumbSizePx, m_trackHeight, m_controlHeightPx});
 
-  const float trackY = (heightPx - m_trackHeight) * 0.5f;
+  if (m_orientation == SliderOrientation::Vertical) {
+    const float heightPx = height() > 0.0f ? height() : Style::sliderDefaultWidth;
+    setSize(thickness, heightPx);
+
+    const float trackX = (thickness - m_trackHeight) * 0.5f;
+    const float trackY = Style::sliderHorizontalPadding;
+    const float trackH = std::max(0.0f, heightPx - Style::sliderHorizontalPadding * 2.0f);
+    // Vertical sliders read bottom-up, so the maximum is at the small Y.
+    const float thumbCenterY = trackY + (1.0f - normalizedValue()) * trackH;
+    const float thumbX = (thickness - m_thumbSizePx) * 0.5f;
+
+    m_track->setPosition(trackX, trackY);
+    m_track->setFrameSize(m_trackHeight, trackH);
+
+    m_fill->setPosition(trackX, thumbCenterY);
+    m_fill->setFrameSize(m_trackHeight, std::max(0.0f, trackY + trackH - thumbCenterY));
+
+    m_thumb->setPosition(
+        thumbX, util::clampOrdered(thumbCenterY - m_thumbSizePx * 0.5f, trackY, trackY + trackH - m_thumbSizePx)
+    );
+    m_thumb->setFrameSize(m_thumbSizePx, m_thumbSizePx);
+
+    m_inputArea->setPosition(0.0f, 0.0f);
+    m_inputArea->setFrameSize(thickness, heightPx);
+    return;
+  }
+
+  const float widthPx = width() > 0.0f ? width() : Style::sliderDefaultWidth;
+  setSize(widthPx, thickness);
+
+  const float trackY = (thickness - m_trackHeight) * 0.5f;
   const float trackX = Style::sliderHorizontalPadding;
   const float trackW = std::max(0.0f, widthPx - Style::sliderHorizontalPadding * 2.0f);
-  const float t = normalizedValue();
-  const float thumbX = trackX + t * trackW;
-  const float thumbY = (heightPx - m_thumbSizePx) * 0.5f;
+  const float thumbX = trackX + normalizedValue() * trackW;
+  const float thumbY = (thickness - m_thumbSizePx) * 0.5f;
 
   m_track->setPosition(trackX, trackY);
   m_track->setFrameSize(trackW, m_trackHeight);
@@ -264,17 +307,23 @@ void Slider::updateGeometry() {
   m_thumb->setFrameSize(m_thumbSizePx, m_thumbSizePx);
 
   m_inputArea->setPosition(0.0f, 0.0f);
-  m_inputArea->setFrameSize(widthPx, heightPx);
+  m_inputArea->setFrameSize(widthPx, thickness);
 }
 
-void Slider::updateFromLocalX(float x) {
-  const float widthPx = width() > 0.0f ? width() : Style::sliderDefaultWidth;
-  const float trackX = Style::sliderHorizontalPadding;
-  const float trackW = std::max(0.0f, widthPx - Style::sliderHorizontalPadding * 2.0f);
-  if (trackW <= 0.0f) {
+void Slider::updateFromLocal(float x, float y) {
+  const bool vertical = m_orientation == SliderOrientation::Vertical;
+  const float extent = vertical ? (height() > 0.0f ? height() : Style::sliderDefaultWidth)
+                                : (width() > 0.0f ? width() : Style::sliderDefaultWidth);
+  const float trackStart = Style::sliderHorizontalPadding;
+  const float trackLength = std::max(0.0f, extent - Style::sliderHorizontalPadding * 2.0f);
+  if (trackLength <= 0.0f) {
     return;
   }
-  const double t = static_cast<double>(std::clamp((x - trackX) / trackW, 0.0f, 1.0f));
+  const float local = vertical ? y : x;
+  double t = static_cast<double>(std::clamp((local - trackStart) / trackLength, 0.0f, 1.0f));
+  if (vertical) {
+    t = 1.0 - t;
+  }
   setValue(m_min + t * (m_max - m_min));
 }
 

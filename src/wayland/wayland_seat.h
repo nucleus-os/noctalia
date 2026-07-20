@@ -80,6 +80,7 @@ public:
   void setKeyboardFocusCallback(KeyboardFocusCallback callback);
   void setLockKeysChangeCallback(LockKeysChangeCallback callback);
   void setCursorShape(std::uint32_t serial, std::uint32_t shape);
+  [[nodiscard]] bool setCursorHidden(std::uint32_t serial, bool hidden);
   void forgetSurface(wl_surface* surface) noexcept;
   void cleanup();
 
@@ -173,6 +174,7 @@ private:
   wl_surface* m_lastPointerSurface = nullptr;
   std::uint32_t m_pointerEnterSerial = 0;
   std::uint32_t m_appliedCursorShape = 0;
+  bool m_cursorHidden = false;
   double m_lastPointerX = 0.0;
   double m_lastPointerY = 0.0;
   bool m_hasPointerPosition = false;

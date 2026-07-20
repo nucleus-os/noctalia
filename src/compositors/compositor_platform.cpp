@@ -650,6 +650,10 @@ void CompositorPlatform::setCursorShape(std::uint32_t serial, std::uint32_t shap
   m_wayland.setCursorShape(serial, shape);
 }
 
+bool CompositorPlatform::setCursorHidden(std::uint32_t serial, bool hidden) {
+  return m_wayland.setCursorHidden(serial, hidden);
+}
+
 wl_output* CompositorPlatform::focusedInteractiveOutput(std::chrono::milliseconds pointerMaxAge) const {
   const auto outputReady = [this](wl_output* output) {
     const auto* info = m_wayland.findOutputByWl(output);

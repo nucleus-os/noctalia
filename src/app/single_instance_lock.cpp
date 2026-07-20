@@ -15,32 +15,28 @@ namespace {
 
 SingleInstanceLock::~SingleInstanceLock() { release(); }
 
-bool SingleInstanceLock::tryAcquire() {
+SingleInstanceLock::AcquireResult SingleInstanceLock::tryAcquire() {
   m_path = resolveLockPath();
 
   const int fd = ::open(m_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
   if (fd < 0) {
-    // The lock file is unusable (e.g. read-only runtime dir). Degrade to running
-    // unguarded rather than refusing to start — losing the single-instance
-    // guarantee is better than a shell that won't launch.
-    kLog.warn("could not open lock file {}: {} — running without single-instance guard", m_path, std::strerror(errno));
-    return true;
+    kLog.error("could not open lock file {}: {}", m_path, std::strerror(errno));
+    return AcquireResult::Error;
   }
 
   if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
     if (errno == EWOULDBLOCK) {
       // Another live instance holds the lock.
       ::close(fd);
-      return false;
+      return AcquireResult::AlreadyRunning;
     }
-    // Unexpected flock failure — degrade to unguarded, same rationale as above.
-    kLog.warn("flock failed on {}: {} — running without single-instance guard", m_path, std::strerror(errno));
+    kLog.error("flock failed on {}: {}", m_path, std::strerror(errno));
     ::close(fd);
-    return true;
+    return AcquireResult::Error;
   }
 
   m_fd = fd;
-  return true;
+  return AcquireResult::Acquired;
 }
 
 void SingleInstanceLock::release() noexcept {
@@ -56,11 +52,7 @@ void SingleInstanceLock::release() noexcept {
 std::string SingleInstanceLock::resolveLockPath() {
   const char* runtime = std::getenv("XDG_RUNTIME_DIR");
   if (runtime == nullptr || runtime[0] == '\0') {
-    runtime = "/tmp";
+    return std::string("/tmp/noctalia-") + std::to_string(::getuid()) + ".lock";
   }
-  const char* display = std::getenv("WAYLAND_DISPLAY");
-  if (display == nullptr || display[0] == '\0') {
-    display = "wayland-0";
-  }
-  return std::string(runtime) + "/noctalia-" + display + ".lock";
+  return std::string(runtime) + "/noctalia.lock";
 }

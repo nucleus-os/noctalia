@@ -49,7 +49,7 @@ ControlCenterPanel::ControlCenterPanel(const ControlCenterServices& services) {
       PanelManager::instance().renderContext()
   );
   m_tabs[tabIndex(TabId::Audio)] = std::make_unique<AudioTab>(
-      services.audio, services.easyEffects, services.mpris, services.config, wayland,
+      services.audio, services.easyEffects, services.equalizer, services.mpris, services.config, wayland,
       PanelManager::instance().renderContext()
   );
   m_tabs[tabIndex(TabId::Weather)] = std::make_unique<WeatherTab>(services.weather, services.config);

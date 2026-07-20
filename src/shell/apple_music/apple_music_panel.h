@@ -20,6 +20,7 @@ public:
   [[nodiscard]] bool supportsFullscreenPresentation() const noexcept override { return true; }
   [[nodiscard]] bool fullscreenPresentation() const noexcept override { return m_fullscreen; }
   void setFullscreenPresentation(bool fullscreen) noexcept override;
+  void preparePresentationResize(std::function<void()> ready) override;
   void setPresentationTransfer(bool transferring) noexcept override { m_presentationTransfer = transferring; }
   [[nodiscard]] bool hasDecoration() const override { return !m_fullscreen; }
   [[nodiscard]] bool usesContentPadding() const noexcept override { return false; }

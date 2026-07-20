@@ -32,6 +32,7 @@
 #include "wayland/wayland_seat.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -45,6 +46,7 @@ namespace {
 
   constexpr Logger kLog("panel");
   constexpr std::int32_t kDetachedPanelShadowSafetyPadding = 2;
+  constexpr auto kAppleMusicFullscreenCursorIdleTimeout = std::chrono::seconds(10);
 
   bool blurTraceEnabled() {
     static const bool enabled = SysUtils::isEnvFlagOn("NOCTALIA_BLUR_TRACE");
@@ -337,6 +339,9 @@ public:
       if (!m_live) {
         return;
       }
+      if (!fullscreen) {
+        stopCursorIdle(/*reveal=*/true);
+      }
       m_panel.setFullscreenPresentation(fullscreen);
       syncPresentationStyle(fullscreen);
       if (m_surface != nullptr) {
@@ -404,8 +409,19 @@ public:
       queueFinish(/*reopenPanel=*/true);
       return;
     }
-    m_phase = Phase::Restoring;
-    m_surface->unsetFullscreen();
+    stopCursorIdle(/*reveal=*/true);
+    m_phase = Phase::PreparingRestore;
+    auto alive = m_alive;
+    m_panel.preparePresentationResize([this, alive]() {
+      if (!alive->load()
+          || m_finishQueued
+          || m_surface == nullptr
+          || m_phase != Phase::PreparingRestore) {
+        return;
+      }
+      m_phase = Phase::Restoring;
+      m_surface->unsetFullscreen();
+    });
   }
 
   void close() { queueFinish(/*reopenPanel=*/false); }
@@ -413,6 +429,7 @@ public:
   void retireSceneForPanelHandoff() {
     m_placeTimer.stop();
     m_restoreTimer.stop();
+    stopCursorIdle(/*reveal=*/true);
     if (m_surface != nullptr) {
       // Detach Noctalia's live scene without destroying the wl_surface. The
       // compositor keeps displaying its last committed buffer until the
@@ -432,8 +449,10 @@ public:
   }
 
   void shutdown() {
+    m_alive->store(false);
     m_placeTimer.stop();
     m_restoreTimer.stop();
+    stopCursorIdle(/*reveal=*/true);
     if (m_surface != nullptr) {
       m_surface->setSceneRoot(nullptr);
     }
@@ -506,22 +525,28 @@ public:
     case PointerEvent::Type::Enter:
       if (onSurface) {
         m_pointerInside = true;
+        m_pointerEnterSerial = event.serial;
+        notePointerActivity();
         m_inputDispatcher.pointerEnter(static_cast<float>(event.sx), static_cast<float>(event.sy), event.serial);
       }
       break;
     case PointerEvent::Type::Leave:
       if (onSurface) {
+        stopCursorIdle(/*reveal=*/false);
         m_pointerInside = false;
+        m_pointerEnterSerial = 0;
         m_inputDispatcher.pointerLeave();
       }
       break;
     case PointerEvent::Type::Motion:
       if (onSurface && m_pointerInside) {
+        notePointerActivity();
         m_inputDispatcher.pointerMotion(static_cast<float>(event.sx), static_cast<float>(event.sy), event.serial);
       }
       break;
     case PointerEvent::Type::Button:
       if (onSurface && m_pointerInside) {
+        notePointerActivity();
         m_inputDispatcher.pointerButton(
             static_cast<float>(event.sx), static_cast<float>(event.sy), event.button, event.state == 1
         );
@@ -529,6 +554,7 @@ public:
       break;
     case PointerEvent::Type::Axis:
       if (onSurface && m_pointerInside) {
+        notePointerActivity();
         m_inputDispatcher.pointerAxis(
             static_cast<float>(event.sx), static_cast<float>(event.sy), event.axis, event.axisSource, event.axisValue,
             event.axisDiscrete, event.axisValue120, event.axisLines
@@ -547,8 +573,12 @@ public:
         || m_owner.m_platform->lastKeyboardSurface() != m_surface->wlSurface()) {
       return false;
     }
-    if (event.pressed && KeybindMatcher::matches(KeybindAction::Cancel, event.sym, event.modifiers)) {
-      exitToPanel();
+    if (KeybindMatcher::matches(KeybindAction::Cancel, event.sym, event.modifiers)) {
+      if (event.pressed) {
+        m_owner.m_suppressedFullscreenCancelKey = event.key;
+        m_owner.m_platform->stopKeyRepeat();
+        exitToPanel();
+      }
       return true;
     }
     m_inputDispatcher.keyEvent(event.sym, event.utf32, event.modifiers, event.pressed, event.preedit);
@@ -561,8 +591,10 @@ private:
     AwaitingWindow,
     Positioning,
     Endpoint,
+    PreparingFullscreen,
     FullscreenRequested,
     Fullscreen,
+    PreparingRestore,
     Restoring,
   };
 
@@ -632,6 +664,7 @@ private:
                      {"id", id},
                      {"x", nlohmann::json{{"SetFixed", static_cast<double>(m_windowRect.x)}}},
                      {"y", nlohmann::json{{"SetFixed", static_cast<double>(m_windowRect.y)}}},
+                     {"animate", false},
                  }},
             }
         )) {
@@ -664,19 +697,30 @@ private:
         return;
       }
       m_phase = Phase::Positioning;
-      // Placement is compositor-only and has no xdg completion event. It is
-      // invisible, so wait for niri's short placement animation to settle
-      // before transferring the live browser endpoint.
-      m_placeTimer.start(std::chrono::milliseconds(300), [this]() { activateLiveEndpoint(); });
+      // The hidden endpoint was placed atomically through niri IPC. Defer the
+      // handoff one loop turn so the action reply can unwind before the live
+      // browser surface is transferred.
+      m_placeTimer.start(std::chrono::milliseconds(0), [this]() { activateLiveEndpoint(); });
       return;
     }
     if (m_phase == Phase::Endpoint) {
-      m_phase = Phase::FullscreenRequested;
-      m_surface->setFullscreen(m_output);
+      m_phase = Phase::PreparingFullscreen;
+      auto alive = m_alive;
+      m_panel.preparePresentationResize([this, alive]() {
+        if (!alive->load()
+            || m_finishQueued
+            || m_surface == nullptr
+            || m_phase != Phase::PreparingFullscreen) {
+          return;
+        }
+        m_phase = Phase::FullscreenRequested;
+        m_surface->setFullscreen(m_output);
+      });
       return;
     }
     if (m_phase == Phase::FullscreenRequested && m_surface->fullscreen()) {
       m_phase = Phase::Fullscreen;
+      armCursorIdle();
     }
   }
 
@@ -787,6 +831,49 @@ private:
     }
   }
 
+  void armCursorIdle() {
+    m_cursorIdleTimer.stop();
+    if (m_phase != Phase::Fullscreen
+        || !m_pointerInside
+        || m_pointerEnterSerial == 0
+        || m_surface == nullptr) {
+      return;
+    }
+    m_cursorIdleTimer.start(kAppleMusicFullscreenCursorIdleTimeout, [this]() {
+      if (m_phase != Phase::Fullscreen
+          || !m_pointerInside
+          || m_pointerEnterSerial == 0
+          || m_surface == nullptr
+          || m_owner.m_platform == nullptr) {
+        return;
+      }
+      m_cursorHidden = m_owner.m_platform->setCursorHidden(m_pointerEnterSerial, true);
+    });
+  }
+
+  void notePointerActivity() {
+    if (m_cursorHidden) {
+      if (m_owner.m_platform != nullptr && m_pointerEnterSerial != 0) {
+        (void)m_owner.m_platform->setCursorHidden(m_pointerEnterSerial, false);
+        m_inputDispatcher.refreshCursor();
+      }
+      m_cursorHidden = false;
+    }
+    armCursorIdle();
+  }
+
+  void stopCursorIdle(bool reveal) {
+    m_cursorIdleTimer.stop();
+    if (reveal
+        && m_cursorHidden
+        && m_owner.m_platform != nullptr
+        && m_pointerEnterSerial != 0) {
+      (void)m_owner.m_platform->setCursorHidden(m_pointerEnterSerial, false);
+      m_inputDispatcher.refreshCursor();
+    }
+    m_cursorHidden = false;
+  }
+
   void syncPresentationStyle(bool fullscreen) {
     if (m_background == nullptr) {
       return;
@@ -828,10 +915,14 @@ private:
   InputDispatcher m_inputDispatcher;
   Timer m_placeTimer;
   Timer m_restoreTimer;
+  Timer m_cursorIdleTimer;
+  std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
   Phase m_phase = Phase::AwaitingWindow;
   std::uint32_t m_windowLookupAttempts = 0;
+  std::uint32_t m_pointerEnterSerial = 0;
   bool m_live = false;
   bool m_pointerInside = false;
+  bool m_cursorHidden = false;
   bool m_finishQueued = false;
 };
 
@@ -1511,6 +1602,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     m_sourceBarName.clear();
     m_attachedPanelGeometry.reset();
     m_panelOutputRect.reset();
+    m_panelOutputAnchor = 0;
     m_attachedToBar = false;
     m_animateOpen = true;
     m_attachedOpenAnimationPending = false;
@@ -1814,6 +1906,8 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   m_output = request.output;
   m_wlSurface = m_surface->wlSurface();
   m_panelOutputRect = targetOutputRect;
+  m_panelOutputAnchor = standaloneAnchor;
+  syncPanelOutputRectToVisualGeometry();
   m_surface->setInputRegion(
       {InputRect{m_panelInsetX, m_panelInsetY, static_cast<int>(panelWidth), static_cast<int>(panelHeight)}}
   );
@@ -2007,6 +2101,7 @@ void PanelManager::destroyPanel() {
   m_sourceBarName.clear();
   m_attachedPanelGeometry.reset();
   m_panelOutputRect.reset();
+  m_panelOutputAnchor = 0;
   m_attachedToBar = false;
   m_animateOpen = true;
   m_attachedOpenAnimationPending = false;
@@ -2418,6 +2513,10 @@ std::optional<LayerPopupParentContext> PanelManager::fallbackPopupParentContext(
 }
 
 void PanelManager::onKeyboardEvent(const KeyboardEvent& event) {
+  if (!event.pressed && m_suppressedFullscreenCancelKey.has_value() && event.key == *m_suppressedFullscreenCancelKey) {
+    m_suppressedFullscreenCancelKey.reset();
+    return;
+  }
   if (m_appleMusicFullscreenHost != nullptr && m_appleMusicFullscreenHost->onKeyboardEvent(event)) {
     return;
   }
@@ -3067,6 +3166,7 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
           m_panelInsetX, m_panelInsetY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight)
       }});
     }
+    syncPanelOutputRectToVisualGeometry();
   }
 
   if (m_attachedToBar) {
@@ -3167,6 +3267,32 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
   if (m_pointerInside) {
     m_inputDispatcher.syncPointerHover();
   }
+}
+
+void PanelManager::syncPanelOutputRectToVisualGeometry() {
+  if (!m_panelOutputRect.has_value() || m_panelVisualWidth == 0 || m_panelVisualHeight == 0) {
+    return;
+  }
+
+  auto& rect = *m_panelOutputRect;
+  const float width = static_cast<float>(m_panelVisualWidth);
+  const float height = static_cast<float>(m_panelVisualHeight);
+  const bool anchoredLeft = (m_panelOutputAnchor & LayerShellAnchor::Left) != 0;
+  const bool anchoredRight = (m_panelOutputAnchor & LayerShellAnchor::Right) != 0;
+  const bool anchoredTop = (m_panelOutputAnchor & LayerShellAnchor::Top) != 0;
+  const bool anchoredBottom = (m_panelOutputAnchor & LayerShellAnchor::Bottom) != 0;
+
+  // A compositor configure can make the real layer-surface body smaller than
+  // the requested panel body. Preserve whichever trailing edge owns placement
+  // and make the fullscreen handoff consume the geometry actually laid out.
+  if (anchoredRight && !anchoredLeft) {
+    rect.x += rect.width - width;
+  }
+  if (anchoredBottom && !anchoredTop) {
+    rect.y += rect.height - height;
+  }
+  rect.width = width;
+  rect.height = height;
 }
 
 void PanelManager::applyPendingPanelFocus() {

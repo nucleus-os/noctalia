@@ -15,8 +15,10 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_devtools_message_observer.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_request_handler.h"
+#include "include/cef_values.h"
 #include "include/wrapper/cef_helpers.h"
 #include "render/core/texture_manager.h"
 #include "render/graphics_device.h"
@@ -43,6 +45,7 @@ namespace {
   constexpr std::int64_t kBackgroundBeginFrameIntervalNs = 1'000'000'000LL;
   constexpr auto kBackgroundBeginFrameInterval = std::chrono::milliseconds(1000);
   constexpr std::int64_t kBeginFrameAckRecoveryNs = 2'000'000'000;
+  constexpr auto kPresentationResizeCaptureTimeout = std::chrono::milliseconds(500);
 
   std::int64_t steadyNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -238,6 +241,34 @@ private:
   std::function<void(std::int64_t)> m_callback;
 };
 
+class NoctaliaDevToolsMethodObserver final : public CefDevToolsMessageObserver {
+public:
+  using ResultCallback = std::function<void(int, bool)>;
+
+  explicit NoctaliaDevToolsMethodObserver(ResultCallback callback) : m_callback(std::move(callback)) {}
+
+  void OnDevToolsMethodResult(
+      CefRefPtr<CefBrowser> /*browser*/, int messageId, bool success, const void* /*result*/,
+      size_t /*resultSize*/
+  ) override {
+    if (m_callback) {
+      m_callback(messageId, success);
+    }
+  }
+
+  void OnDevToolsAgentDetached(CefRefPtr<CefBrowser> /*browser*/) override {
+    if (m_callback) {
+      // A detached agent drops outstanding method results. Zero completes the
+      // one bounded presentation transaction regardless of its assigned ID.
+      m_callback(0, false);
+    }
+  }
+
+private:
+  ResultCallback m_callback;
+  IMPLEMENT_REFCOUNTING(NoctaliaDevToolsMethodObserver);
+};
+
 // ---------------------------------------------------------------------------
 // Impl: the actual CEF-owning state.
 // ---------------------------------------------------------------------------
@@ -248,6 +279,8 @@ struct CefService::Impl {
   CefRefPtr<NoctaliaCefApp> app;
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<CefClient> client;
+  CefRefPtr<CefDevToolsMessageObserver> devToolsObserver;
+  CefRefPtr<CefRegistration> devToolsRegistration;
 
   bool initialized = false;
   bool attached = false;
@@ -258,6 +291,9 @@ struct CefService::Impl {
   CefRendererRecovery rendererRecovery;
   Timer beginFrameAckWatchdog;
   Timer backgroundFrameHeartbeat;
+  Timer presentationResizeCaptureTimeout;
+  int presentationResizeCaptureMessageId = 0;
+  std::function<void()> presentationResizeCaptureReady;
   std::string pendingUrl;
   int logicalWidth = 1280;
   int logicalHeight = 720;
@@ -285,6 +321,29 @@ struct CefService::Impl {
   [[nodiscard]] bool frameProductionEnabled() const noexcept { return attached || backgroundPlaybackActive; }
 
   [[nodiscard]] bool parkedPlaybackRefreshEnabled() const noexcept { return !attached && backgroundPlaybackActive; }
+
+  void completePresentationResizeCapture(int messageId, bool success) {
+    if (presentationResizeCaptureMessageId == 0
+        || (messageId != 0 && messageId != presentationResizeCaptureMessageId)) {
+      return;
+    }
+    presentationResizeCaptureTimeout.stop();
+    presentationResizeCaptureMessageId = 0;
+    auto ready = std::move(presentationResizeCaptureReady);
+    presentationResizeCaptureReady = nullptr;
+    if (!success) {
+      kLog.warn("Apple Music viewport-state capture was unavailable; continuing the presentation resize");
+    }
+    if (!ready) {
+      return;
+    }
+    auto token = alive;
+    DeferredCall::callLater([token, ready = std::move(ready)]() mutable {
+      if (token->load() && ready) {
+        ready();
+      }
+    });
+  }
 
   void startBackgroundFrameHeartbeat() {
     if (!parkedPlaybackRefreshEnabled() || browser == nullptr) {
@@ -667,6 +726,17 @@ namespace {
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
       CEF_REQUIRE_UI_THREAD();
       m_impl->browser = browser;
+      auto alive = m_impl->alive;
+      auto* impl = m_impl;
+      m_impl->devToolsObserver = new NoctaliaDevToolsMethodObserver(
+          [alive, impl](int messageId, bool success) {
+            if (alive->load()) {
+              impl->completePresentationResizeCapture(messageId, success);
+            }
+          }
+      );
+      m_impl->devToolsRegistration =
+          browser->GetHost()->AddDevToolsMessageObserver(m_impl->devToolsObserver);
       browser->GetHost()->WasHidden(!m_impl->frameProductionEnabled());
       browser->GetHost()->WasResized();
       if (m_impl->frameProductionEnabled()) {
@@ -678,6 +748,11 @@ namespace {
     }
     void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override {
       m_impl->stopExternalScheduler();
+      m_impl->presentationResizeCaptureTimeout.stop();
+      m_impl->presentationResizeCaptureMessageId = 0;
+      m_impl->presentationResizeCaptureReady = nullptr;
+      m_impl->devToolsRegistration = nullptr;
+      m_impl->devToolsObserver = nullptr;
       m_impl->rendererRecovery.reset();
       m_impl->browser = nullptr;
     }
@@ -808,6 +883,17 @@ bool CefService::initialize() {
   settings.multi_threaded_message_loop = false;
   settings.external_message_pump = true;
   settings.log_severity = LOGSEVERITY_WARNING;
+  if (const char* value = std::getenv("NOCTALIA_CEF_REMOTE_DEBUGGING_PORT");
+      value != nullptr && value[0] != '\0') {
+    char* end = nullptr;
+    const long port = std::strtol(value, &end, 10);
+    if (end != value && *end == '\0' && port >= 1024 && port <= 65535) {
+      settings.remote_debugging_port = static_cast<int>(port);
+      kLog.info("CEF remote debugging enabled on loopback port {}", port);
+    } else {
+      kLog.warn("ignoring invalid NOCTALIA_CEF_REMOTE_DEBUGGING_PORT={}", value);
+    }
+  }
   // Apple Music uses session cookies for part of its authentication state.
   // Keep those cookies in the persistent CEF profile across shell restarts.
   settings.persist_session_cookies = true;
@@ -974,6 +1060,47 @@ void CefService::execJs(const std::string& code) {
     m_impl->browser->GetMainFrame()->ExecuteJavaScript(code, m_impl->browser->GetMainFrame()->GetURL(), 0);
     m_impl->requestExternalBeginFrame(true);
   }
+}
+
+void CefService::preparePresentationResize(std::function<void()> ready) {
+  if (!ready) {
+    return;
+  }
+  if (m_impl->browser == nullptr || m_impl->devToolsRegistration == nullptr) {
+    ready();
+    return;
+  }
+
+  // There is only one fullscreen transition owner. Still terminate an older
+  // request defensively so renderer detachment or rapid input cannot strand
+  // either state machine.
+  if (m_impl->presentationResizeCaptureMessageId != 0) {
+    m_impl->completePresentationResizeCapture(0, false);
+  }
+
+  CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
+  params->SetString(
+      "expression",
+      "Boolean(globalThis.__noctaliaAppleMusicLyricsResizeV1?.capture?.())"
+  );
+  params->SetBool("returnByValue", true);
+  const int messageId =
+      m_impl->browser->GetHost()->ExecuteDevToolsMethod(0, "Runtime.evaluate", params);
+  if (messageId == 0) {
+    ready();
+    return;
+  }
+
+  m_impl->presentationResizeCaptureMessageId = messageId;
+  m_impl->presentationResizeCaptureReady = std::move(ready);
+  auto alive = m_impl->alive;
+  auto* impl = m_impl.get();
+  m_impl->presentationResizeCaptureTimeout.start(kPresentationResizeCaptureTimeout, [alive, impl, messageId]() {
+    if (!alive->load() || impl->presentationResizeCaptureMessageId != messageId) {
+      return;
+    }
+    impl->completePresentationResizeCapture(messageId, false);
+  });
 }
 
 void CefService::setDeviceScale(float scale) {

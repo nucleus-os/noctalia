@@ -9,6 +9,7 @@
 #include "render/core/renderer.h"
 #include "render/scene/input_area.h"
 #include "render/scene/node.h"
+#include "shell/control_center/equalizer_card.h"
 #include "shell/control_center/tab.h"
 #include "shell/panel/panel_manager.h"
 #include "system/desktop_entry.h"
@@ -1307,11 +1308,11 @@ namespace {
 } // namespace
 
 AudioTab::AudioTab(
-    PipeWireService* audio, EasyEffectsService* easyEffects, MprisService* mpris, ConfigService* config,
-    WaylandConnection* wayland, RenderContext* renderContext
+    PipeWireService* audio, EasyEffectsService* easyEffects, EqualizerService* equalizer, MprisService* mpris,
+    ConfigService* config, WaylandConnection* wayland, RenderContext* renderContext
 )
-    : m_audio(audio), m_easyEffects(easyEffects), m_mpris(mpris), m_config(config), m_wayland(wayland),
-      m_renderContext(renderContext) {}
+    : m_audio(audio), m_easyEffects(easyEffects), m_equalizer(equalizer), m_mpris(mpris), m_config(config),
+      m_wayland(wayland), m_renderContext(renderContext) {}
 
 AudioTab::~AudioTab() = default;
 
@@ -1407,7 +1408,7 @@ bool AudioTab::dragging() const noexcept {
       return true;
     }
   }
-  return false;
+  return m_equalizerCard != nullptr && m_equalizerCard->dragging();
 }
 
 bool AudioTab::dismissTransientUi() {
@@ -1424,7 +1425,7 @@ std::unique_ptr<Flex> AudioTab::createDeviceVolumeCard(DeviceVolumeCardSpec card
   const float scale = contentScale();
   const float sliderMax = sliderMaxPercent() / 100.0f;
 
-  return ui::column(
+  auto column = ui::column(
       {
           .flexGrow = 1.0f,
           .configure =
@@ -1554,47 +1555,74 @@ std::unique_ptr<Flex> AudioTab::createDeviceVolumeCard(DeviceVolumeCardSpec card
                       },
               })
           )
-      ),
-      ui::row(
-          {
-              .out = &card.state.effectsProfileRow,
-              .align = FlexAlign::Center,
-              .gap = Style::spaceSm * scale,
-              .visible = false,
-              .participatesInLayout = false,
-          },
-          ui::label({
-              .text = i18n::tr("control-center.audio.effects-profile") + ":",
-              .fontSize = Style::fontSizeCaption * scale,
-              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-          }),
-          ui::select({
-              .out = &card.state.effectsProfileSelect,
-              .placeholder = i18n::tr("control-center.audio.choose-effects-profile"),
-              .fontSize = Style::fontSizeCaption * scale,
-              .controlHeight = Style::controlHeightSm * scale,
-              .horizontalPadding = Style::spaceSm * scale,
-              .glyphSize = Style::fontSizeBody * scale,
-              .notifyOnReselect = true,
-              .enabled = false,
-              .surfaceOpacity = panelCardOpacity(),
-              .height = Style::controlHeightSm * scale,
-              .flexGrow = 1.0f,
-          })
       )
   );
+
+  // The output chain is driven by the equalizer card instead, so only the input
+  // card still offers whole-profile selection. syncEffectsProfileControls()
+  // null-guards the pointers this leaves unset.
+  if (card.showEffectsProfile) {
+    column->addChild(
+        ui::row(
+            {
+                .out = &card.state.effectsProfileRow,
+                .align = FlexAlign::Center,
+                .gap = Style::spaceSm * scale,
+                .visible = false,
+                .participatesInLayout = false,
+            },
+            ui::label({
+                .text = i18n::tr("control-center.audio.effects-profile") + ":",
+                .fontSize = Style::fontSizeCaption * scale,
+                .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            }),
+            ui::select({
+                .out = &card.state.effectsProfileSelect,
+                .placeholder = i18n::tr("control-center.audio.choose-effects-profile"),
+                .fontSize = Style::fontSizeCaption * scale,
+                .controlHeight = Style::controlHeightSm * scale,
+                .horizontalPadding = Style::spaceSm * scale,
+                .glyphSize = Style::fontSizeBody * scale,
+                .notifyOnReselect = true,
+                .enabled = false,
+                .surfaceOpacity = panelCardOpacity(),
+                .height = Style::controlHeightSm * scale,
+                .flexGrow = 1.0f,
+            })
+        )
+    );
+  }
+
+  return column;
 }
 
 std::unique_ptr<Flex> AudioTab::create() {
   const float scale = contentScale();
 
-  auto tab = ui::column(
-      {
-          .out = &m_rootLayout,
-          .align = FlexAlign::Stretch,
-          .gap = Style::spaceMd * scale,
+  auto tab = ui::column({
+      .out = &m_rootLayout,
+      .align = FlexAlign::Stretch,
+      .gap = Style::spaceMd * scale,
+  });
+
+  // The whole tab scrolls: the equalizer's height varies with the band count, so
+  // a fixed layout would push the application volumes out of the viewport.
+  auto scroll = ui::scrollView({
+      .scrollbarVisible = true,
+      .viewportPaddingH = 0.0f,
+      .viewportPaddingV = 0.0f,
+      .flexGrow = 1.0f,
+      .configure = [](ScrollView& view) {
+        view.clearFill();
+        view.clearBorder();
       },
-      ui::row(
+  });
+  Flex* content = scroll->content();
+  content->setDirection(FlexDirection::Vertical);
+  content->setAlign(FlexAlign::Stretch);
+  content->setGap(Style::spaceMd * scale);
+
+  content->addChild(ui::row(
           {
               .align = FlexAlign::Stretch,
               .gap = Style::spaceSm * scale,
@@ -1612,6 +1640,7 @@ std::unique_ptr<Flex> AudioTab::create() {
               .devicePrefixKey = "control-center.audio.output-device-prefix",
               .noDeviceKey = "control-center.audio.no-output-selected",
               .muteGlyph = "volume-high",
+              .showEffectsProfile = false,
               .queueVolume =
                   [this](float value) {
                     const AudioNode* sink = m_audio != nullptr ? m_audio->defaultSink() : nullptr;
@@ -1657,37 +1686,33 @@ std::unique_ptr<Flex> AudioTab::create() {
                     PanelManager::instance().refresh();
                   },
           })
-      )
-  );
+  ));
+
+  if (m_equalizer != nullptr) {
+    auto equalizerCard = std::make_unique<EqualizerCard>(m_equalizer, AudioEffectsProfileKind::Output, scale);
+    m_equalizerCard = equalizerCard.get();
+    content->addChild(std::move(equalizerCard));
+  }
 
   auto programCard = ui::column({
       .out = &m_programCard,
-      .flexGrow = 1.0f,
       .configure = [scale, opacity = panelCardOpacity(), borders = panelBordersEnabled()](Flex& card) {
         applySectionCardStyle(card, scale, opacity, borders);
       },
   });
   addTitle(*programCard, i18n::tr("control-center.audio.application-volumes"), scale);
 
-  auto programScroll = ui::scrollView({
-      .out = &m_programScroll,
-      .scrollbarVisible = true,
-      .viewportPaddingH = 0.0f,
-      .viewportPaddingV = 0.0f,
-      .flexGrow = 1.0f,
-      .configure = [](ScrollView& scroll) {
-        scroll.clearFill();
-        scroll.clearBorder();
-      },
+  // Plain column, not a nested ScrollView: the tab-level scroll owns scrolling,
+  // and an inner scroll here would have no bounded height to scroll within.
+  auto programList = ui::column({
+      .out = &m_programList,
+      .align = FlexAlign::Stretch,
+      .gap = Style::spaceSm * scale,
   });
+  programCard->addChild(std::move(programList));
+  content->addChild(std::move(programCard));
 
-  m_programList = programScroll->content();
-  m_programList->setDirection(FlexDirection::Vertical);
-  m_programList->setAlign(FlexAlign::Stretch);
-  m_programList->setGap(Style::spaceSm * scale);
-
-  programCard->addChild(std::move(programScroll));
-  tab->addChild(std::move(programCard));
+  tab->addChild(std::move(scroll));
 
   if (m_wayland != nullptr && m_renderContext != nullptr) {
     m_deviceMenuPopup = std::make_unique<ContextMenuPopup>(*m_wayland, *m_renderContext);
@@ -1716,6 +1741,10 @@ void AudioTab::doUpdate(Renderer& renderer) {
   rebuildProgramVolumes(renderer);
   syncValueLabelWidths(renderer);
   syncEffectsProfileControls(renderer);
+
+  if (m_equalizerCard != nullptr) {
+    m_equalizerCard->sync(renderer);
+  }
 
   if (m_audio != nullptr) {
     const AudioState& state = m_audio->state();
@@ -1830,8 +1859,8 @@ void AudioTab::onClose() {
   m_lastInputWidth = -1.0f;
   m_lastOutputListKey.clear();
   m_lastInputListKey.clear();
+  m_equalizerCard = nullptr;
   m_programCard = nullptr;
-  m_programScroll = nullptr;
   m_programList = nullptr;
   m_programRows.clear();
   m_lastProgramListKey.clear();
@@ -1919,6 +1948,10 @@ void AudioTab::syncEffectsProfileControls(Renderer& /*renderer*/) {
       }
       if (!m_easyEffects->loadEffectsProfile(kind, profile)) {
         m_lastEffectsProfileListKey.clear();
+      }
+      // A new profile brings its own effects chain, so the band layout may differ.
+      if (m_equalizerCard != nullptr) {
+        m_equalizerCard->markStale();
       }
       PanelManager::instance().refresh();
     });

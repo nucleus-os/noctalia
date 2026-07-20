@@ -52,6 +52,10 @@ public:
   void resize(int logicalWidth, int logicalHeight);
   void navigate(const std::string& url);
   void execJs(const std::string& code);
+  // Capture page-owned semantic scroll state before a fullscreen/panel
+  // viewport transition. The callback is acknowledged by the renderer, with
+  // a bounded timeout fallback, so the Wayland resize cannot race the capture.
+  void preparePresentationResize(std::function<void()> ready);
   void setDeviceScale(float scale);
 
   // Input — logical (DIP) coordinates, matching CefMouseEvent's coordinate space.

@@ -546,6 +546,7 @@ void Application::initPanelManagerAndPanels() {
           .notifications = &m_notificationManager,
           .audio = m_pipewireService.get(),
           .easyEffects = m_easyEffectsService.get(),
+          .equalizer = m_equalizerService.get(),
           .mpris = m_mprisService.get(),
           .config = &m_configService,
           .httpClient = &m_httpClient,

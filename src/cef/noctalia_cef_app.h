@@ -30,9 +30,12 @@ public:
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
   void OnBeforeCommandLineProcessing(const CefString& processType, CefRefPtr<CefCommandLine> cmd) override;
 
-  // CefBrowserProcessHandler — may fire on any CEF thread; the callback marshals
-  // to the main loop.
+  // CefBrowserProcessHandler
   void OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> cmd) override;
+  bool OnAlreadyRunningAppRelaunch(
+      CefRefPtr<CefCommandLine> commandLine, const CefString& currentDirectory
+  ) override;
+  // May fire on any CEF thread; the callback marshals to the main loop.
   void OnScheduleMessagePumpWork(std::int64_t delayMs) override;
 
   // CefRenderProcessHandler

@@ -1189,6 +1189,7 @@ void Application::initBrightnessAndPipewire() {
     m_easyEffectsService = std::make_unique<EasyEffectsService>();
     m_easyEffectsService->refreshProfiles();
     m_easyEffectsService->refreshActiveEffectsProfiles();
+    m_equalizerService = std::make_unique<EqualizerService>();
     m_pipewireSpectrum = std::make_unique<PipeWireSpectrum>(*m_pipewireService);
     m_soundPlayer = std::make_unique<SoundPlayer>(m_pipewireService->loop());
 
@@ -1244,6 +1245,7 @@ void Application::initBrightnessAndPipewire() {
     kLog.warn("pipewire disabled: {}", e.what());
     m_soundPlayer.reset();
     m_pipewireSpectrum.reset();
+    m_equalizerService.reset();
     m_easyEffectsService.reset();
     m_pipewireService.reset();
     m_wirePlumberMixer.reset();

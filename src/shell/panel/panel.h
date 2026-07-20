@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -65,6 +66,14 @@ public:
   [[nodiscard]] virtual bool supportsFullscreenPresentation() const noexcept { return false; }
   [[nodiscard]] virtual bool fullscreenPresentation() const noexcept { return false; }
   virtual void setFullscreenPresentation(bool fullscreen) noexcept { (void)fullscreen; }
+  // Give web-backed panels a chance to capture semantic viewport state before
+  // the compositor changes their size. Implementations must always invoke
+  // ready; the default keeps native panels synchronous.
+  virtual void preparePresentationResize(std::function<void()> ready) {
+    if (ready) {
+      ready();
+    }
+  }
   // Keeps an external producer live while this panel's scene moves between
   // two presentation surfaces. The replacement scene clears the transfer in
   // onOpen(); ordinary closes retain their normal detach behavior.

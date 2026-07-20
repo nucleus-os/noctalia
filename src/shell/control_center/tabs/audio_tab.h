@@ -16,6 +16,8 @@ class ConfigService;
 class Button;
 class ContextMenuPopup;
 class EasyEffectsService;
+class EqualizerCard;
+class EqualizerService;
 class Flex;
 class Label;
 class MprisService;
@@ -32,8 +34,8 @@ struct AudioState;
 class AudioTab : public Tab {
 public:
   AudioTab(
-      PipeWireService* audio, EasyEffectsService* easyEffects, MprisService* mpris, ConfigService* config,
-      WaylandConnection* wayland, RenderContext* renderContext
+      PipeWireService* audio, EasyEffectsService* easyEffects, EqualizerService* equalizer, MprisService* mpris,
+      ConfigService* config, WaylandConnection* wayland, RenderContext* renderContext
   );
   ~AudioTab() override;
 
@@ -68,6 +70,7 @@ private:
     std::string_view devicePrefixKey;
     std::string_view noDeviceKey;
     std::string_view muteGlyph;
+    bool showEffectsProfile = true;
     std::function<void(float)> queueVolume;
     std::function<void()> toggleMute;
   };
@@ -89,6 +92,7 @@ private:
 
   PipeWireService* m_audio = nullptr;
   EasyEffectsService* m_easyEffects = nullptr;
+  EqualizerService* m_equalizer = nullptr;
   MprisService* m_mpris = nullptr;
   ConfigService* m_config = nullptr;
   WaylandConnection* m_wayland = nullptr;
@@ -102,8 +106,8 @@ private:
   ScrollView* m_inputScroll = nullptr;
   Flex* m_outputList = nullptr;
   Flex* m_inputList = nullptr;
+  EqualizerCard* m_equalizerCard = nullptr;
   Flex* m_programCard = nullptr;
-  ScrollView* m_programScroll = nullptr;
   Flex* m_programList = nullptr;
   std::vector<Flex*> m_programRows;
   std::string m_lastProgramListKey;

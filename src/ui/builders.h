@@ -313,6 +313,7 @@ namespace ui {
 
   struct SliderProps {
     Slider** out = nullptr;
+    std::optional<SliderOrientation> orientation = std::nullopt;
     std::optional<double> minValue = std::nullopt;
     std::optional<double> maxValue = std::nullopt;
     std::optional<double> step = std::nullopt;

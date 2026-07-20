@@ -167,6 +167,7 @@ private:
   void prepareFrame(bool needsUpdate, bool needsLayout);
   [[nodiscard]] RenderContext* activeRenderContext() const noexcept;
   void applyPendingPanelFocus();
+  void syncPanelOutputRectToVisualGeometry();
   void destroyPanel();
   // Called BEFORE the panel surface commits so shields sit below the panel
   // within the layer-shell layer. No-op when the focus-grab path is in use.
@@ -255,11 +256,17 @@ private:
   std::string m_sourceBarName;       // name of the bar that opened the current panel
   std::optional<AttachedPanelGeometry> m_attachedPanelGeometry;
   std::optional<PanelOutputRect> m_panelOutputRect;
+  std::uint32_t m_panelOutputAnchor = 0;
   std::unique_ptr<AppleMusicFullscreenHost> m_appleMusicFullscreenHost;
   // During fullscreen exit, keep the restored toplevel's last committed
   // buffer mapped until the replacement layer panel has actually presented.
   std::unique_ptr<AppleMusicFullscreenHost> m_retiredAppleMusicFullscreenHost;
   Timer m_appleMusicHandoffTimer;
+  // Escape begins the fullscreen-to-panel handoff on key-down. Its matching
+  // key-up can arrive after keyboard focus has moved to the replacement panel;
+  // retain the physical key across that surface transition so CEF never sees
+  // an orphaned release event.
+  std::optional<std::uint32_t> m_suppressedFullscreenCancelKey;
   bool m_pointerInside = false;
   bool m_inTransition = false;
   bool m_closing = false;

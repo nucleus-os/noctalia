@@ -80,6 +80,7 @@ public:
   [[nodiscard]] zwlr_layer_surface_v1* layerSurfaceFor(wl_surface* surface) const noexcept;
   void stopKeyRepeat();
   void setCursorShape(std::uint32_t serial, std::uint32_t shape);
+  [[nodiscard]] bool setCursorHidden(std::uint32_t serial, bool hidden);
 
   // Output resolved from a real focus source (compositor IPC, focused-output
   // backend, active toplevel, keyboard/fresh-pointer surface). Returns nullptr

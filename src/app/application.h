@@ -109,6 +109,7 @@ class BrightnessPollSource;
 class BrightnessService;
 class DebugService;
 class EasyEffectsService;
+class EqualizerService;
 class INetworkService;
 class IwdSecretAgent;
 class LogindService;
@@ -273,6 +274,7 @@ private:
   std::unique_ptr<PipeWireService> m_pipewireService;
   std::unique_ptr<WirePlumberMixer> m_wirePlumberMixer;
   std::unique_ptr<EasyEffectsService> m_easyEffectsService;
+  std::unique_ptr<EqualizerService> m_equalizerService;
   std::unique_ptr<PipeWireSpectrum> m_pipewireSpectrum;
   std::unique_ptr<SoundPlayer> m_soundPlayer;
 

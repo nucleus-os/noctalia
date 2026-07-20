@@ -13,6 +13,7 @@ class CompositorPlatform;
 class ConfigService;
 class DependencyService;
 class EasyEffectsService;
+class EqualizerService;
 class FileWatcher;
 class HttpClient;
 class IdleInhibitor;
@@ -43,6 +44,7 @@ struct ControlCenterServices {
   NotificationManager* notifications = nullptr;
   PipeWireService* audio = nullptr;
   EasyEffectsService* easyEffects = nullptr;
+  EqualizerService* equalizer = nullptr;
   MprisService* mpris = nullptr;
   ConfigService* config = nullptr;
   HttpClient* httpClient = nullptr;

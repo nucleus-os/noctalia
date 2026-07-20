@@ -131,6 +131,7 @@ public:
   void setTextInputService(TextInputService* textInputService);
   void setVirtualKeyboardService(VirtualKeyboardService* virtualKeyboardService);
   void setCursorShape(std::uint32_t serial, std::uint32_t shape);
+  [[nodiscard]] bool setCursorHidden(std::uint32_t serial, bool hidden);
 
   [[nodiscard]] int repeatPollTimeoutMs() const;
   void repeatTick();

@@ -521,6 +521,10 @@ void WaylandConnection::setCursorShape(std::uint32_t serial, std::uint32_t shape
   m_seatHandler.setCursorShape(serial, shape);
 }
 
+bool WaylandConnection::setCursorHidden(std::uint32_t serial, bool hidden) {
+  return m_seatHandler.setCursorHidden(serial, hidden);
+}
+
 std::optional<ActiveToplevel> WaylandConnection::activeToplevel() const { return m_toplevelsHandler.current(); }
 
 std::optional<ActiveToplevel> WaylandConnection::matchToplevelByTitleAndAppId(

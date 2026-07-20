@@ -232,11 +232,17 @@ namespace {
     // Wayland connection fails fatally.
     ProcessFds::raiseOpenFileLimit();
 
-    // Claim the single-instance lock before any shell/Wayland init so the answer
-    // is settled before bars or surfaces are created. Held for the process lifetime.
+    // Claim the global single-instance/CEF-profile lock before any shell or
+    // Wayland initialization. It is held for the process lifetime.
     SingleInstanceLock instanceLock;
-    if (!instanceLock.tryAcquire()) {
+    const auto lockResult = instanceLock.tryAcquire();
+    if (lockResult == SingleInstanceLock::AcquireResult::AlreadyRunning) {
       std::println(stderr, "error: noctalia is already running");
+      completeDaemonStartup(1);
+      _exit(1);
+    }
+    if (lockResult == SingleInstanceLock::AcquireResult::Error) {
+      std::println(stderr, "error: failed to acquire noctalia instance lock {}", instanceLock.path());
       completeDaemonStartup(1);
       _exit(1);
     }

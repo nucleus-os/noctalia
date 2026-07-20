@@ -589,6 +589,9 @@ namespace ui {
 
   std::unique_ptr<Slider> slider(SliderProps props) {
     auto control = std::make_unique<Slider>();
+    if (props.orientation.has_value()) {
+      control->setOrientation(*props.orientation);
+    }
     if (props.minValue.has_value() || props.maxValue.has_value()) {
       control->setRange(props.minValue.value_or(control->minValue()), props.maxValue.value_or(control->maxValue()));
     }

@@ -9,6 +9,7 @@
 #include "i18n/i18n.h"
 #include "shell/osd/osd_overlay.h"
 #include "system/easyeffects_service.h"
+#include "system/equalizer_service.h"
 #include "system/gamma_service.h"
 
 #include <algorithm>

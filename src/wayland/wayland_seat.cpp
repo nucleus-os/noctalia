@@ -108,6 +108,9 @@ void WaylandSeat::setCursorShape(std::uint32_t serial, std::uint32_t shape) {
     );
     return;
   }
+  if (m_cursorHidden) {
+    return;
+  }
   if (shape == m_appliedCursorShape) {
     return;
   }
@@ -116,6 +119,34 @@ void WaylandSeat::setCursorShape(std::uint32_t serial, std::uint32_t shape) {
   );
   wp_cursor_shape_device_v1_set_shape(m_cursorShapeDevice, serial, shape);
   m_appliedCursorShape = shape;
+}
+
+bool WaylandSeat::setCursorHidden(std::uint32_t serial, bool hidden) {
+  // cursor-shape-v1 is also the restoration path after a null wl_pointer
+  // cursor. Do not hide on seats where we cannot reliably reveal it again.
+  if (m_pointer == nullptr
+      || m_cursorShapeDevice == nullptr
+      || m_pointerEnterSerial == 0
+      || serial != m_pointerEnterSerial) {
+    return false;
+  }
+  if (hidden == m_cursorHidden) {
+    return true;
+  }
+
+  if (hidden) {
+    wl_pointer_set_cursor(m_pointer, serial, nullptr, 0, 0);
+    m_cursorHidden = true;
+    m_appliedCursorShape = 0;
+    return true;
+  }
+
+  m_cursorHidden = false;
+  m_appliedCursorShape = WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT;
+  wp_cursor_shape_device_v1_set_shape(
+      m_cursorShapeDevice, serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT
+  );
+  return true;
 }
 
 void WaylandSeat::forgetSurface(wl_surface* surface) noexcept {
@@ -131,6 +162,7 @@ void WaylandSeat::forgetSurface(wl_surface* surface) noexcept {
     m_lastPointerSurface = nullptr;
     m_pointerEnterSerial = 0;
     m_appliedCursorShape = 0;
+    m_cursorHidden = false;
     m_hasPointerPosition = false;
   }
   if (m_lastKeyboardSurface == surface) {
@@ -154,6 +186,7 @@ void WaylandSeat::cleanup() {
     wl_pointer_destroy(m_pointer);
     m_pointer = nullptr;
   }
+  m_cursorHidden = false;
   m_cursorShapeManager = nullptr;
 
   if (m_touch != nullptr) {
@@ -227,6 +260,7 @@ void WaylandSeat::handleSeatCapabilities(void* data, wl_seat* seat, std::uint32_
     }
     wl_pointer_destroy(self->m_pointer);
     self->m_pointer = nullptr;
+    self->m_cursorHidden = false;
     kLog.info("pointer: released");
   }
 
@@ -257,6 +291,7 @@ void WaylandSeat::handlePointerEnter(
   self->m_lastPointerSurface = surface;
   self->m_pointerEnterSerial = serial;
   self->m_appliedCursorShape = 0;
+  self->m_cursorHidden = false;
   self->m_lastPointerX = wl_fixed_to_double(sx);
   self->m_lastPointerY = wl_fixed_to_double(sy);
   self->m_hasPointerPosition = true;
@@ -293,6 +328,7 @@ void WaylandSeat::handlePointerLeave(void* data, wl_pointer* /*pointer*/, std::u
   self->m_lastPointerSurface = surface;
   self->m_pointerEnterSerial = 0;
   self->m_appliedCursorShape = 0;
+  self->m_cursorHidden = false;
   self->m_hasPointerPosition = false;
   self->m_pendingPointerEvents.push_back(
       PointerEvent{

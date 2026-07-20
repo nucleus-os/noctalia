@@ -89,3 +89,7 @@ void AppleMusicPanel::doUpdate(Renderer& renderer) {
 void AppleMusicPanel::setFullscreenPresentation(bool fullscreen) noexcept {
   m_fullscreen = fullscreen;
 }
+
+void AppleMusicPanel::preparePresentationResize(std::function<void()> ready) {
+  m_service.preparePresentationResize(std::move(ready));
+}

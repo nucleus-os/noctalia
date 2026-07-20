@@ -9,23 +9,28 @@
 // releases the lock automatically when the holding process dies, so a crashed
 // instance never leaves a stale lock behind — no manual cleanup, no PID probing.
 //
-// The lock is scoped per Wayland display (matching the IPC socket naming) and is
-// independent of IPC: it exists purely to answer "am I the only noctalia on this
-// display?" and must be claimed before any shell/Wayland init so the answer is
-// settled before bars or surfaces are created.
+// The lock is global to the user runtime directory because Noctalia owns a
+// process-global CEF profile. Two instances on different Wayland displays would
+// otherwise collide in CEF's process singleton despite holding different shell
+// locks. Display-specific IPC paths remain independent of this ownership lock.
 class SingleInstanceLock {
 public:
+  enum class AcquireResult {
+    Acquired,
+    AlreadyRunning,
+    Error,
+  };
+
   SingleInstanceLock() = default;
   ~SingleInstanceLock();
 
   SingleInstanceLock(const SingleInstanceLock&) = delete;
   SingleInstanceLock& operator=(const SingleInstanceLock&) = delete;
 
-  // Attempts to acquire the lock. Returns true if we now hold it (we are the only
-  // instance) and false if another live instance already holds it. If the lock
-  // file cannot be opened at all (e.g. an unwritable runtime dir), startup is
-  // allowed to proceed unguarded rather than bricking the shell — this is logged.
-  bool tryAcquire();
+  // Attempts to acquire the lock. Locking failures are fatal to startup: running
+  // unguarded could give two processes ownership of the same persistent CEF
+  // profile and corrupt or destabilize the active browser process.
+  [[nodiscard]] AcquireResult tryAcquire();
 
   [[nodiscard]] bool held() const noexcept { return m_fd >= 0; }
   [[nodiscard]] const std::string& path() const noexcept { return m_path; }

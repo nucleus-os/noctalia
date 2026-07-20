@@ -685,6 +685,7 @@ _noctalia_sources = files(
   'src/shell/control_center/tabs/audio_tab.cpp',
   'src/shell/control_center/tabs/bluetooth_tab.cpp',
   'src/shell/control_center/control_center_panel.cpp',
+  'src/shell/control_center/equalizer_card.cpp',
   'src/shell/control_center/tabs/monitor_tab.cpp',
   'src/shell/control_center/tabs/media_tab.cpp',
   'src/shell/control_center/tabs/network_tab.cpp',
@@ -823,7 +824,9 @@ _noctalia_sources = files(
   'src/system/hardware_info.cpp',
   'src/system/icon_resolver.cpp',
   'src/system/internal_app_metadata.cpp',
+  'src/system/easyeffects_ipc.cpp',
   'src/system/easyeffects_service.cpp',
+  'src/system/equalizer_service.cpp',
   'src/system/day_night_schedule.cpp',
   'src/system/gamma_service.cpp',
   'src/system/location_service.cpp',
@@ -1410,6 +1413,17 @@ process_test = executable('process_test',
 )
 
 test('process', process_test)
+
+single_instance_lock_test = executable('single_instance_lock_test',
+  sources: files(
+    'tests/single_instance_lock_test.cpp',
+    'src/app/single_instance_lock.cpp',
+    'src/core/log.cpp',
+  ),
+  include_directories: _noctalia_inc,
+)
+
+test('single_instance_lock', single_instance_lock_test)
 
 battery_hook_state_test = executable('battery_hook_state_test',
   sources: files(
