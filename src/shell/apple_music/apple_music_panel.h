@@ -12,6 +12,7 @@ public:
   void preparePresentationResize(std::function<void()> ready) override;
   [[nodiscard]] bool hasDecoration() const override { return !m_fullscreen; }
   [[nodiscard]] std::string panelScreenPosition() const override { return "center"; }
+  [[nodiscard]] bool usesToplevelPresentation() const noexcept override { return true; }
 
 protected:
   [[nodiscard]] float webCornerRadius() const override;

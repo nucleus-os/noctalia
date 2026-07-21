@@ -19,7 +19,12 @@ class ContextMenuPopup;
 // DOM policy and exceptional product behavior stay outside this class.
 class WebPanel : public Panel {
 public:
-  WebPanel(std::shared_ptr<CefBrowserSession> session, WebPanelSite site);
+  // `toplevelPresentation`: host this panel in its own persistent xdg_toplevel (see
+  // Panel::usesToplevelPresentation()) instead of the shared layer-shell surface. Subclasses
+  // with more surface-behavior differences (e.g. AppleMusicPanel) still override the virtual
+  // directly; this flag exists so a plain WebPanel instance (Discord) can opt in without needing
+  // a dedicated subclass for that one bit.
+  WebPanel(std::shared_ptr<CefBrowserSession> session, WebPanelSite site, bool toplevelPresentation = false);
   ~WebPanel() override;
 
   void create() override;
@@ -30,7 +35,6 @@ public:
 
   [[nodiscard]] float preferredWidth() const override;
   [[nodiscard]] float preferredHeight() const override;
-  void setPresentationTransfer(bool transferring) noexcept override { m_presentationTransfer = transferring; }
   [[nodiscard]] bool usesContentPadding() const noexcept override { return false; }
   [[nodiscard]] bool detachedBackgroundInheritsSourceBarOpacity() const noexcept override { return true; }
   [[nodiscard]] LayerShellLayer layer() const override { return LayerShellLayer::Overlay; }
@@ -39,6 +43,7 @@ public:
   [[nodiscard]] PanelPlacement panelPlacement() const noexcept override { return PanelPlacement::Floating; }
   [[nodiscard]] std::string panelScreenPosition() const override { return "auto"; }
   [[nodiscard]] bool panelOpenNearClick() const override { return true; }
+  [[nodiscard]] bool usesToplevelPresentation() const noexcept override { return m_toplevelPresentation; }
 
   [[nodiscard]] const WebPanelProfile& profile() const noexcept { return m_profile; }
   [[nodiscard]] const std::shared_ptr<CefBrowserSession>& session() const noexcept { return m_session; }
@@ -81,9 +86,9 @@ protected:
     int preferredHeight = 0;
   };
   std::vector<PopupPresentation> m_popupStack;
-  bool m_presentationTransfer = false;
 
 private:
   const WebPanelProfile& m_profile;
   bool m_initialNavigationRequested = false;
+  bool m_toplevelPresentation = false;
 };

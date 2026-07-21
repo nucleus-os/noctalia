@@ -164,14 +164,12 @@ void CefSurfaceNode::attach(
   }
 }
 
-void CefSurfaceNode::detach(bool preserveDisplayAttachment) {
+void CefSurfaceNode::detach() {
   if (!m_attached) {
     return;
   }
   m_attached = false;
-  if (!preserveDisplayAttachment) {
-    m_session.setDisplayAttached(false);
-  }
+  m_session.setDisplayAttached(false);
   m_session.setFrameReadyCallback(nullptr);
   m_session.setFrameOpportunityCallback(nullptr);
   m_session.setCursorCallback(nullptr);

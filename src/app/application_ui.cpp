@@ -599,7 +599,7 @@ void Application::initPanelManagerAndPanels() {
   );
   m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(m_appleMusicSession));
   m_panelManager.registerPanel(
-      "discord", std::make_unique<WebPanel>(m_discordSession, WebPanelSite::Discord)
+      "discord", std::make_unique<WebPanel>(m_discordSession, WebPanelSite::Discord, /*toplevelPresentation=*/true)
   );
   m_settingsWindow.setResetLauncherUsage([this]() {
     if (m_launcherPanel != nullptr) {

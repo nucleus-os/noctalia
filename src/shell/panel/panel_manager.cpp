@@ -24,6 +24,7 @@
 #include "ui/style.h"
 #include "util/string_utils.h"
 #include "util/sys_utils.h"
+#include "compositors/niri/niri_window_correlator.h"
 #include "wayland/hyprland/focus_grab_service.h"
 #include "wayland/internal_toplevel.h"
 #include "wayland/layer_surface.h"
@@ -37,6 +38,7 @@
 #include <cmath>
 #include <format>
 #include <nlohmann/json.hpp>
+#include <random>
 #include <string>
 #include <unistd.h>
 
@@ -46,10 +48,13 @@ namespace {
 
   constexpr Logger kLog("panel");
   constexpr std::int32_t kDetachedPanelShadowSafetyPadding = 2;
-  constexpr auto kAppleMusicFullscreenCursorIdleTimeout = std::chrono::seconds(10);
   // Allows the pointer to cross a detached panel's intentional visual gap
   // without collapsing a hover preview between the bar and panel surfaces.
   constexpr auto kPanelHoverPreviewBridgeDelay = std::chrono::milliseconds(400);
+  // How long the pointer must sit idle over a fullscreen toplevel-presented panel before its
+  // cursor auto-hides (e.g. full-screen media playback). Restored from the old
+  // AppleMusicFullscreenHost-only behavior; now shared by any CefPanelToplevelHost panel.
+  constexpr auto kCursorIdleTimeout = std::chrono::seconds(10);
 
   bool blurTraceEnabled() {
     static const bool enabled = SysUtils::isEnvFlagOn("NOCTALIA_BLUR_TRACE");
@@ -318,49 +323,42 @@ namespace {
 
 } // namespace
 
-class PanelManager::AppleMusicFullscreenHost {
+class PanelManager::CefPanelToplevelHost : public PanelSurfaceHost {
 public:
-  AppleMusicFullscreenHost(
-      PanelManager& owner, Panel& panel, wl_output* output, PanelOutputRect restoreRect, PanelOutputRect windowRect,
-      std::string sourceBarName
-  )
-      : m_owner(owner), m_panel(panel), m_output(output), m_restoreRect(restoreRect), m_windowRect(windowRect),
-        m_sourceBarName(std::move(sourceBarName)) {}
+  CefPanelToplevelHost(PanelManager& owner, std::string panelId, Panel& panel)
+      : m_owner(owner), m_panelId(std::move(panelId)), m_panel(panel) {}
 
-  ~AppleMusicFullscreenHost() { shutdown(); }
+  ~CefPanelToplevelHost() { shutdown(); }
 
-  [[nodiscard]] bool begin() {
+  [[nodiscard]] bool open(wl_output* output, PanelOutputRect targetRect, std::string sourceBarName) {
     if (m_owner.m_platform == nullptr
         || m_owner.m_renderContext == nullptr
-        || m_output == nullptr
+        || output == nullptr
         || !m_owner.m_platform->hasXdgShell()
         || !m_owner.m_platform->niriRuntime().available()
-        || m_restoreRect.width <= 0.0f
-        || m_restoreRect.height <= 0.0f) {
+        || targetRect.width <= 0.0f
+        || targetRect.height <= 0.0f) {
       return false;
     }
+
+    m_output = output;
+    m_targetRect = targetRect;
+    m_sourceBarName = std::move(sourceBarName);
 
     m_surface = std::make_unique<ToplevelSurface>(m_owner.m_platform->wayland());
     m_surface->setRenderContext(m_owner.m_renderContext);
     m_surface->setAnimationManager(&m_animations);
-    m_surface->setClosedCallback([this]() { queueFinish(/*reopenPanel=*/false); });
+    m_surface->setClosedCallback([this]() { requestClose(); });
     m_surface->setFullscreenChangedCallback([this](bool fullscreen) {
-      if (!m_live) {
-        return;
-      }
-      if (!fullscreen) {
-        stopCursorIdle(/*reveal=*/true);
-      }
       m_panel.setFullscreenPresentation(fullscreen);
       syncPresentationStyle(fullscreen);
+      if (fullscreen) {
+        armCursorIdle();
+      } else {
+        stopCursorIdle(/*reveal=*/true);
+      }
       if (m_surface != nullptr) {
         m_surface->requestLayout();
-      }
-      if (!fullscreen && m_phase == Phase::Restoring) {
-        // xdg-shell reports the restored endpoint at the beginning of niri's
-        // compositor-owned animation. Keep the toplevel alive long enough for
-        // that animation to finish before replacing it with the layer panel.
-        m_restoreTimer.start(std::chrono::milliseconds(350), [this]() { queueFinish(/*reopenPanel=*/true); });
       }
     });
     m_surface->setConfigureCallback([this](std::uint32_t, std::uint32_t) {
@@ -377,90 +375,65 @@ public:
       }
     });
     m_surface->setPresentationCallback([this](const SurfacePresentationFeedback& feedback) {
-      onPresentation(feedback);
+      if (m_live) {
+        m_panel.onPresentation(feedback);
+      }
     });
 
-    const auto width = static_cast<std::uint32_t>(std::max(1.0f, std::round(m_restoreRect.width)));
-    const auto height = static_cast<std::uint32_t>(std::max(1.0f, std::round(m_restoreRect.height)));
+    m_appId = std::string(internal_toplevel::kCefPanelAppIdPrefix) + m_panelId + "-" + randomNonce();
+
+    const auto width = static_cast<std::uint32_t>(std::max(1.0f, std::round(targetRect.width)));
+    const auto height = static_cast<std::uint32_t>(std::max(1.0f, std::round(targetRect.height)));
     const ToplevelSurfaceConfig config{
         .width = width,
         .height = height,
-        .title = "Apple Music",
-        .appId = internal_toplevel::kAppleMusicFullscreenAppId.data(),
+        .title = m_panelId,
+        .appId = m_appId.c_str(),
     };
     if (!m_surface->initialize(m_output, config)) {
       m_surface.reset();
       return false;
     }
 
-    // Map a transparent endpoint first. The normal layer panel remains the
-    // only visible CEF consumer while niri makes this window floating and
-    // places it at the exact panel geometry.
+    // Map a transparent scene first; content attaches once niri has reported and positioned
+    // the window (see onWindowCorrelated/attachContent), so the panel never flashes at
+    // whatever default location the compositor would otherwise pick for an unpositioned
+    // toplevel.
     m_sceneRoot = std::make_unique<Node>();
     m_sceneRoot->setSize(static_cast<float>(width), static_cast<float>(height));
     m_surface->setSceneRoot(m_sceneRoot.get());
     m_surface->setInputRegion({});
     m_surface->clearBlurRegion();
-    m_phase = Phase::AwaitingWindow;
+
+    m_correlator = std::make_unique<compositors::niri::NiriWindowCorrelator>(
+        m_owner.m_platform->niriRuntime(), m_appId, static_cast<long>(::getpid()),
+        [this](std::uint64_t windowId) { onWindowCorrelated(windowId); }
+    );
+
     m_surface->requestRedraw();
     return true;
   }
 
-  void exitToPanel() {
-    if (m_finishQueued) {
+  // Slide-collapse-up plays as niri's own compositor-native shell-reveal close shader
+  // (ProgramType::ShellRevealClose, selected via the shell_surface window rule) working off
+  // niri's own unmap snapshot — no client-side animation or deferred teardown needed here
+  // anymore; the surface can go away as soon as the caller asks.
+  void close() { requestClose(); }
+
+  void toggleFullscreen() {
+    if (m_surface == nullptr) {
       return;
     }
-    if (!m_live || m_surface == nullptr) {
-      queueFinish(/*reopenPanel=*/true);
-      return;
-    }
-    if (!m_surface->fullscreen()) {
-      queueFinish(/*reopenPanel=*/true);
-      return;
-    }
-    stopCursorIdle(/*reveal=*/true);
-    m_phase = Phase::PreparingRestore;
-    auto alive = m_alive;
-    m_panel.preparePresentationResize([this, alive]() {
-      if (!alive->load()
-          || m_finishQueued
-          || m_surface == nullptr
-          || m_phase != Phase::PreparingRestore) {
-        return;
-      }
-      m_phase = Phase::Restoring;
+    if (m_surface->fullscreen()) {
       m_surface->unsetFullscreen();
-    });
-  }
-
-  void close() { queueFinish(/*reopenPanel=*/false); }
-
-  void retireSceneForPanelHandoff() {
-    m_placeTimer.stop();
-    m_restoreTimer.stop();
-    stopCursorIdle(/*reveal=*/true);
-    if (m_surface != nullptr) {
-      // Detach Noctalia's live scene without destroying the wl_surface. The
-      // compositor keeps displaying its last committed buffer until the
-      // replacement layer panel reports a real presentation.
-      m_surface->setSceneRoot(nullptr);
-      m_surface->setInputRegion({});
+    } else {
+      m_surface->setFullscreen(m_output);
     }
-    m_inputDispatcher.setSceneRoot(nullptr);
-    if (m_live) {
-      m_panel.setPresentationTransfer(true);
-      m_panel.onClose();
-      m_live = false;
-    }
-    m_sceneRoot.reset();
-    m_background = nullptr;
-    m_pointerInside = false;
   }
 
   void shutdown() {
     m_alive->store(false);
     m_placeTimer.stop();
-    m_restoreTimer.stop();
     stopCursorIdle(/*reveal=*/true);
     if (m_surface != nullptr) {
       m_surface->setSceneRoot(nullptr);
@@ -469,46 +442,44 @@ public:
     if (m_live) {
       m_panel.onClose();
       m_live = false;
+      if (m_panel.surfaceHost() == this) {
+        m_panel.setSurfaceHost(nullptr);
+      }
     }
     m_sceneRoot.reset();
     m_background = nullptr;
+    m_correlator.reset();
     m_surface.reset();
   }
 
-  [[nodiscard]] bool active() const noexcept { return m_surface != nullptr; }
-  [[nodiscard]] bool transitioning() const noexcept { return m_phase != Phase::Fullscreen || m_finishQueued; }
-  [[nodiscard]] std::string_view panelId() const noexcept { return "apple-music"; }
-  [[nodiscard]] wl_surface* wlSurface() const noexcept {
-    return m_surface != nullptr ? m_surface->wlSurface() : nullptr;
-  }
-  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept { return m_inputDispatcher; }
+  [[nodiscard]] std::string_view panelId() const noexcept { return m_panelId; }
+  [[nodiscard]] wl_surface* wlSurface() const noexcept { return m_surface != nullptr ? m_surface->wlSurface() : nullptr; }
+  [[nodiscard]] bool live() const noexcept { return m_live; }
+  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept override { return m_inputDispatcher; }
   [[nodiscard]] const InputDispatcher& inputDispatcher() const noexcept { return m_inputDispatcher; }
-  [[nodiscard]] wl_output* output() const noexcept { return m_output; }
-  [[nodiscard]] const std::string& sourceBarName() const noexcept { return m_sourceBarName; }
-  [[nodiscard]] const PanelOutputRect& restoreRect() const noexcept { return m_restoreRect; }
-  [[nodiscard]] bool ownsPanelScene() const noexcept { return m_live; }
+  void focusArea(InputArea* area) override { m_inputDispatcher.setFocus(area); }
 
-  void requestUpdateOnly() {
+  void requestUpdateOnly() override {
     if (m_surface != nullptr) {
       m_surface->requestUpdateOnly();
     }
   }
-  void requestLayout() {
+  void requestLayout() override {
     if (m_surface != nullptr) {
       m_surface->requestLayout();
     }
   }
-  void requestRedraw() {
+  void requestRedraw() override {
     if (m_surface != nullptr) {
       m_surface->requestRedraw();
     }
   }
-  void requestFrameTick() {
+  void requestFrameTick() override {
     if (m_surface != nullptr) {
       m_surface->requestFrameTick();
     }
   }
-  void requestCallbackTick() {
+  void requestCallbackTick() override {
     if (m_surface != nullptr) {
       m_surface->requestCallbackTick();
     }
@@ -525,6 +496,9 @@ public:
     }
   }
 
+  // Returns true when the event landed on this host's own surface (and was forwarded to the
+  // panel). A caller that sees false for every open toplevel host on a press event should
+  // treat it as an outside click and close them (see PanelManager::onPointerEvent).
   bool onPointerEvent(const PointerEvent& event) {
     if (!m_live || m_surface == nullptr) {
       return false;
@@ -556,9 +530,13 @@ public:
     case PointerEvent::Type::Button:
       if (onSurface && m_pointerInside) {
         notePointerActivity();
-        m_inputDispatcher.pointerButton(
-            static_cast<float>(event.sx), static_cast<float>(event.sy), event.button, event.state == 1
-        );
+        if (event.state == 1 && m_inputDispatcher.hoveredArea() == nullptr && m_panel.dismissTransientUi()) {
+          refresh();
+        } else {
+          m_inputDispatcher.pointerButton(
+              static_cast<float>(event.sx), static_cast<float>(event.sy), event.button, event.state == 1
+          );
+        }
       }
       break;
     case PointerEvent::Type::Axis:
@@ -582,13 +560,12 @@ public:
         || m_owner.m_platform->lastKeyboardSurface() != m_surface->wlSurface()) {
       return false;
     }
-    if (KeybindMatcher::matches(KeybindAction::Cancel, event.sym, event.modifiers)) {
-      if (event.pressed) {
-        m_owner.m_suppressedFullscreenCancelKey = event.key;
-        m_owner.m_platform->stopKeyRepeat();
-        exitToPanel();
+    if (event.pressed && KeybindMatcher::matches(KeybindAction::Cancel, event.sym, event.modifiers)) {
+      if (m_panel.handleGlobalKey(event.sym, event.modifiers, event.pressed, event.preedit)
+          || m_panel.dismissTransientUi()) {
+        requestSceneInvalidation();
+        return true;
       }
-      return true;
     }
     m_inputDispatcher.keyEvent(event.sym, event.utf32, event.modifiers, event.pressed, event.preedit);
     requestSceneInvalidation();
@@ -596,42 +573,18 @@ public:
   }
 
 private:
-  enum class Phase {
-    AwaitingWindow,
-    Positioning,
-    Endpoint,
-    PreparingFullscreen,
-    FullscreenRequested,
-    Fullscreen,
-    PreparingRestore,
-    Restoring,
-  };
-
-  [[nodiscard]] std::optional<std::uint64_t> findWindowId() const {
-    const auto response = m_owner.m_platform->niriRuntime().requestJson("\"Windows\"\n");
-    if (!response.has_value() || !response->is_object()) {
-      return std::nullopt;
+  void onWindowCorrelated(std::uint64_t windowId) {
+    if (m_surface == nullptr) {
+      return;
     }
-    const auto ok = response->find("Ok");
-    if (ok == response->end() || !ok->is_object()) {
-      return std::nullopt;
+    if (!positionWindow(windowId)) {
+      kLog.warn("panel \"{}\": failed to position toplevel via niri", m_panelId);
+      requestClose();
+      return;
     }
-    const auto windows = ok->find("Windows");
-    if (windows == ok->end() || !windows->is_array()) {
-      return std::nullopt;
-    }
-    const auto processId = static_cast<std::int64_t>(::getpid());
-    for (const auto& window : *windows) {
-      if (!window.is_object()
-          || window.value("app_id", std::string{}) != internal_toplevel::kAppleMusicFullscreenAppId
-          || window.value("pid", std::int64_t{-1}) != processId
-          || !window.contains("id")
-          || !window["id"].is_number_unsigned()) {
-        continue;
-      }
-      return window["id"].get<std::uint64_t>();
-    }
-    return std::nullopt;
+    // Defer content attach one loop turn so the niri IPC action replies unwind first, matching
+    // the same ordering the old fullscreen-only host relied on.
+    m_placeTimer.start(std::chrono::milliseconds(0), [this]() { attachContent(); });
   }
 
   [[nodiscard]] bool positionWindow(std::uint64_t id) {
@@ -654,8 +607,8 @@ private:
       return false;
     }
 
-    const auto width = static_cast<std::int32_t>(std::max(1.0f, std::round(m_windowRect.width)));
-    const auto height = static_cast<std::int32_t>(std::max(1.0f, std::round(m_windowRect.height)));
+    const auto width = static_cast<std::int32_t>(std::max(1.0f, std::round(m_targetRect.width)));
+    const auto height = static_cast<std::int32_t>(std::max(1.0f, std::round(m_targetRect.height)));
     if (!niri.requestAction(
             nlohmann::json{
                 {"SetWindowWidth", nlohmann::json{{"id", id}, {"change", nlohmann::json{{"SetFixed", width}}}}},
@@ -671,8 +624,8 @@ private:
                 {"MoveFloatingWindow",
                  nlohmann::json{
                      {"id", id},
-                     {"x", nlohmann::json{{"SetFixed", static_cast<double>(m_windowRect.x)}}},
-                     {"y", nlohmann::json{{"SetFixed", static_cast<double>(m_windowRect.y)}}},
+                     {"x", nlohmann::json{{"SetFixed", static_cast<double>(std::max(0.0f, m_targetRect.x))}}},
+                     {"y", nlohmann::json{{"SetFixed", static_cast<double>(std::max(0.0f, m_targetRect.y))}}},
                      {"animate", false},
                  }},
             }
@@ -682,79 +635,29 @@ private:
     return true;
   }
 
-  void onPresentation(const SurfacePresentationFeedback& feedback) {
-    if (m_live) {
-      m_panel.onPresentation(feedback);
-    }
-    if (m_finishQueued || m_surface == nullptr) {
-      return;
-    }
-    if (m_phase == Phase::AwaitingWindow) {
-      const auto id = findWindowId();
-      if (!id.has_value()) {
-        if (++m_windowLookupAttempts >= 120) {
-          kLog.warn("apple music fullscreen: niri did not publish the temporary toplevel");
-          queueFinish(/*reopenPanel=*/true);
-          return;
-        }
-        m_surface->requestRedraw();
-        return;
-      }
-      if (!positionWindow(*id)) {
-        kLog.warn("apple music fullscreen: failed to position the temporary niri window");
-        queueFinish(/*reopenPanel=*/true);
-        return;
-      }
-      m_phase = Phase::Positioning;
-      // The hidden endpoint was placed atomically through niri IPC. Defer the
-      // handoff one loop turn so the action reply can unwind before the live
-      // browser surface is transferred.
-      m_placeTimer.start(std::chrono::milliseconds(0), [this]() { activateLiveEndpoint(); });
-      return;
-    }
-    if (m_phase == Phase::Endpoint) {
-      m_phase = Phase::PreparingFullscreen;
-      auto alive = m_alive;
-      m_panel.preparePresentationResize([this, alive]() {
-        if (!alive->load()
-            || m_finishQueued
-            || m_surface == nullptr
-            || m_phase != Phase::PreparingFullscreen) {
-          return;
-        }
-        m_phase = Phase::FullscreenRequested;
-        m_surface->setFullscreen(m_output);
-      });
-      return;
-    }
-    if (m_phase == Phase::FullscreenRequested && m_surface->fullscreen()) {
-      m_phase = Phase::Fullscreen;
-      armCursorIdle();
-    }
-  }
-
-  void activateLiveEndpoint() {
-    if (m_finishQueued || m_surface == nullptr || m_phase != Phase::Positioning) {
+  void attachContent() {
+    if (m_surface == nullptr || m_live) {
       return;
     }
 
-    // Stop the old layer surface before attaching a new CefSurfaceNode. This
-    // guarantees that one—and only one—Graphite submission samples the
-    // borrowed CEF image at any point in the handoff.
-    m_phase = Phase::Endpoint;
-    m_panel.setPresentationTransfer(true);
-    m_owner.destroyPanel();
+    // Set before create()/onOpen() run, since either could immediately drive a
+    // redraw/focus request (e.g. CEF's first-frame callback) that needs to reach this host,
+    // not whichever other panel happened to be PanelManager::instance()'s default.
+    m_panel.setSurfaceHost(this);
 
-    m_sceneRoot = std::make_unique<Node>();
     m_sceneRoot->setAnimationManager(&m_animations);
     m_panel.setAnimationManager(&m_animations);
     m_panel.setFullscreenPresentation(false);
-    const float backgroundOpacity = resolveDetachedPanelBackgroundOpacity(
-        m_owner.m_config, &m_panel, m_owner.m_platform, m_output, m_sourceBarName
-    );
+    const float backgroundOpacity =
+        resolveDetachedPanelBackgroundOpacity(m_owner.m_config, &m_panel, m_owner.m_platform, m_output, m_sourceBarName);
     m_panel.setPanelCardOpacity(resolvePanelCardOpacity(m_owner.m_config, backgroundOpacity));
     m_panel.setPanelBordersEnabled(m_owner.m_config != nullptr && m_owner.m_config->config().shell.panel.borders);
 
+    // No client-side reveal here: niri plays the slide-expand-down/collapse-up itself as its
+    // compositor-native shell-reveal shader (ProgramType::ShellRevealOpen/Close, selected by the
+    // shell_surface window rule), operating on the whole composited window texture. Content just
+    // attaches directly — see docs/wiki/examples/{open,close}_custom_shader.frag upstream and
+    // src/render_helpers/shaders/shell_reveal_{open,close}.frag in the niri checkout.
     auto background = std::make_unique<Box>();
     m_background = background.get();
     m_background->setPanelStyle(m_panel.panelBordersEnabled());
@@ -767,7 +670,7 @@ private:
       m_sceneRoot->addChild(m_panel.releaseRoot());
     }
     m_live = true;
-    syncPresentationStyle(false);
+    syncPresentationStyle(m_surface->fullscreen());
 
     m_inputDispatcher.setSceneRoot(m_sceneRoot.get());
     m_inputDispatcher.setTextInputContext(m_surface->wlSurface(), m_owner.m_platform->wayland().textInputService());
@@ -798,8 +701,8 @@ private:
     if (m_sceneRoot == nullptr) {
       return;
     }
-    const bool sizeChanged = std::round(m_sceneRoot->width()) != std::round(width)
-        || std::round(m_sceneRoot->height()) != std::round(height);
+    const bool sizeChanged =
+        std::round(m_sceneRoot->width()) != std::round(width) || std::round(m_sceneRoot->height()) != std::round(height);
     m_sceneRoot->setSize(width, height);
     if (!m_live) {
       return;
@@ -840,19 +743,37 @@ private:
     }
   }
 
-  void armCursorIdle() {
-    m_cursorIdleTimer.stop();
-    if (m_phase != Phase::Fullscreen
-        || !m_pointerInside
-        || m_pointerEnterSerial == 0
-        || m_surface == nullptr) {
+  void syncPresentationStyle(bool fullscreen) {
+    if (m_background == nullptr) {
       return;
     }
-    m_cursorIdleTimer.start(kAppleMusicFullscreenCursorIdleTimeout, [this]() {
-      if (m_phase != Phase::Fullscreen
+    if (fullscreen) {
+      m_background->clearBorder();
+      m_background->setRadius(0.0f);
+      return;
+    }
+    if (m_panel.panelBordersEnabled()) {
+      m_background->setBorder(colorSpecFromRole(ColorRole::Outline), Style::borderWidth);
+    } else {
+      m_background->clearBorder();
+    }
+    m_background->setRadius(Style::scaledRadiusXl(m_panel.contentScale()));
+  }
+
+  // Restores AppleMusicFullscreenHost's cursor-auto-hide-after-idle behavior, scoped to
+  // fullscreen presentation the same way the old host was (armed on entering fullscreen,
+  // cleared on leaving it — see the setFullscreenChangedCallback wiring in open()). Normal
+  // (non-fullscreen) panel presentation never hides the cursor.
+  void armCursorIdle() {
+    m_cursorIdleTimer.stop();
+    if (m_surface == nullptr || !m_surface->fullscreen() || !m_pointerInside || m_pointerEnterSerial == 0) {
+      return;
+    }
+    m_cursorIdleTimer.start(kCursorIdleTimeout, [this]() {
+      if (m_surface == nullptr
+          || !m_surface->fullscreen()
           || !m_pointerInside
           || m_pointerEnterSerial == 0
-          || m_surface == nullptr
           || m_owner.m_platform == nullptr) {
         return;
       }
@@ -873,66 +794,53 @@ private:
 
   void stopCursorIdle(bool reveal) {
     m_cursorIdleTimer.stop();
-    if (reveal
-        && m_cursorHidden
-        && m_owner.m_platform != nullptr
-        && m_pointerEnterSerial != 0) {
+    if (reveal && m_cursorHidden && m_owner.m_platform != nullptr && m_pointerEnterSerial != 0) {
       (void)m_owner.m_platform->setCursorHidden(m_pointerEnterSerial, false);
       m_inputDispatcher.refreshCursor();
     }
     m_cursorHidden = false;
   }
 
-  void syncPresentationStyle(bool fullscreen) {
-    if (m_background == nullptr) {
+  void requestClose() {
+    if (m_closeQueued) {
       return;
     }
-    if (fullscreen) {
-      m_background->clearBorder();
-      m_background->setRadius(0.0f);
-      return;
-    }
-    // Preserve the explicitly resolved translucent panel fill. setPanelStyle()
-    // also resets the fill to an opaque Surface color, which would hide the
-    // compositor blur when this host expands to cover the output.
-    if (m_panel.panelBordersEnabled()) {
-      m_background->setBorder(colorSpecFromRole(ColorRole::Outline), Style::borderWidth);
-    } else {
-      m_background->clearBorder();
-    }
-    m_background->setRadius(Style::scaledRadiusXl(m_panel.contentScale()));
+    m_closeQueued = true;
+    const std::string panelId = m_panelId;
+    DeferredCall::callLater([panelId]() {
+      if (auto* mgr = PanelManager::current(); mgr != nullptr) {
+        mgr->m_toplevelPanels.erase(panelId);
+      }
+    });
   }
 
-  void queueFinish(bool reopenPanel) {
-    if (m_finishQueued) {
-      return;
-    }
-    m_finishQueued = true;
-    DeferredCall::callLater([this, reopenPanel]() { m_owner.finishAppleMusicFullscreen(reopenPanel); });
+  [[nodiscard]] static std::string randomNonce() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_int_distribution<std::uint64_t> dist;
+    return std::format("{:016x}", dist(rng));
   }
 
   PanelManager& m_owner;
+  std::string m_panelId;
   Panel& m_panel;
   wl_output* m_output = nullptr;
-  PanelOutputRect m_restoreRect;
-  PanelOutputRect m_windowRect;
+  PanelOutputRect m_targetRect;
   std::string m_sourceBarName;
+  std::string m_appId;
   std::unique_ptr<ToplevelSurface> m_surface;
+  std::unique_ptr<compositors::niri::NiriWindowCorrelator> m_correlator;
   AnimationManager m_animations;
   std::unique_ptr<Node> m_sceneRoot;
   Box* m_background = nullptr;
   InputDispatcher m_inputDispatcher;
   Timer m_placeTimer;
-  Timer m_restoreTimer;
   Timer m_cursorIdleTimer;
   std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
-  Phase m_phase = Phase::AwaitingWindow;
-  std::uint32_t m_windowLookupAttempts = 0;
   std::uint32_t m_pointerEnterSerial = 0;
   bool m_live = false;
   bool m_pointerInside = false;
+  bool m_closeQueued = false;
   bool m_cursorHidden = false;
-  bool m_finishQueued = false;
 };
 
 PanelManager::PanelManager() { s_instance = this; }
@@ -960,117 +868,66 @@ void PanelManager::initialize(CompositorPlatform& platform, ConfigService* confi
 
 RenderContext* PanelManager::activeRenderContext() const noexcept { return m_renderContext; }
 
-bool PanelManager::beginAppleMusicFullscreen() {
-  if (m_appleMusicFullscreenHost != nullptr
-      || m_retiredAppleMusicFullscreenHost != nullptr
-      || !isOpen()
-      || m_closing
-      || m_activePanelId != "apple-music"
-      || m_activePanel == nullptr
-      || !m_panelOutputRect.has_value()
-      || m_output == nullptr
-      || m_platform == nullptr
-      || !m_platform->niriRuntime().available()) {
-    return false;
-  }
-
-  const PanelOutputRect restoreRect = *m_panelOutputRect;
-  PanelOutputRect windowRect = restoreRect;
-  // Detached layer-shell placement already expresses the panel body relative
-  // to the compositor work area: openPanel() removes the bar reservation while
-  // retaining the configured floating offset. niri's SetFixed floating
-  // coordinates use that same space, so pass the endpoint through unchanged.
-  windowRect.x = std::max(0.0f, windowRect.x);
-  windowRect.y = std::max(0.0f, windowRect.y);
-
-  auto host = std::make_unique<AppleMusicFullscreenHost>(
-      *this, *m_activePanel, m_output, restoreRect, windowRect, m_sourceBarName
-  );
-  if (!host->begin()) {
-    kLog.warn("apple music fullscreen: could not create niri toplevel handoff");
-    return false;
-  }
-  m_appleMusicFullscreenHost = std::move(host);
-  kLog.debug("apple music fullscreen: preparing niri-owned toplevel transition");
-  return true;
-}
-
-void PanelManager::finishAppleMusicFullscreen(bool reopenPanel) {
-  if (m_appleMusicFullscreenHost == nullptr) {
-    if (!reopenPanel) {
-      completeAppleMusicFullscreenHandoff();
-    }
+void PanelManager::openToplevelPanel(const std::string& panelId, Panel& panel, const PanelOpenRequest& request) {
+  if (m_toplevelPanels.contains(panelId) || m_platform == nullptr) {
     return;
   }
 
-  auto host = std::move(m_appleMusicFullscreenHost);
-  wl_output* output = host->output();
-  const PanelOutputRect restoreRect = host->restoreRect();
-  const std::string sourceBarName = host->sourceBarName();
-  const bool ownedPanelScene = host->ownsPanelScene();
-  if (ownedPanelScene && reopenPanel) {
-    const auto panel = m_panels.find("apple-music");
-    if (panel != m_panels.end()) {
-      panel->second->setPresentationTransfer(true);
-    }
+  wl_output* output = request.output;
+  if (output == nullptr) {
+    output = m_platform->focusedInteractiveOutput(std::chrono::milliseconds(1200));
   }
-
-  const auto panel = m_panels.find("apple-music");
-  if (panel != m_panels.end()) {
-    panel->second->setFullscreenPresentation(false);
-  }
-  if (!ownedPanelScene) {
-    host->shutdown();
-    if (!reopenPanel && isOpenPanel("apple-music")) {
-      destroyPanel();
-    }
-    return;
-  }
-  if (!reopenPanel) {
-    host->shutdown();
+  if (output == nullptr) {
+    kLog.warn("panel manager: no output available to open toplevel panel \"{}\"", panelId);
     return;
   }
 
-  // Stop sampling the CEF image from the toplevel, but leave its last
-  // committed buffer mapped. The destination layer surface is created below;
-  // wp_presentation feedback will retire this source only after the
-  // destination has appeared on screen.
-  host->retireSceneForPanelHandoff();
-
-  PanelOpenRequest request{
-      .output = output,
-      .anchorX = restoreRect.x + restoreRect.width * 0.5f,
-      .anchorY = restoreRect.y + restoreRect.height * 0.5f,
-      .hasExplicitAnchor = true,
-      .hasAnchorPosition = true,
-      .animateOpen = false,
-      .sourceBarName = sourceBarName,
+  const float width = panel.preferredWidth();
+  const float height = panel.preferredHeight();
+  PanelOutputRect targetRect{
+      .x = request.hasAnchorPosition ? request.anchorX - width * 0.5f : 0.0f,
+      .y = request.hasAnchorPosition ? request.anchorY - height * 0.5f : 0.0f,
+      .width = width,
+      .height = height,
   };
-  openPanel("apple-music", request);
-  if (!isOpen() || m_activePanelId != "apple-music" || m_surface == nullptr) {
-    kLog.warn("apple music fullscreen: replacement panel failed to open");
-    host->shutdown();
-    return;
+  if (!request.hasAnchorPosition) {
+    if (const auto* wlOutput = m_platform->findOutputByWl(output); wlOutput != nullptr) {
+      targetRect.x = std::max(0.0f, (static_cast<float>(wlOutput->width) - width) * 0.5f);
+      targetRect.y = std::max(0.0f, (static_cast<float>(wlOutput->height) - height) * 0.5f);
+    }
   }
 
-  m_retiredAppleMusicFullscreenHost = std::move(host);
-  m_appleMusicHandoffTimer.start(std::chrono::seconds(2), [this]() {
-    if (m_retiredAppleMusicFullscreenHost == nullptr) {
-      return;
-    }
-    kLog.warn("apple music fullscreen: replacement presentation timed out; retiring retained toplevel");
-    completeAppleMusicFullscreenHandoff();
-  });
+  auto host = std::make_unique<CefPanelToplevelHost>(*this, panelId, panel);
+  if (!host->open(output, targetRect, std::string(request.sourceBarName))) {
+    kLog.warn("panel manager: could not create toplevel for panel \"{}\"", panelId);
+    return;
+  }
+  m_toplevelPanels.emplace(panelId, std::move(host));
+  activateClickShield(panel.layer());
+  if (m_panelOpenedCallback) {
+    m_panelOpenedCallback();
+  }
 }
 
-void PanelManager::completeAppleMusicFullscreenHandoff() {
-  m_appleMusicHandoffTimer.stop();
-  if (m_retiredAppleMusicFullscreenHost == nullptr) {
+void PanelManager::closeAllToplevelPanels() {
+  if (m_toplevelPanels.empty()) {
     return;
   }
-  m_retiredAppleMusicFullscreenHost->shutdown();
-  m_retiredAppleMusicFullscreenHost.reset();
-  kLog.debug("apple music fullscreen: replacement panel presented; retired toplevel");
+  // Drop outside-click handling as soon as close starts, same as the shared layer-shell path —
+  // during the close animation, clicks on other apps should behave normally.
+  if (!isOpen()) {
+    deactivateOutsideClickHandlers();
+  }
+  for (const auto& [id, host] : m_toplevelPanels) {
+    host->close();
+  }
+  if (m_panelClosedCallback) {
+    m_panelClosedCallback();
+  }
+}
+
+bool PanelManager::isToplevelPanelOpen(std::string_view panelId) const noexcept {
+  return m_toplevelPanels.contains(std::string(panelId));
 }
 
 void PanelManager::setOpenSettingsWindowCallback(std::function<void(std::string)> callback) {
@@ -1184,6 +1041,11 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     return;
   }
 
+  if (const auto regIt = m_panels.find(panelId); regIt != m_panels.end() && regIt->second->usesToplevelPresentation()) {
+    openToplevelPanel(panelId, *regIt->second, request);
+    return;
+  }
+
   if (request.output == nullptr && m_platform != nullptr) {
     request.output = m_platform->focusedInteractiveOutput(std::chrono::milliseconds(1200));
     if (request.output == nullptr) {
@@ -1217,14 +1079,6 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     m_closeDesktopWidgetsEditor();
   }
 
-  // A retained fullscreen endpoint is only useful while its replacement
-  // Apple Music panel is being brought on screen. Any subsequent open request
-  // supersedes that handoff.
-  completeAppleMusicFullscreenHandoff();
-  if (m_appleMusicFullscreenHost != nullptr) {
-    finishAppleMusicFullscreen(/*reopenPanel=*/false);
-  }
-
   // If a panel is open or closing, destroy it immediately with no close animation.
   // Bump the generation first so any in-flight deferred destroyPanel is a no-op.
   if (isOpen() || m_closing) {
@@ -1240,6 +1094,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   }
 
   m_activePanel = it->second.get();
+  m_activePanel->setSurfaceHost(this);
   m_activePanelId = panelId;
   resetPanelHoverPreview();
   m_hoverPreview = request.hoverPreview;
@@ -1568,15 +1423,6 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     surface.setPresentationCallback([this](const SurfacePresentationFeedback& feedback) {
       if (m_activePanel != nullptr) {
         m_activePanel->onPresentation(feedback);
-      }
-      if (feedback.presented && m_retiredAppleMusicFullscreenHost != nullptr && m_activePanelId == "apple-music") {
-        // Presentation callbacks run from the Wayland dispatch path. Defer
-        // wl_surface destruction until that callback has unwound.
-        DeferredCall::callLater([this]() {
-          if (m_retiredAppleMusicFullscreenHost != nullptr && isOpen() && m_activePanelId == "apple-music") {
-            completeAppleMusicFullscreenHandoff();
-          }
-        });
       }
     });
     surface.setRenderContext(activeRenderContext());
@@ -1957,7 +1803,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
 }
 
 void PanelManager::activateClickShield(LayerShellLayer layer) {
-  if (m_activePanel == nullptr || m_platform == nullptr) {
+  if (m_platform == nullptr) {
     return;
   }
   // Hyprland: prefer the native focus-grab path. Skip the shield and let
@@ -2017,12 +1863,13 @@ void PanelManager::deactivateOutsideClickHandlers() {
 }
 
 void PanelManager::closePanel(bool animateClose) {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    finishAppleMusicFullscreen(/*reopenPanel=*/false);
+  if (!isOpen()) {
+    // No native active panel: closePanel() is also the generic "close whatever's open" verb
+    // some callers (e.g. outside-click) use, so route it to any open toplevel panel(s) too.
+    closeAllToplevelPanels();
     return;
   }
-  completeAppleMusicFullscreenHandoff();
-  if (!isOpen() || m_inTransition || m_closing) {
+  if (m_inTransition || m_closing) {
     return;
   }
 
@@ -2077,7 +1924,6 @@ void PanelManager::closePanel(bool animateClose) {
 
 void PanelManager::destroyPanel() {
   resetPanelHoverPreview();
-  completeAppleMusicFullscreenHandoff();
   if (m_attachedToBar && m_attachedPanelGeometryCallback && m_output != nullptr) {
     m_attachedPanelGeometryCallback(m_output, m_sourceBarName, std::nullopt);
   }
@@ -2091,6 +1937,9 @@ void PanelManager::destroyPanel() {
   m_inputDispatcher.setSceneRoot(nullptr);
   if (m_activePanel != nullptr) {
     m_activePanel->onClose();
+    if (m_activePanel->surfaceHost() == this) {
+      m_activePanel->setSurfaceHost(nullptr);
+    }
   }
   m_bgNode = nullptr;
   m_contentNode = nullptr;
@@ -2141,6 +1990,15 @@ void PanelManager::destroyPanel() {
 }
 
 void PanelManager::togglePanel(const std::string& panelId, PanelOpenRequest request) {
+  if (const auto regIt = m_panels.find(panelId); regIt != m_panels.end() && regIt->second->usesToplevelPresentation()) {
+    if (isToplevelPanelOpen(panelId)) {
+      closeAllToplevelPanels();
+    } else {
+      openPanel(panelId, request);
+    }
+    return;
+  }
+
   // Treat a closing panel as closed: re-clicking while it animates out reopens it immediately.
   if (isOpen() && !m_closing && m_activePanelId == panelId) {
     if (m_hoverPreview) {
@@ -2265,6 +2123,14 @@ void PanelManager::applyPanelInputRegion() {
 }
 
 void PanelManager::togglePanel(const std::string& panelId) {
+  if (const auto regIt = m_panels.find(panelId); regIt != m_panels.end() && regIt->second->usesToplevelPresentation()) {
+    if (isToplevelPanelOpen(panelId)) {
+      closeAllToplevelPanels();
+    } else {
+      openPanel(panelId, PanelOpenRequest{});
+    }
+    return;
+  }
   if (isOpen() && !m_closing && m_activePanelId == panelId) {
     if (m_hoverPreview) {
       pinPanelHoverPreview();
@@ -2283,20 +2149,14 @@ bool PanelManager::togglePanelFullscreen(const std::string& panelId) {
     return false;
   }
 
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->exitToPanel();
+  // Toplevel-presented panels toggle fullscreen directly on their own persistent surface —
+  // no more surface handoff, so no separate begin/exit state machine is needed here.
+  if (const auto hostIt = m_toplevelPanels.find(panelId); hostIt != m_toplevelPanels.end()) {
+    hostIt->second->toggleFullscreen();
     return true;
   }
-  if (m_retiredAppleMusicFullscreenHost != nullptr) {
-    return false;
-  }
 
-  const bool active = isOpen() && !m_closing && m_activePanelId == panelId;
-  if (!active || m_activePanel == nullptr || m_activePanel->fullscreenPresentation()) {
-    return false;
-  }
-  pinPanelHoverPreview();
-  return beginAppleMusicFullscreen();
+  return false;
 }
 
 void PanelManager::clearClipboardHistory() {
@@ -2310,8 +2170,23 @@ void PanelManager::clearClipboardHistory() {
 }
 
 bool PanelManager::onPointerEvent(const PointerEvent& event) {
-  if (m_appleMusicFullscreenHost != nullptr && m_appleMusicFullscreenHost->onPointerEvent(event)) {
-    return true;
+  if (!m_toplevelPanels.empty()) {
+    bool onAnyToplevelSurface = false;
+    for (const auto& [id, host] : m_toplevelPanels) {
+      if (host->onPointerEvent(event)) {
+        onAnyToplevelSurface = true;
+      }
+    }
+    if (onAnyToplevelSurface) {
+      return true;
+    }
+    // A press that landed on none of them (routed here via the click shield, since Wayland
+    // would otherwise deliver a click on another app's window straight to that app) is an
+    // outside click: dismiss every open toplevel panel, mirroring layer-shell panels'
+    // click-outside-closes behavior.
+    if (event.type == PointerEvent::Type::Button && event.state == 1) {
+      closeAllToplevelPanels();
+    }
   }
   if (!isOpen() || m_inTransition) {
     return false;
@@ -2424,23 +2299,17 @@ bool PanelManager::onPointerEvent(const PointerEvent& event) {
 bool PanelManager::isOpen() const noexcept { return m_surface != nullptr && m_activePanel != nullptr; }
 
 bool PanelManager::isOpenPanel(std::string_view panelId) const noexcept {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    return m_appleMusicFullscreenHost->panelId() == panelId;
+  if (isToplevelPanelOpen(panelId)) {
+    return true;
   }
   return isOpen() && m_activePanelId == panelId;
 }
 
 bool PanelManager::isPanelTransitionActive() const noexcept {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    return m_appleMusicFullscreenHost->transitioning();
-  }
-  if (m_retiredAppleMusicFullscreenHost != nullptr) {
-    return true;
-  }
   if (!isOpen() && !m_closing) {
     return false;
   }
-  if (m_closing || m_attachedOpenAnimationPending || m_appleMusicFullscreenHost != nullptr) {
+  if (m_closing || m_attachedOpenAnimationPending) {
     return true;
   }
   if (m_attachedToBar) {
@@ -2464,10 +2333,22 @@ bool PanelManager::isActivePanelContext(std::string_view context) const noexcept
   return m_activePanel->isContextActive(context);
 }
 
+// refresh()/onIconThemeChanged() are genuine broadcasts — called from ~20+ sites in
+// application_services.cpp after app-wide state changes (config reload, palette, battery,
+// network, ...) wanting whatever's currently visible to redraw with fresh data. That means
+// *every* open toplevel panel, not just one, so these still forward, generalized to all of
+// them rather than an arbitrary single one.
+//
+// The rest of this block (focusArea, requestUpdateOnly/Layout/Redraw/FrameTick/CallbackTick)
+// no longer forwards to toplevel panels at all: WebPanel — the only Panel type that can be
+// toplevel-presented — now reaches its own host directly via Panel::surfaceHost() (set by
+// CefPanelToplevelHost::attachContent()/PanelManager::openPanel()), which is correct
+// regardless of how many toplevel panels are open at once. Nothing else in the codebase calls
+// these PanelManager methods expecting them to reach a toplevel panel; every other caller is a
+// native panel that only ever means "my own shared surface."
 void PanelManager::refresh() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->refresh();
-    return;
+  for (const auto& [id, host] : m_toplevelPanels) {
+    host->refresh();
   }
   if (!isOpen() || m_renderContext == nullptr || m_activePanel == nullptr || m_surface == nullptr) {
     return;
@@ -2480,9 +2361,8 @@ void PanelManager::refresh() {
 }
 
 void PanelManager::onIconThemeChanged() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->onIconThemeChanged();
-    return;
+  for (const auto& [id, host] : m_toplevelPanels) {
+    host->onIconThemeChanged();
   }
   if (!isOpen() || m_activePanel == nullptr || m_surface == nullptr) {
     return;
@@ -2492,25 +2372,11 @@ void PanelManager::onIconThemeChanged() {
   m_surface->requestUpdate();
 }
 
-InputDispatcher& PanelManager::inputDispatcher() noexcept {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    return m_appleMusicFullscreenHost->inputDispatcher();
-  }
-  return m_inputDispatcher;
-}
+InputDispatcher& PanelManager::inputDispatcher() noexcept { return m_inputDispatcher; }
 
-const InputDispatcher& PanelManager::inputDispatcher() const noexcept {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    return m_appleMusicFullscreenHost->inputDispatcher();
-  }
-  return m_inputDispatcher;
-}
+const InputDispatcher& PanelManager::inputDispatcher() const noexcept { return m_inputDispatcher; }
 
 void PanelManager::focusArea(InputArea* area) {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->inputDispatcher().setFocus(area);
-    return;
-  }
   if (!isOpen() || m_sceneRoot == nullptr) {
     return;
   }
@@ -2518,10 +2384,6 @@ void PanelManager::focusArea(InputArea* area) {
 }
 
 void PanelManager::requestUpdateOnly() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->requestUpdateOnly();
-    return;
-  }
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
@@ -2529,10 +2391,6 @@ void PanelManager::requestUpdateOnly() {
 }
 
 void PanelManager::requestLayout() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->requestLayout();
-    return;
-  }
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
@@ -2540,10 +2398,6 @@ void PanelManager::requestLayout() {
 }
 
 void PanelManager::requestRedraw() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->requestRedraw();
-    return;
-  }
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
@@ -2551,10 +2405,6 @@ void PanelManager::requestRedraw() {
 }
 
 void PanelManager::requestFrameTick() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->requestFrameTick();
-    return;
-  }
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
@@ -2562,10 +2412,6 @@ void PanelManager::requestFrameTick() {
 }
 
 void PanelManager::requestCallbackTick() {
-  if (m_appleMusicFullscreenHost != nullptr) {
-    m_appleMusicFullscreenHost->requestCallbackTick();
-    return;
-  }
   if (!isOpen() || m_surface == nullptr) {
     return;
   }
@@ -2649,12 +2495,10 @@ std::optional<LayerPopupParentContext> PanelManager::fallbackPopupParentContext(
 }
 
 void PanelManager::onKeyboardEvent(const KeyboardEvent& event) {
-  if (!event.pressed && m_suppressedFullscreenCancelKey.has_value() && event.key == *m_suppressedFullscreenCancelKey) {
-    m_suppressedFullscreenCancelKey.reset();
-    return;
-  }
-  if (m_appleMusicFullscreenHost != nullptr && m_appleMusicFullscreenHost->onKeyboardEvent(event)) {
-    return;
+  for (const auto& [id, host] : m_toplevelPanels) {
+    if (host->onKeyboardEvent(event)) {
+      return;
+    }
   }
   // m_inTransition means the surface is still initializing.
   // Keyboard events during this window must be ignored.

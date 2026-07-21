@@ -921,6 +921,7 @@ _noctalia_sources = files(
   'src/compositors/mango/mango_workspace_backend.cpp',
   'src/compositors/niri/niri_runtime.cpp',
   'src/compositors/niri/niri_event_handler.cpp',
+  'src/compositors/niri/niri_window_correlator.cpp',
   'src/compositors/niri/niri_output_backend.cpp',
   'src/compositors/niri/niri_keyboard_backend.cpp',
   'src/compositors/niri/niri_workspace_backend.cpp',
@@ -1509,6 +1510,22 @@ ical_recurrence_test = executable('ical_recurrence_test',
 )
 
 test('ical_recurrence', ical_recurrence_test)
+
+niri_window_correlator_test = executable('niri_window_correlator_test',
+  sources: files(
+    'tests/niri_window_correlator_test.cpp',
+    'src/compositors/niri/niri_runtime.cpp',
+    'src/compositors/niri/niri_event_handler.cpp',
+    'src/compositors/niri/niri_window_correlator.cpp',
+    'src/core/log.cpp',
+  ),
+  dependencies: [
+    nlohmann_dep,
+  ],
+  include_directories: _noctalia_inc,
+)
+
+test('niri_window_correlator', niri_window_correlator_test)
 
 google_client_calendar_list_test = executable('google_client_calendar_list_test',
   sources: files(

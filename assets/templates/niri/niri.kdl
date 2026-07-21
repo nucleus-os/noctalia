@@ -33,3 +33,13 @@ recent-windows {
         urgent-color "{{colors.error.default.hex}}"
     }
 }
+
+// noctalia's CEF-backed panels (Apple Music, Discord, ...) open as real xdg_toplevel windows
+// under a shared nonce'd app-id prefix so this one rule covers all of them. `shell-surface`
+// bundles open-floating + always-on-top + no compositor open/close animation (noctalia's own
+// panels use a native shell-reveal shader instead) + switcher exclusion, matching how these
+// panels behaved back when they were layer-shell surfaces.
+window-rule {
+    match app-id=r#"^dev\.noctalia\.panel-open-"#
+    shell-surface true
+}

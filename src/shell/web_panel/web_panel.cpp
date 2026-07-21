@@ -25,8 +25,8 @@
 #include <memory>
 #include <utility>
 
-WebPanel::WebPanel(std::shared_ptr<CefBrowserSession> session, WebPanelSite site)
-    : m_session(std::move(session)), m_profile(webPanelProfile(site)) {}
+WebPanel::WebPanel(std::shared_ptr<CefBrowserSession> session, WebPanelSite site, bool toplevelPresentation)
+    : m_session(std::move(session)), m_profile(webPanelProfile(site)), m_toplevelPresentation(toplevelPresentation) {}
 
 WebPanel::~WebPanel() = default;
 
@@ -59,14 +59,24 @@ void WebPanel::create() {
   auto surface = std::make_unique<CefSurfaceNode>(*m_session);
   m_surface = surface.get();
   m_surface->attach(
-      []() {
+      [this]() {
         NOCTALIA_TRACE_ZONE("Web panel CEF frame-ready request");
         tracy_latency::redrawQueued();
-        PanelManager::instance().requestUpdateOnly();
-        PanelManager::instance().requestRedraw();
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->requestUpdateOnly();
+          host->requestRedraw();
+        }
       },
-      []() { PanelManager::instance().requestCallbackTick(); },
-      []() { PanelManager::instance().inputDispatcher().refreshCursor(); }
+      [this]() {
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->requestCallbackTick();
+        }
+      },
+      [this]() {
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->inputDispatcher().refreshCursor();
+        }
+      }
   );
   root->addChild(std::move(surface));
 
@@ -145,8 +155,10 @@ void WebPanel::create() {
 
   m_session->setStateCallback([this](CefBrowserSessionState) {
     refreshSessionStateUi();
-    PanelManager::instance().requestUpdateOnly();
-    PanelManager::instance().requestRedraw();
+    if (auto* host = surfaceHost(); host != nullptr) {
+      host->requestUpdateOnly();
+      host->requestRedraw();
+    }
   });
   m_session->setPermissionRequestCallback(
       [this](CefBrowserPermissionRequest request) { showPermissionRequest(std::move(request)); }
@@ -167,7 +179,6 @@ void WebPanel::onOpen(std::string_view /*context*/) {
     m_initialNavigationRequested = true;
   }
   m_session->setDisplayAttached(true);
-  m_presentationTransfer = false;
 }
 
 void WebPanel::onClose() {
@@ -181,7 +192,7 @@ void WebPanel::onClose() {
   }
   cancelPermissionRequest();
   if (m_surface != nullptr) {
-    m_surface->detach(m_presentationTransfer);
+    m_surface->detach();
     m_surface = nullptr;
   }
   m_statusOverlay = nullptr;
@@ -198,7 +209,9 @@ void WebPanel::onFrameTick(float /*deltaMs*/) {
     needsAnother = m_popupStack.back().session->onFrameOpportunity() || needsAnother;
   }
   if (needsAnother) {
-    PanelManager::instance().requestCallbackTick();
+    if (auto* host = surfaceHost(); host != nullptr) {
+      host->requestCallbackTick();
+    }
   }
 }
 
@@ -367,8 +380,10 @@ void WebPanel::showNextPermissionDecision() {
   if (m_surface != nullptr) {
     m_surface->inputArea()->setEnabled(false);
   }
-  PanelManager::instance().requestUpdateOnly();
-  PanelManager::instance().requestRedraw();
+  if (auto* host = surfaceHost(); host != nullptr) {
+    host->requestUpdateOnly();
+    host->requestRedraw();
+  }
 }
 
 void WebPanel::resolvePermissionRequest(bool allowed) {
@@ -540,13 +555,23 @@ void WebPanel::showBrowserPopup(CefBrowserPopupRequest request) {
   auto surface = std::make_unique<CefSurfaceNode>(*request.session);
   auto* surfacePtr = surface.get();
   surface->attach(
-      []() {
+      [this]() {
         tracy_latency::redrawQueued();
-        PanelManager::instance().requestUpdateOnly();
-        PanelManager::instance().requestRedraw();
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->requestUpdateOnly();
+          host->requestRedraw();
+        }
       },
-      []() { PanelManager::instance().requestCallbackTick(); },
-      []() { PanelManager::instance().inputDispatcher().refreshCursor(); }
+      [this]() {
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->requestCallbackTick();
+        }
+      },
+      [this]() {
+        if (auto* host = surfaceHost(); host != nullptr) {
+          host->inputDispatcher().refreshCursor();
+        }
+      }
   );
   layer->addChild(std::move(surface));
 
@@ -584,10 +609,12 @@ void WebPanel::showBrowserPopup(CefBrowserPopupRequest request) {
   if (m_surface != nullptr) {
     m_surface->inputArea()->setEnabled(false);
   }
-  PanelManager::instance().requestLayout();
-  PanelManager::instance().requestUpdateOnly();
-  PanelManager::instance().requestRedraw();
-  PanelManager::instance().focusArea(surfacePtr->inputArea());
+  if (auto* host = surfaceHost(); host != nullptr) {
+    host->requestLayout();
+    host->requestUpdateOnly();
+    host->requestRedraw();
+    host->focusArea(surfacePtr->inputArea());
+  }
 }
 
 void WebPanel::closeBrowserPopup(bool closeSession) {
@@ -623,20 +650,36 @@ void WebPanel::removeBrowserPopup(CefBrowserSession* session, bool closeSession)
     auto& previous = m_popupStack.back();
     previous.layer->setVisible(true);
     previous.surface->attach(
-        []() {
+        [this]() {
           tracy_latency::redrawQueued();
-          PanelManager::instance().requestUpdateOnly();
-          PanelManager::instance().requestRedraw();
+          if (auto* host = surfaceHost(); host != nullptr) {
+            host->requestUpdateOnly();
+            host->requestRedraw();
+          }
         },
-        []() { PanelManager::instance().requestCallbackTick(); },
-        []() { PanelManager::instance().inputDispatcher().refreshCursor(); }
+        [this]() {
+          if (auto* host = surfaceHost(); host != nullptr) {
+            host->requestCallbackTick();
+          }
+        },
+        [this]() {
+          if (auto* host = surfaceHost(); host != nullptr) {
+            host->inputDispatcher().refreshCursor();
+          }
+        }
     );
-    PanelManager::instance().focusArea(previous.surface->inputArea());
+    if (auto* host = surfaceHost(); host != nullptr) {
+      host->focusArea(previous.surface->inputArea());
+    }
   } else if (m_surface != nullptr) {
     m_surface->inputArea()->setEnabled(m_session->hasUsableFrame() && !m_permissionRequest.has_value());
-    PanelManager::instance().focusArea(m_surface->inputArea());
+    if (auto* host = surfaceHost(); host != nullptr) {
+      host->focusArea(m_surface->inputArea());
+    }
   }
-  PanelManager::instance().requestLayout();
-  PanelManager::instance().requestUpdateOnly();
-  PanelManager::instance().requestRedraw();
+  if (auto* host = surfaceHost(); host != nullptr) {
+    host->requestLayout();
+    host->requestUpdateOnly();
+    host->requestRedraw();
+  }
 }

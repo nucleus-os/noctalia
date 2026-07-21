@@ -5,6 +5,7 @@
 #include "render/scene/input_dispatcher.h"
 #include "shell/panel/attached_panel_context.h"
 #include "shell/panel/panel_click_shield.h"
+#include "shell/panel/panel_surface_host.h"
 #include "ui/dialogs/layer_popup_host.h"
 #include "wayland/hyprland/popup_grab_host.h"
 
@@ -54,7 +55,9 @@ struct PanelOutputRect {
   float height = 0.0f;
 };
 
-class PanelManager : public PopupGrabHost {
+class PanelManager
+    : public PopupGrabHost
+    , public PanelSurfaceHost {
 public:
   PanelManager();
   ~PanelManager();
@@ -143,16 +146,16 @@ public:
   // blur region. No-op when no panel is open.
   void onConfigReloaded();
   void onIconThemeChanged();
-  void focusArea(InputArea* area);
-  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept;
+  void focusArea(InputArea* area) override;
+  [[nodiscard]] InputDispatcher& inputDispatcher() noexcept override;
   [[nodiscard]] const InputDispatcher& inputDispatcher() const noexcept;
-  void requestUpdateOnly();
-  void requestLayout();
+  void requestUpdateOnly() override;
+  void requestLayout() override;
   // Requests a redraw on the active panel surface without re-running panel
   // update/layout. Used for reactive palette restyling.
-  void requestRedraw();
-  void requestFrameTick();
-  void requestCallbackTick();
+  void requestRedraw() override;
+  void requestFrameTick() override;
+  void requestCallbackTick() override;
   void close();
   void beginAttachedPopup(wl_surface* surface);
   void endAttachedPopup(wl_surface* surface);
@@ -166,7 +169,7 @@ public:
   void registerIpc(IpcService& ipc);
 
 private:
-  class AppleMusicFullscreenHost;
+  class CefPanelToplevelHost;
 
   static PanelManager* s_instance;
 
@@ -193,9 +196,17 @@ private:
   void applyAttachedDecorationStyle();
   // Submit a wl_region matching the panel body after applying the current reveal clip.
   void applyPanelCompositorBlur(int bodyX, int bodyY, int bodyW, int bodyH, int clipX, int clipY, int clipW, int clipH);
-  bool beginAppleMusicFullscreen();
-  void finishAppleMusicFullscreen(bool reopenPanel);
-  void completeAppleMusicFullscreenHandoff();
+  // Toplevel-presented panels (Panel::usesToplevelPresentation()): each lives in its own
+  // persistent xdg_toplevel via CefPanelToplevelHost instead of the shared layer-shell
+  // surface, tracked independently of m_activePanel/m_activePanelId so it can coexist with a
+  // native panel (or, in principle, another toplevel panel) rather than being mutually
+  // exclusive with them.
+  void openToplevelPanel(const std::string& panelId, Panel& panel, const PanelOpenRequest& request);
+  void closeAllToplevelPanels();
+  [[nodiscard]] bool isToplevelPanelOpen(std::string_view panelId) const noexcept;
+  // Assumes at most one toplevel-presented panel is open at a time (true through Phase B:
+  // Apple Music only) — see the longer note at its definition. Returns false if none is open.
+  bool forwardToSoleToplevelPanel(const std::function<void(CefPanelToplevelHost&)>& fn);
   void pinPanelHoverPreview();
   void schedulePanelHoverPreviewDismiss();
   void resetPanelHoverPreview() noexcept;
@@ -269,16 +280,7 @@ private:
   std::optional<AttachedPanelGeometry> m_attachedPanelGeometry;
   std::optional<PanelOutputRect> m_panelOutputRect;
   std::uint32_t m_panelOutputAnchor = 0;
-  std::unique_ptr<AppleMusicFullscreenHost> m_appleMusicFullscreenHost;
-  // During fullscreen exit, keep the restored toplevel's last committed
-  // buffer mapped until the replacement layer panel has actually presented.
-  std::unique_ptr<AppleMusicFullscreenHost> m_retiredAppleMusicFullscreenHost;
-  Timer m_appleMusicHandoffTimer;
-  // Escape begins the fullscreen-to-panel handoff on key-down. Its matching
-  // key-up can arrive after keyboard focus has moved to the replacement panel;
-  // retain the physical key across that surface transition so CEF never sees
-  // an orphaned release event.
-  std::optional<std::uint32_t> m_suppressedFullscreenCancelKey;
+  std::unordered_map<std::string, std::unique_ptr<CefPanelToplevelHost>> m_toplevelPanels;
   bool m_pointerInside = false;
   bool m_hoverPreview = false;
   bool m_hoverPreviewSourceHovered = false;

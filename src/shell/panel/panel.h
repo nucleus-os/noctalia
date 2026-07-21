@@ -15,6 +15,7 @@
 
 class AnimationManager;
 class InputArea;
+class PanelSurfaceHost;
 class Renderer;
 
 class Panel {
@@ -74,10 +75,6 @@ public:
       ready();
     }
   }
-  // Keeps an external producer live while this panel's scene moves between
-  // two presentation surfaces. The replacement scene clears the transfer in
-  // onOpen(); ordinary closes retain their normal detach behavior.
-  virtual void setPresentationTransfer(bool transferring) noexcept { (void)transferring; }
   [[nodiscard]] virtual bool hasDecoration() const { return true; }
   // Most decorated panels inset their content from the background edge. Media
   // surfaces can opt out and provide their own rounded clipping for a
@@ -115,6 +112,12 @@ public:
   // reflects either the source bar or the user's solid/soft/glass mode.
   [[nodiscard]] virtual float detachedBackgroundOpacity(float resolved) const noexcept { return resolved; }
   [[nodiscard]] virtual bool wantsCloseAnimation() const noexcept { return true; }
+  // When true, PanelManager hosts this panel in its own persistent xdg_toplevel
+  // (via CefPanelToplevelHost) instead of the shared layer-shell surface, so its
+  // window can be reparented/dragged/tracked by the compositor's window manager
+  // like any other application window. Fullscreen for such a panel is then a
+  // plain toggle on that same toplevel, not a separate surface handoff.
+  [[nodiscard]] virtual bool usesToplevelPresentation() const noexcept { return false; }
 
   [[nodiscard]] Node* root() const noexcept { return m_root ? m_root.get() : m_rootPtr; }
   [[nodiscard]] float contentScale() const noexcept { return m_contentScale; }
@@ -147,6 +150,14 @@ public:
 
   virtual void setAnimationManager(AnimationManager* mgr) noexcept { m_animations = mgr; }
 
+  // Whichever PanelSurfaceHost (PanelManager or a CefPanelToplevelHost) actually owns this
+  // panel's Wayland surface right now. Set by the host at attach time. Panels that drive their
+  // own redraw/focus scheduling (WebPanel) should go through this instead of PanelManager::
+  // instance(), which is only correct as long as at most one toplevel-presented panel is ever
+  // open — not an assumption any individual Panel should have to make.
+  void setSurfaceHost(PanelSurfaceHost* host) noexcept { m_surfaceHost = host; }
+  [[nodiscard]] PanelSurfaceHost* surfaceHost() const noexcept { return m_surfaceHost; }
+
 protected:
   [[nodiscard]] float scaled(float value) const noexcept { return value * m_contentScale; }
   void setRoot(std::unique_ptr<Node> root) { m_root = std::move(root); }
@@ -165,4 +176,5 @@ protected:
 private:
   std::unique_ptr<Node> m_root;
   Node* m_rootPtr = nullptr;
+  PanelSurfaceHost* m_surfaceHost = nullptr;
 };
