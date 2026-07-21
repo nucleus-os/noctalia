@@ -10,6 +10,7 @@ enum class WebPanelSite {
 struct WebPanelProfile {
   WebPanelSite site;
   std::string_view panelId;
+  std::string_view displayName;
   std::string_view startUrl;
   float preferredWidth;
   float preferredHeight;

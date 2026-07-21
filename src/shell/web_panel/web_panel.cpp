@@ -446,7 +446,11 @@ void WebPanel::showContextMenu(CefBrowserContextMenuRequest request) {
   auto& manager = PanelManager::instance();
   auto* wayland = manager.wayland();
   auto* renderContext = manager.renderContext();
-  const auto parent = manager.fallbackPopupParentContext();
+  // Prefer this panel's own host (its xdg_surface for toplevel-presented panels) over the
+  // native-panel-only fallback, so context menus work regardless of whether any native panel
+  // happens to be open at the same time.
+  auto* host = surfaceHost();
+  const auto parent = host != nullptr ? host->popupParentContext() : manager.fallbackPopupParentContext();
   if (wayland == nullptr || renderContext == nullptr || !parent.has_value()) {
     if (request.complete) {
       request.complete(std::nullopt);
@@ -509,6 +513,7 @@ void WebPanel::showContextMenu(CefBrowserContextMenuRequest request) {
       },
       .parent = PopupSurfaceParent{
           .layerSurface = parent->layerSurface,
+          .xdgSurface = parent->xdgSurface,
           .output = parent->output,
       },
   });

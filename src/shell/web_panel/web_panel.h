@@ -44,6 +44,7 @@ public:
   [[nodiscard]] std::string panelScreenPosition() const override { return "auto"; }
   [[nodiscard]] bool panelOpenNearClick() const override { return true; }
   [[nodiscard]] bool usesToplevelPresentation() const noexcept override { return m_toplevelPresentation; }
+  [[nodiscard]] std::string_view displayName() const noexcept override { return m_profile.displayName; }
 
   [[nodiscard]] const WebPanelProfile& profile() const noexcept { return m_profile; }
   [[nodiscard]] const std::shared_ptr<CefBrowserSession>& session() const noexcept { return m_session; }

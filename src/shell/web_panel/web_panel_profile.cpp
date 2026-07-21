@@ -8,6 +8,7 @@ namespace {
       {
           .site = WebPanelSite::AppleMusic,
           .panelId = "apple-music",
+          .displayName = "Apple Music",
           .startUrl = "https://music.apple.com/",
           .preferredWidth = 1120.0f,
           .preferredHeight = 720.0f,
@@ -15,6 +16,7 @@ namespace {
       {
           .site = WebPanelSite::Discord,
           .panelId = "discord",
+          .displayName = "Discord",
           .startUrl = "https://discord.com/app",
           .preferredWidth = 1180.0f,
           .preferredHeight = 760.0f,

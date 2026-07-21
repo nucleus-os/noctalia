@@ -132,6 +132,9 @@ public:
   [[nodiscard]] bool isActivePanelContext(std::string_view context) const noexcept;
   [[nodiscard]] std::optional<LayerPopupParentContext> popupParentContextForSurface(wl_surface* surface) const noexcept;
   [[nodiscard]] std::optional<LayerPopupParentContext> fallbackPopupParentContext() const noexcept;
+  [[nodiscard]] std::optional<LayerPopupParentContext> popupParentContext() const override {
+    return fallbackPopupParentContext();
+  }
 
   [[nodiscard]] RenderContext* renderContext() const noexcept { return m_renderContext; }
   [[nodiscard]] WaylandConnection* wayland() const noexcept;

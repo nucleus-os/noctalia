@@ -118,6 +118,10 @@ public:
   // like any other application window. Fullscreen for such a panel is then a
   // plain toggle on that same toplevel, not a separate surface handoff.
   [[nodiscard]] virtual bool usesToplevelPresentation() const noexcept { return false; }
+  // Human-readable name for a toplevel-presented panel's window title (taskbar, alt-tab, etc.).
+  // Empty means "fall back to the raw panel id" — fine for panels that never surface a title
+  // anywhere (native panels don't use this at all, since they're never toplevel-presented).
+  [[nodiscard]] virtual std::string_view displayName() const noexcept { return {}; }
 
   [[nodiscard]] Node* root() const noexcept { return m_root ? m_root.get() : m_rootPtr; }
   [[nodiscard]] float contentScale() const noexcept { return m_contentScale; }

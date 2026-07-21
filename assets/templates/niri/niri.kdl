@@ -38,8 +38,27 @@ recent-windows {
 // under a shared nonce'd app-id prefix so this one rule covers all of them. `shell-surface`
 // bundles open-floating + always-on-top + no compositor open/close animation (noctalia's own
 // panels use a native shell-reveal shader instead) + switcher exclusion, matching how these
-// panels behaved back when they were layer-shell surfaces.
+// panels behaved back when they were layer-shell surfaces. The remaining properties below were
+// hand-written for the old fullscreen-only toplevel host and are carried over unchanged:
+// - fullscreen-backdrop off, since these panels keep a translucent root and request compositor
+//   blur; niri's default opaque black fullscreen backdrop would otherwise sit behind that.
+// - background-effect xray false: blur the actual windows behind the panel, not just the
+//   wallpaper (xray true would ignore anything else on screen behind the panel).
+// - border/focus-ring off, since layer-shell surfaces never had any of this compositor
+//   decoration and noctalia draws its own panel chrome. Shadow is kept (niri's default),
+//   since noctalia's own panel drop-shadow was layered on top of the layer-shell surface's
+//   compositor shadow, not a replacement for it.
 window-rule {
     match app-id=r#"^dev\.noctalia\.panel-open-"#
     shell-surface true
+    fullscreen-backdrop false
+    background-effect {
+        xray false
+    }
+    border {
+        off
+    }
+    focus-ring {
+        off
+    }
 }

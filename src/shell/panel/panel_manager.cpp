@@ -38,6 +38,7 @@
 #include <cmath>
 #include <format>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <string>
 #include <unistd.h>
@@ -384,10 +385,11 @@ public:
 
     const auto width = static_cast<std::uint32_t>(std::max(1.0f, std::round(targetRect.width)));
     const auto height = static_cast<std::uint32_t>(std::max(1.0f, std::round(targetRect.height)));
+    const auto displayName = m_panel.displayName();
     const ToplevelSurfaceConfig config{
         .width = width,
         .height = height,
-        .title = m_panelId,
+        .title = displayName.empty() ? m_panelId : std::string(displayName),
         .appId = m_appId.c_str(),
     };
     if (!m_surface->initialize(m_output, config)) {
@@ -458,6 +460,19 @@ public:
   [[nodiscard]] InputDispatcher& inputDispatcher() noexcept override { return m_inputDispatcher; }
   [[nodiscard]] const InputDispatcher& inputDispatcher() const noexcept { return m_inputDispatcher; }
   void focusArea(InputArea* area) override { m_inputDispatcher.setFocus(area); }
+
+  [[nodiscard]] std::optional<LayerPopupParentContext> popupParentContext() const override {
+    if (m_surface == nullptr || m_surface->width() == 0 || m_surface->height() == 0) {
+      return std::nullopt;
+    }
+    LayerPopupParentContext context;
+    context.surface = m_surface->wlSurface();
+    context.xdgSurface = m_surface->xdgSurface();
+    context.output = m_output;
+    context.width = static_cast<std::uint32_t>(m_surface->width());
+    context.height = static_cast<std::uint32_t>(m_surface->height());
+    return context;
+  }
 
   void requestUpdateOnly() override {
     if (m_surface != nullptr) {
@@ -560,7 +575,22 @@ public:
         || m_owner.m_platform->lastKeyboardSurface() != m_surface->wlSurface()) {
       return false;
     }
+    if (!event.pressed && m_suppressedFullscreenCancelKey.has_value() && event.key == *m_suppressedFullscreenCancelKey) {
+      m_suppressedFullscreenCancelKey.reset();
+      return true;
+    }
     if (event.pressed && KeybindMatcher::matches(KeybindAction::Cancel, event.sym, event.modifiers)) {
+      // Matches the old AppleMusicFullscreenHost: Escape unconditionally exits fullscreen,
+      // taking priority over anything the panel itself might want to do with Cancel — there is
+      // no other way back to windowed presentation once fullscreen (the explicit
+      // Mod+Shift+M-style toggle keybind aside). Swallow the paired release too so the page
+      // never sees a lone, unmatched Escape keyup.
+      if (m_surface->fullscreen()) {
+        m_suppressedFullscreenCancelKey = event.key;
+        m_owner.m_platform->stopKeyRepeat();
+        m_surface->unsetFullscreen();
+        return true;
+      }
       if (m_panel.handleGlobalKey(event.sym, event.modifiers, event.pressed, event.preedit)
           || m_panel.dismissTransientUi()) {
         requestSceneInvalidation();
@@ -681,6 +711,12 @@ private:
     m_surface->setInputRegion(
         {InputRect{0, 0, static_cast<int>(m_surface->width()), static_cast<int>(m_surface->height())}}
     );
+    if (blurTraceEnabled()) {
+      kLog.debug(
+          "blur-trace toplevel-blur-set panel={} phase=attach surface={}x{}", m_panelId, m_surface->width(),
+          m_surface->height()
+      );
+    }
     m_surface->setBlurRegion(
         {InputRect{0, 0, static_cast<int>(m_surface->width()), static_cast<int>(m_surface->height())}}
     );
@@ -723,6 +759,12 @@ private:
       m_surface->setInputRegion(
           {InputRect{0, 0, static_cast<int>(m_surface->width()), static_cast<int>(m_surface->height())}}
       );
+      if (blurTraceEnabled()) {
+        kLog.debug(
+            "blur-trace toplevel-blur-set panel={} phase=layout surface={}x{} sizeChanged={} needsLayout={}",
+            m_panelId, m_surface->width(), m_surface->height(), sizeChanged, needsLayout
+        );
+      }
       m_surface->setBlurRegion(
           {InputRect{0, 0, static_cast<int>(m_surface->width()), static_cast<int>(m_surface->height())}}
       );
@@ -837,6 +879,7 @@ private:
   Timer m_cursorIdleTimer;
   std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
   std::uint32_t m_pointerEnterSerial = 0;
+  std::optional<std::uint32_t> m_suppressedFullscreenCancelKey;
   bool m_live = false;
   bool m_pointerInside = false;
   bool m_closeQueued = false;

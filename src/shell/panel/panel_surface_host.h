@@ -1,5 +1,9 @@
 #pragma once
 
+#include "ui/dialogs/layer_popup_host.h"
+
+#include <optional>
+
 class InputArea;
 class InputDispatcher;
 
@@ -20,4 +24,8 @@ public:
   virtual void requestCallbackTick() = 0;
   virtual void focusArea(InputArea* area) = 0;
   [[nodiscard]] virtual InputDispatcher& inputDispatcher() = 0;
+  // Parent geometry for popups the panel opens itself (e.g. a CEF context menu): either the
+  // shared layer surface (native panels) or this panel's own xdg_surface (toplevel-presented
+  // panels). LayerPopupParentContext's xdgSurface field carries the latter case.
+  [[nodiscard]] virtual std::optional<LayerPopupParentContext> popupParentContext() const = 0;
 };
