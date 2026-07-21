@@ -3,6 +3,8 @@
 #include "shell/bar/widget.h"
 
 #include <memory>
+#include <functional>
+#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -22,13 +24,23 @@ enum class MediaTitleScrollMode : std::uint8_t {
   OnHover,
 };
 
+struct MediaWidgetState {
+  std::string playbackStatus;
+  std::string title;
+  std::string artist;
+  std::string artUrl;
+};
+
+using MediaWidgetStateProvider = std::function<std::optional<MediaWidgetState>()>;
+
 class MediaWidget : public Widget {
 public:
   MediaWidget(
       MprisService* mpris, HttpClient* httpClient, wl_output* output, float maxWidth, float minWidth, float artSize,
       MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia = false, bool albumArtOnly = false,
       bool hideAlbumArt = false, bool hideArtist = false, std::string playerBusName = {},
-      std::string panelId = "control-center", std::string panelContext = "media"
+      std::string panelId = "control-center", std::string panelContext = "media", bool openPanelOnHover = false,
+      MediaWidgetStateProvider stateProvider = {}
   );
 
   void create() override;
@@ -54,6 +66,8 @@ private:
   std::string m_playerBusName;
   std::string m_panelId;
   std::string m_panelContext;
+  bool m_openPanelOnHover = false;
+  MediaWidgetStateProvider m_stateProvider;
   InputArea* m_area = nullptr;
   Image* m_art = nullptr;
   Glyph* m_emptyGlyph = nullptr;

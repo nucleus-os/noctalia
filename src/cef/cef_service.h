@@ -10,13 +10,12 @@
 
 class TextureManager;
 class GraphicsDevice;
+class CefBrowserSession;
 
-// App-level owner of the embedded CEF browser. Deliberately exposes NO CEF
-// types (pImpl) so the rest of the shell — panels, the surface node, the bar
-// widget — never pulls the CEF headers. The browser and its stable Graphite
-// texture handle live here for the process lifetime, surviving panel open/close and scene rebuilds
-// (panels destroy their surface + scene nodes on every close), so audio keeps
-// playing and reopening is instant.
+// Process-wide owner of CEF initialization, the external message pump, and the
+// live browser-session registry. Deliberately exposes no CEF types; each
+// CefBrowserSession privately owns its browser, scheduler, Vulkan bridge, and
+// stable texture while panels and scene nodes consume only the CEF-free API.
 //
 // Threading: the external CEF message pump, acknowledged BeginFrame scheduler,
 // accelerated DMA-BUF acceptance, Graphite texture rebinding, and public
@@ -37,6 +36,8 @@ public:
   // before a renderer is attached; ensureBrowser separately enforces that an
   // accelerated DMA-BUF path is available.
   bool initialize();
+  // Return the unique top-level browser session for this code-defined ID.
+  [[nodiscard]] std::shared_ptr<CefBrowserSession> createBrowserSession(std::string id);
   // Bind the mandatory process-wide Vulkan/Graphite device after CEF has
   // established its allocator. Browser creation is refused until this bridge
   // exists; there is no GLES or CPU rendering path.
@@ -46,69 +47,12 @@ public:
   void shutdown();
   [[nodiscard]] bool initialized() const noexcept;
 
-  // Browser lifecycle. Sizes are in logical (DIP) units; the device scale set
-  // via setDeviceScale() determines the pixel buffer size CEF paints.
-  void ensureBrowser(int logicalWidth, int logicalHeight);
-  void resize(int logicalWidth, int logicalHeight);
-  void navigate(const std::string& url);
-  void execJs(const std::string& code);
-  // Capture page-owned semantic scroll state before a fullscreen/panel
-  // viewport transition. The callback is acknowledged by the renderer, with
-  // a bounded timeout fallback, so the Wayland resize cannot race the capture.
-  void preparePresentationResize(std::function<void()> ready);
-  void setDeviceScale(float scale);
-
-  // Input — logical (DIP) coordinates, matching CefMouseEvent's coordinate space.
-  void sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving = false);
-  // Flush queued motion before ordering-sensitive input such as enter, click,
-  // or wheel events.
-  void flushMouseMove();
-  void sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers);
-  void sendMouseWheel(float x, float y, float deltaX, float deltaY, std::uint32_t modifiers);
-  void sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed);
-  void goBack();
-  void goForward();
-  void setFocus(bool focused);
-
-  // Keep the browser and its most recently exported frame alive when its
-  // display is detached. Re-attachment can therefore show safe pixels
-  // immediately while CEF produces a fresh frame.
-  void setDisplayAttached(bool attached);
-  // Keep a detached Apple Music renderer visually current at a bounded 1 Hz
-  // only while this process's Chromium MPRIS player is actively playing.
-  // Repeated true updates also request an immediate parked refresh so track
-  // and artwork changes do not wait for the next heartbeat.
-  void setBackgroundPlaybackActive(bool active);
-  // Called from the owning Wayland surface's wl_surface.frame callback. This
-  // is the normal clock for external CEF begin frames while the panel paints.
-  // Returns true only while another compositor-paced opportunity is needed.
-  [[nodiscard]] bool onFrameOpportunity();
-  void onPresentation(const SurfacePresentationFeedback& feedback);
-
   // Message pump — driven by CefPollSource on the main thread.
   void doMessageLoopWork();
   void setScheduleWorkCallback(std::function<void(std::int64_t delayMs)> cb);
 
-  // Texture bridge — observes whether accelerated paint rebound the stable
-  // Graphite texture handle to a newly arrived DMA-BUF image.
-  bool uploadIfDirty(TextureManager& textures);
-  [[nodiscard]] TextureHandle currentTexture() const noexcept;
-  // GPU-loss / scene rebuild: drop the texture handle and force a repaint so
-  // the next frame re-creates it on the fresh context.
-  void invalidateGpuTexture();
-
-  // Invoked on the main thread when a fresh frame has been buffered (schedule a
-  // redraw), when an idle scheduler needs its Wayland callback chain re-armed,
-  // and when the page cursor changes (arg: WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_*).
-  void setFrameReadyCallback(std::function<void()> cb);
-  void setFrameOpportunityCallback(std::function<void()> cb);
-  void setCursorCallback(std::function<void(std::uint32_t shape)> cb);
-
-  // Opaque implementation holding all CEF state — defined in the .cpp. Public so
-  // the .cpp-local CEF client can reference it; stays an incomplete type here,
-  // so no CEF headers leak to includers.
-  struct Impl;
+  struct Runtime;
 
 private:
-  std::unique_ptr<Impl> m_impl;
+  std::unique_ptr<Runtime> m_runtime;
 };

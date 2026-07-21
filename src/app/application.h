@@ -285,6 +285,8 @@ private:
   bool m_graphiteDeviceRecoveryAttempted = false;
 
   std::unique_ptr<CefService> m_cefService;
+  std::shared_ptr<CefBrowserSession> m_appleMusicSession;
+  std::shared_ptr<CefBrowserSession> m_discordSession;
   std::unique_ptr<CefPollSource> m_cefPollSource;
 
   TelemetryService m_telemetryService;

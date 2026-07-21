@@ -1074,7 +1074,12 @@ cef_dep = declare_dependency(
 noctalia_cef_lib = static_library('noctalia_cef',
     files(
       'src/cef/noctalia_cef_app.cpp',
+      'src/cef/site_integrations/site_integration.cpp',
+      'src/cef/site_integrations/site_integration_policy.cpp',
+      'src/cef/site_integrations/apple_music_integration.cpp',
+      'src/cef/site_integrations/discord_integration.cpp',
       'src/cef/cef_service.cpp',
+      'src/cef/cef_browser_session.cpp',
       'src/cef/cef_poll_source.cpp',
       'src/cef/cef_surface_node.cpp',
       'src/cef/cef_gpu_frame_bridge.cpp',
@@ -1085,6 +1090,9 @@ noctalia_cef_lib = static_library('noctalia_cef',
 )
 _noctalia_sources += files(
   'src/shell/apple_music/apple_music_panel.cpp',
+  'src/shell/web_panel/web_panel.cpp',
+  'src/shell/web_panel/web_panel_profile.cpp',
+  'src/shell/bar/widgets/web_panel_launcher_widget.cpp',
 )
 _noctalia_deps += declare_dependency(link_whole: noctalia_cef_lib, dependencies: cef_dep)
 _noctalia_deps += tracy_link_dep
@@ -1099,6 +1107,10 @@ _noctalia_install_rpath = private_cpp_install_rpath + ':' + _cef_root / 'Release
 cef_helper = executable('noctalia_cef_helper',
   'src/cef/cef_subprocess_main.cpp',
   'src/cef/noctalia_cef_app.cpp',
+  'src/cef/site_integrations/site_integration.cpp',
+  'src/cef/site_integrations/site_integration_policy.cpp',
+  'src/cef/site_integrations/apple_music_integration.cpp',
+  'src/cef/site_integrations/discord_integration.cpp',
   dependencies: [cef_dep],
   include_directories: [include_directories('src'), _cef_inc],
   build_rpath: private_cpp_libdir + ':' + _cef_root / 'Release',
@@ -1330,6 +1342,16 @@ cef_renderer_recovery_test = executable('cef_renderer_recovery_test',
 )
 
 test('cef_renderer_recovery', cef_renderer_recovery_test)
+
+site_integration_policy_test = executable('site_integration_policy_test',
+  sources: files(
+    'tests/site_integration_policy_test.cpp',
+    'src/cef/site_integrations/site_integration_policy.cpp',
+  ),
+  include_directories: _noctalia_inc,
+)
+
+test('site_integration_policy', site_integration_policy_test)
 
 graphite_runtime_effects_test = executable('graphite_runtime_effects_test',
   sources: files('tests/graphite_runtime_effects_test.cpp'),

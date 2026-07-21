@@ -23,6 +23,7 @@ class IdleInhibitor;
 class IpcService;
 class LockKeysService;
 class MprisService;
+class CefBrowserSession;
 class BluetoothService;
 class BrightnessService;
 class ClipboardService;
@@ -166,6 +167,7 @@ private:
   INetworkService* m_network = nullptr;
   IdleInhibitor* m_idleInhibitor = nullptr;
   MprisService* m_mpris = nullptr;
+  std::shared_ptr<CefBrowserSession> m_appleMusicSession;
   PipeWireSpectrum* m_audioSpectrum = nullptr;
   HttpClient* m_httpClient = nullptr;
   WeatherService* m_weatherService = nullptr;

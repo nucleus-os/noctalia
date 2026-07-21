@@ -2757,9 +2757,6 @@ MprisPlayerInfo MprisService::readPlayerInfoFromProperties(
   std::vector<std::string> artists = normalizeArtists(get_string_array_from_variant(metadata, "xesam:artist"));
 
   std::string identity = get_string_from_props(rootProps, "Identity");
-  if (isCurrentProcessChromiumMprisPlayer(busName)) {
-    identity = "Apple Music";
-  }
 
   return MprisPlayerInfo{
       .busName = busName,

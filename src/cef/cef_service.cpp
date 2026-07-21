@@ -1,13 +1,16 @@
 #include "cef/cef_service.h"
 
+#include "cef/cef_browser_session.h"
 #include "cef/cef_external_frame_scheduler.h"
 #include "cef/cef_gpu_frame_bridge.h"
 #include "cef/cef_pointer_motion_coalescer.h"
 #include "cef/cef_renderer_recovery.h"
 #include "cef/noctalia_cef_app.h"
+#include "cef/site_integrations/site_integration_policy.h"
 #include "core/deferred_call.h"
 #include "core/input/key_modifiers.h"
 #include "core/log.h"
+#include "core/process/process.h"
 #include "core/timer_manager.h"
 #include "core/tracy.h"
 #include "core/tracy_latency.h"
@@ -15,27 +18,36 @@
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
+#include "include/cef_context_menu_handler.h"
 #include "include/cef_devtools_message_observer.h"
+#include "include/cef_dialog_handler.h"
+#include "include/cef_download_handler.h"
+#include "include/cef_permission_handler.h"
 #include "include/cef_render_handler.h"
 #include "include/cef_request_handler.h"
 #include "include/cef_values.h"
 #include "include/wrapper/cef_helpers.h"
 #include "render/core/texture_manager.h"
 #include "render/graphics_device.h"
+#include "ui/dialogs/file_dialog.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <format>
 #include <limits.h>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -193,12 +205,28 @@ namespace {
     }
   }
 
+  bool canOpenExternally(std::string_view url) noexcept {
+    return url.starts_with("https://") || url.starts_with("http://") || url.starts_with("mailto:");
+  }
+
+  bool launchExternalUrl(std::string_view sessionId, std::string_view url) {
+    if (!canOpenExternally(url)) {
+      return false;
+    }
+    if (process::runAsync(std::vector<std::string>{"xdg-open", std::string(url)})) {
+      kLog.info("opened external URL from CEF session '{}' in the default browser", sessionId);
+      return true;
+    }
+    kLog.error("failed to open external URL from CEF session '{}'", sessionId);
+    return false;
+  }
+
 } // namespace
 
 class NoctaliaExternalBeginFrameCallback : public CefExternalBeginFrameCallback {
 public:
   NoctaliaExternalBeginFrameCallback(
-      CefService::Impl* impl, std::shared_ptr<std::atomic<bool>> alive, std::uint64_t requestId,
+      CefBrowserSession::Impl* impl, std::shared_ptr<std::atomic<bool>> alive, std::uint64_t requestId,
       std::uint64_t generation
   )
       : m_impl(impl), m_alive(std::move(alive)), m_requestId(requestId), m_generation(generation) {}
@@ -206,7 +234,7 @@ public:
   void OnComplete(bool hasDamage) override;
 
 private:
-  CefService::Impl* m_impl;
+  CefBrowserSession::Impl* m_impl;
   std::shared_ptr<std::atomic<bool>> m_alive;
   std::uint64_t m_requestId;
   std::uint64_t m_generation;
@@ -241,6 +269,20 @@ private:
   std::function<void(std::int64_t)> m_callback;
 };
 
+struct CefService::Runtime {
+  std::string cefDir;
+  std::string helperPath;
+  CefRefPtr<NoctaliaCefApp> app;
+  bool initialized = false;
+  GraphicsDevice* graphics = nullptr;
+  std::shared_ptr<CefScheduleWorkBridge> scheduleWork = std::make_shared<CefScheduleWorkBridge>();
+  std::vector<std::shared_ptr<CefBrowserSession>> sessions;
+};
+
+namespace {
+  class NoctaliaCefClient;
+}
+
 class NoctaliaDevToolsMethodObserver final : public CefDevToolsMessageObserver {
 public:
   using ResultCallback = std::function<void(int, bool)>;
@@ -272,17 +314,15 @@ private:
 // ---------------------------------------------------------------------------
 // Impl: the actual CEF-owning state.
 // ---------------------------------------------------------------------------
-struct CefService::Impl {
-  std::string cefDir;
-  std::string helperPath;
-
-  CefRefPtr<NoctaliaCefApp> app;
+struct CefBrowserSession::Impl {
+  CefService* owner = nullptr;
+  std::string id;
+  std::string policyId;
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<CefClient> client;
   CefRefPtr<CefDevToolsMessageObserver> devToolsObserver;
   CefRefPtr<CefRegistration> devToolsRegistration;
 
-  bool initialized = false;
   bool attached = false;
   bool backgroundPlaybackActive = false;
   std::uint32_t presentationRefreshNs = 0;
@@ -304,19 +344,53 @@ struct CefService::Impl {
   std::atomic<bool> loggedAcceleratedPaint = false;
   TextureHandle texture;
   bool textureChanged = false;
+  CefBrowserSessionState state = CefBrowserSessionState::NotCreated;
+  bool hasUsableFrame = false;
+  std::string lastError;
   std::uint64_t supersededReadyFrames = 0;
   CefPointerMotionCoalescer pointerMotion;
   std::uint32_t pointerButtonFlags = 0;
 
-  std::shared_ptr<CefScheduleWorkBridge> scheduleWork = std::make_shared<CefScheduleWorkBridge>();
   std::function<void()> frameReady;
   std::function<void()> frameOpportunity;
   std::function<void(std::uint32_t)> cursorCb;
+  std::function<void(CefBrowserSessionState)> stateCb;
+  std::function<void(CefBrowserPermissionRequest)> permissionRequestCb;
+  std::function<void(CefBrowserContextMenuRequest)> contextMenuRequestCb;
+  std::function<void(CefBrowserPopupRequest)> popupCreatedCb;
+  std::function<void()> closedCb;
+  CefBrowserMediaState mediaState;
+  std::function<void(const CefBrowserMediaState&)> mediaStateCb;
   int lastCursorType = -1;
   std::uint32_t lastCursorShape = 0;
+  Impl* popupParent = nullptr;
+  int popupId = 0;
+  int popupPreferredWidth = 0;
+  int popupPreferredHeight = 0;
+  std::uint64_t nextPopupSerial = 1;
+  std::unordered_map<int, std::weak_ptr<CefBrowserSession>> pendingPopups;
+  std::weak_ptr<CefBrowserSession> self;
+  bool auxiliary = false;
+  bool closing = false;
+  bool resourcesFinished = false;
+
+  std::shared_ptr<CefBrowserSession> createPendingPopup(
+      int requestedPopupId, std::string url, int preferredWidth, int preferredHeight,
+      CefRefPtr<CefClient>& outClient
+  );
+  void abortPendingPopup(int requestedPopupId);
 
   // Guards deferred main-thread callbacks against use-after-free during shutdown.
   std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
+
+  void setState(CefBrowserSessionState next, std::string error = {}) {
+    const bool changed = state != next || lastError != error;
+    state = next;
+    lastError = std::move(error);
+    if (changed && stateCb) {
+      stateCb(state);
+    }
+  }
 
   [[nodiscard]] bool frameProductionEnabled() const noexcept { return attached || backgroundPlaybackActive; }
 
@@ -545,15 +619,326 @@ namespace {
                             public CefLifeSpanHandler,
                             public CefLoadHandler,
                             public CefDisplayHandler,
-                            public CefRequestHandler {
+                            public CefRequestHandler,
+                            public CefPermissionHandler,
+                            public CefDialogHandler,
+                            public CefContextMenuHandler,
+                            public CefDownloadHandler {
   public:
-    explicit NoctaliaCefClient(CefService::Impl* impl) : m_impl(impl) {}
+    explicit NoctaliaCefClient(CefBrowserSession::Impl* impl) : m_impl(impl) {}
 
     CefRefPtr<CefRenderHandler> GetRenderHandler() override { return this; }
     CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
     CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
     CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
     CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+    CefRefPtr<CefPermissionHandler> GetPermissionHandler() override { return this; }
+    CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
+    CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+    CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+
+    bool OnBeforeBrowse(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, CefRefPtr<CefRequest> request,
+        bool userGesture, bool /*isRedirect*/
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      if (m_impl->policyId != "discord" || frame == nullptr || !frame->IsMain() || request == nullptr) {
+        return false;
+      }
+      const std::string url = request->GetURL().ToString();
+      if (isAllowedTopLevelUrlForCefSession(m_impl->policyId, url, m_impl->auxiliary)) {
+        return false;
+      }
+      if (userGesture) {
+        (void)launchExternalUrl(m_impl->id, url);
+      }
+      kLog.warn("blocked untrusted top-level navigation from CEF session '{}': {}", m_impl->id, url);
+      return true;
+    }
+
+    bool OnOpenURLFromTab(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/, const CefString& targetUrl,
+        WindowOpenDisposition /*targetDisposition*/, bool userGesture
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      const std::string url = targetUrl.ToString();
+      if (m_impl->policyId != "discord" || isTrustedUrlForCefSession(m_impl->policyId, url)) {
+        return false;
+      }
+      if (userGesture) {
+        (void)launchExternalUrl(m_impl->id, url);
+      }
+      kLog.warn("blocked untrusted open-URL request from CEF session '{}': {}", m_impl->id, url);
+      return true;
+    }
+
+    bool OnBeforeDownload(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefDownloadItem> /*downloadItem*/,
+        const CefString& suggestedName, CefRefPtr<CefBeforeDownloadCallback> callback
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      if (callback == nullptr) {
+        return true;
+      }
+      ::FileDialogOptions options;
+      options.mode = ::FileDialogMode::Save;
+      options.title = "Save download";
+      const std::filesystem::path suggested(suggestedName.ToString());
+      options.defaultFilename = suggested.filename().string();
+      if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+        const std::filesystem::path downloads = std::filesystem::path(home) / "Downloads";
+        options.startDirectory = std::filesystem::is_directory(downloads) ? downloads : std::filesystem::path(home);
+      }
+      (void)::FileDialog::open(
+          std::move(options), [callback](std::optional<std::filesystem::path> selected) {
+            if (selected.has_value()) {
+              callback->Continue(CefString(selected->string()), false);
+            }
+          }
+      );
+      return true;
+    }
+
+    void OnDownloadUpdated(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefDownloadItem> item,
+        CefRefPtr<CefDownloadItemCallback> /*callback*/
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      if (item == nullptr) {
+        return;
+      }
+      if (item->IsComplete()) {
+        kLog.info("CEF session '{}' completed download: {}", m_impl->id, item->GetFullPath().ToString());
+      } else if (item->IsCanceled()) {
+        kLog.info("CEF session '{}' download was canceled", m_impl->id);
+      }
+    }
+
+    bool RunContextMenu(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/,
+        CefRefPtr<CefContextMenuParams> params, CefRefPtr<CefMenuModel> model,
+        CefRefPtr<CefRunContextMenuCallback> callback
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      if (m_impl->contextMenuRequestCb == nullptr || params == nullptr || model == nullptr || callback == nullptr) {
+        return false;
+      }
+
+      CefBrowserContextMenuRequest request;
+      request.x = params->GetXCoord();
+      request.y = params->GetYCoord();
+      request.entries.reserve(model->GetCount());
+      for (std::size_t index = 0; index < model->GetCount(); ++index) {
+        if (!model->IsVisibleAt(index)) {
+          continue;
+        }
+        const auto type = model->GetTypeAt(index);
+        CefBrowserContextMenuEntry entry{
+            .commandId = model->GetCommandIdAt(index),
+            .label = model->GetLabelAt(index).ToString(),
+            .enabled = model->IsEnabledAt(index),
+            .separator = type == MENUITEMTYPE_SEPARATOR,
+            .checkmark = type == MENUITEMTYPE_CHECK,
+            .radio = type == MENUITEMTYPE_RADIO,
+            .checked = model->IsCheckedAt(index),
+        };
+        // The native reusable popup is intentionally flat today. Keep the
+        // parent command visible but disabled rather than silently invoking a
+        // submenu command without presenting its children.
+        if (type == MENUITEMTYPE_SUBMENU) {
+          entry.enabled = false;
+        }
+        request.entries.push_back(std::move(entry));
+      }
+      if (request.entries.empty()) {
+        callback->Cancel();
+        return true;
+      }
+
+      auto alive = m_impl->alive;
+      request.complete = [alive, callback](std::optional<std::int32_t> commandId) {
+        if (!alive->load()) {
+          return;
+        }
+        if (commandId.has_value()) {
+          callback->Continue(*commandId, EVENTFLAG_NONE);
+        } else {
+          callback->Cancel();
+        }
+      };
+      m_impl->contextMenuRequestCb(std::move(request));
+      return true;
+    }
+
+    bool OnFileDialog(
+        CefRefPtr<CefBrowser> /*browser*/, FileDialogMode mode, const CefString& title,
+        const CefString& defaultFilePath, const std::vector<CefString>& acceptFilters,
+        const std::vector<CefString>& /*acceptExtensions*/, const std::vector<CefString>& /*acceptDescriptions*/,
+        CefRefPtr<CefFileDialogCallback> callback
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      const auto type = static_cast<cef_file_dialog_mode_t>(mode);
+      ::FileDialogOptions options;
+      if (type == FILE_DIALOG_SAVE) {
+        options.mode = ::FileDialogMode::Save;
+      } else if (type == FILE_DIALOG_OPEN_FOLDER) {
+        options.mode = ::FileDialogMode::SelectFolder;
+      } else {
+        options.mode = ::FileDialogMode::Open;
+      }
+      options.title = title.ToString();
+      const std::filesystem::path suggested(defaultFilePath.ToString());
+      if (!suggested.empty()) {
+        options.startDirectory = suggested.has_parent_path() ? suggested.parent_path() : std::filesystem::path{};
+        if (type == FILE_DIALOG_SAVE) {
+          options.defaultFilename = suggested.filename().string();
+        }
+      }
+      for (const auto& filter : acceptFilters) {
+        const std::string value = filter.ToString();
+        if (value.starts_with('.') && value.find_first_of("*;/") == std::string::npos) {
+          options.extensions.push_back(value);
+        }
+      }
+      if (type == FILE_DIALOG_OPEN_MULTIPLE) {
+        kLog.warn("CEF requested multi-file selection; the native picker currently returns one file");
+      }
+      const bool opened = ::FileDialog::open(
+          std::move(options), [callback](std::optional<std::filesystem::path> selected) {
+            if (!selected.has_value()) {
+              callback->Cancel();
+              return;
+            }
+            callback->Continue({CefString(selected->string())});
+          }
+      );
+      if (!opened) {
+        callback->Cancel();
+      }
+      return true;
+    }
+
+    bool OnProcessMessageReceived(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, CefProcessId sourceProcess,
+        CefRefPtr<CefProcessMessage> message
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      if (sourceProcess != PID_RENDERER || frame == nullptr || !frame->IsMain()
+          || message == nullptr || message->GetName() != "noctalia.apple-music.media-state"
+          || m_impl->id != "apple-music") {
+        return false;
+      }
+      CefRefPtr<CefListValue> args = message->GetArgumentList();
+      if (args == nullptr || args->GetSize() < 5) {
+        return true;
+      }
+      CefBrowserMediaState next{
+          .available = !args->GetString(1).empty() || !args->GetString(2).empty(),
+          .playing = args->GetBool(0),
+          .title = args->GetString(1).ToString(),
+          .artist = args->GetString(2).ToString(),
+          .album = args->GetString(3).ToString(),
+          .artworkUrl = args->GetString(4).ToString(),
+      };
+      const bool changed = next.available != m_impl->mediaState.available
+          || next.playing != m_impl->mediaState.playing || next.title != m_impl->mediaState.title
+          || next.artist != m_impl->mediaState.artist || next.album != m_impl->mediaState.album
+          || next.artworkUrl != m_impl->mediaState.artworkUrl;
+      if (!changed) {
+        return true;
+      }
+      m_impl->mediaState = std::move(next);
+      if (m_impl->mediaStateCb) {
+        m_impl->mediaStateCb(m_impl->mediaState);
+      }
+      return true;
+    }
+
+    bool OnRequestMediaAccessPermission(
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/, const CefString& requestingOrigin,
+        std::uint32_t requestedPermissions, CefRefPtr<CefMediaAccessCallback> callback
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      const std::string origin = requestingOrigin.ToString();
+      constexpr std::uint32_t kSupported =
+          CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE | CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE;
+      if (m_impl->policyId != "discord" || siteIntegrationForUrl(origin) != SiteIntegration::Discord
+          || requestedPermissions == 0 || (requestedPermissions & ~kSupported) != 0
+          || m_impl->permissionRequestCb == nullptr) {
+        kLog.warn(
+            "denied media permission for session '{}' origin={} mask=0x{:x}", m_impl->id, origin,
+            requestedPermissions
+        );
+        callback->Cancel();
+        return true;
+      }
+
+      std::uint32_t publicPermissions = CefBrowserPermissionNone;
+      if ((requestedPermissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE) != 0) {
+        publicPermissions |= CefBrowserPermissionMicrophone;
+      }
+      if ((requestedPermissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE) != 0) {
+        publicPermissions |= CefBrowserPermissionCamera;
+      }
+      auto settled = std::make_shared<std::atomic<bool>>(false);
+      m_impl->permissionRequestCb(CefBrowserPermissionRequest{
+          .origin = origin,
+          .permissions = publicPermissions,
+          .resolve = [callback, requestedPermissions, settled](std::uint32_t allowedPermissions) {
+            if (settled->exchange(true)) {
+              return;
+            }
+            std::uint32_t allowedCefPermissions = 0;
+            if ((allowedPermissions & CefBrowserPermissionMicrophone) != 0) {
+              allowedCefPermissions |= CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE;
+            }
+            if ((allowedPermissions & CefBrowserPermissionCamera) != 0) {
+              allowedCefPermissions |= CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE;
+            }
+            allowedCefPermissions &= requestedPermissions;
+            if (allowedCefPermissions != 0) {
+              callback->Continue(allowedCefPermissions);
+            } else {
+              callback->Cancel();
+            }
+          },
+      });
+      return true;
+    }
+
+    bool OnShowPermissionPrompt(
+        CefRefPtr<CefBrowser> /*browser*/, std::uint64_t /*promptId*/, const CefString& requestingOrigin,
+        std::uint32_t requestedPermissions, CefRefPtr<CefPermissionPromptCallback> callback
+    ) override {
+      CEF_REQUIRE_UI_THREAD();
+      const std::string origin = requestingOrigin.ToString();
+      constexpr std::uint32_t kSupported = CEF_PERMISSION_TYPE_NOTIFICATIONS | CEF_PERMISSION_TYPE_CLIPBOARD;
+      if (m_impl->policyId != "discord" || siteIntegrationForUrl(origin) != SiteIntegration::Discord
+          || requestedPermissions == 0 || (requestedPermissions & ~kSupported) != 0
+          || m_impl->permissionRequestCb == nullptr) {
+        callback->Continue(CEF_PERMISSION_RESULT_DENY);
+        return true;
+      }
+      std::uint32_t publicPermissions = CefBrowserPermissionNone;
+      if ((requestedPermissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) != 0) {
+        publicPermissions |= CefBrowserPermissionNotifications;
+      }
+      if ((requestedPermissions & CEF_PERMISSION_TYPE_CLIPBOARD) != 0) {
+        publicPermissions |= CefBrowserPermissionClipboard;
+      }
+      auto settled = std::make_shared<std::atomic<bool>>(false);
+      m_impl->permissionRequestCb(CefBrowserPermissionRequest{
+          .origin = origin,
+          .permissions = publicPermissions,
+          .resolve = [callback, publicPermissions, settled](std::uint32_t allowedPermissions) {
+            if (!settled->exchange(true)) {
+              const bool allAllowed = (allowedPermissions & publicPermissions) == publicPermissions;
+              callback->Continue(allAllowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+            }
+          },
+      });
+      return true;
+    }
 
     // CefRenderHandler
     void GetViewRect(CefRefPtr<CefBrowser> /*browser*/, CefRect& rect) override {
@@ -576,7 +961,10 @@ namespace {
       (void)width;
       (void)height;
       if (!m_impl->loggedCpuPaint.exchange(true)) {
-        kLog.error("CEF delivered a CPU OSR frame despite shared textures being required ({}x{})", width, height);
+        kLog.error(
+            "CEF session '{}' delivered a CPU OSR frame despite shared textures being required ({}x{})",
+            m_impl->id, width, height
+        );
       }
     }
 
@@ -596,7 +984,7 @@ namespace {
           return;
         }
         if (m_impl->gpuBridge == nullptr) {
-          kLog.error("received accelerated CEF frame before the Vulkan bridge was attached");
+          kLog.error("CEF session '{}' received a frame before its Vulkan bridge was attached", m_impl->id);
           return;
         }
         tracy_latency::acceleratedPaintArrived();
@@ -625,8 +1013,9 @@ namespace {
         frame.planeCount = std::min(info.plane_count, 4);
         if (!m_impl->loggedAcceleratedPaint.exchange(true)) {
           kLog.info(
-              "received first accelerated CEF frame: {}x{}, fourcc=0x{:08x}, modifier=0x{:016x}, planes={}",
-              frame.width, frame.height, frame.fourcc, frame.modifier, frame.planeCount
+              "CEF session '{}' received first accelerated frame: {}x{}, fourcc=0x{:08x}, "
+              "modifier=0x{:016x}, planes={}",
+              m_impl->id, frame.width, frame.height, frame.fourcc, frame.modifier, frame.planeCount
           );
         }
         for (int i = 0; i < frame.planeCount; ++i) {
@@ -660,6 +1049,8 @@ namespace {
         }
         m_impl->texture = m_impl->gpuBridge->texture();
         m_impl->textureChanged = true;
+        m_impl->hasUsableFrame = true;
+        m_impl->setState(CefBrowserSessionState::Ready);
         if (m_impl->frameReady) {
           m_impl->frameReady();
         }
@@ -710,22 +1101,62 @@ namespace {
 
     // CefLifeSpanHandler
     bool OnBeforePopup(
-        CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> /*frame*/, int popupId, const CefString& /*targetUrl*/,
+        CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> /*frame*/, int popupId, const CefString& targetUrl,
         const CefString& /*targetFrameName*/, WindowOpenDisposition targetDisposition, bool userGesture,
-        const CefPopupFeatures& /*popupFeatures*/, CefWindowInfo& /*windowInfo*/, CefRefPtr<CefClient>& /*client*/,
-        CefBrowserSettings& /*settings*/, CefRefPtr<CefDictionaryValue>& /*extraInfo*/, bool* /*noJavascriptAccess*/
+        const CefPopupFeatures& popupFeatures, CefWindowInfo& windowInfo, CefRefPtr<CefClient>& client,
+        CefBrowserSettings& settings, CefRefPtr<CefDictionaryValue>& /*extraInfo*/, bool* noJavascriptAccess
     ) override {
       CEF_REQUIRE_UI_THREAD();
-      kLog.warn(
-          "blocked unhosted CEF popup: opener={} popup={} disposition={} userGesture={}",
-          browser != nullptr ? browser->GetIdentifier() : -1, popupId, static_cast<int>(targetDisposition), userGesture
+      const std::string url = targetUrl.ToString();
+      if (!isAllowedTopLevelUrlForCefSession(m_impl->policyId, url, true)) {
+        if (userGesture) {
+          (void)launchExternalUrl(m_impl->id, url);
+        }
+        kLog.warn("blocked untrusted popup from CEF session '{}': {}", m_impl->id, url);
+        return true;
+      }
+      if (m_impl->owner == nullptr || m_impl->gpuBridge == nullptr) {
+        kLog.error("blocked CEF popup because the mandatory Vulkan session runtime is unavailable");
+        return true;
+      }
+      if (m_impl->popupCreatedCb == nullptr) {
+        kLog.warn("blocked CEF popup because session '{}' has no active Noctalia presenter", m_impl->id);
+        return true;
+      }
+      const int preferredWidth = popupFeatures.widthSet ? popupFeatures.width : 0;
+      const int preferredHeight = popupFeatures.heightSet ? popupFeatures.height : 0;
+      auto popup = m_impl->createPendingPopup(popupId, url, preferredWidth, preferredHeight, client);
+      if (popup == nullptr || client == nullptr) {
+        kLog.error("failed to allocate accelerated windowless popup session");
+        return true;
+      }
+
+      windowInfo.SetAsWindowless(0);
+      windowInfo.shared_texture_enabled = 1;
+      windowInfo.external_begin_frame_enabled = 1;
+      settings.windowless_frame_rate = m_impl->configuredFrameRate;
+      settings.background_color = CefColorSetARGB(0, 0, 0, 0);
+      if (noJavascriptAccess != nullptr) {
+        *noJavascriptAccess = false;
+      }
+      kLog.info(
+          "accepted accelerated windowless popup: parent={} child={} popup={} disposition={} size={}x{}",
+          m_impl->id, popup->id(), popupId, static_cast<int>(targetDisposition),
+          preferredWidth > 0 ? preferredWidth : m_impl->logicalWidth,
+          preferredHeight > 0 ? preferredHeight : m_impl->logicalHeight
       );
-      return true;
+      return false;
+    }
+
+    void OnBeforePopupAborted(CefRefPtr<CefBrowser> /*browser*/, int popupId) override {
+      CEF_REQUIRE_UI_THREAD();
+      m_impl->abortPendingPopup(popupId);
     }
 
     void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
       CEF_REQUIRE_UI_THREAD();
       m_impl->browser = browser;
+      m_impl->setState(CefBrowserSessionState::Loading);
       auto alive = m_impl->alive;
       auto* impl = m_impl;
       m_impl->devToolsObserver = new NoctaliaDevToolsMethodObserver(
@@ -744,10 +1175,31 @@ namespace {
         browser->GetHost()->SetFocus(m_impl->attached);
       }
       m_impl->startExternalScheduler();
-      kLog.info("CEF browser created");
+      kLog.info("CEF browser created for session '{}'", m_impl->id);
+      if (m_impl->auxiliary && m_impl->popupParent != nullptr) {
+        auto* parent = m_impl->popupParent;
+        parent->pendingPopups.erase(m_impl->popupId);
+        if (parent->alive->load() && parent->popupCreatedCb) {
+          if (auto self = m_impl->self.lock()) {
+            parent->popupCreatedCb(CefBrowserPopupRequest{
+                .session = std::move(self),
+                .preferredWidth = m_impl->popupPreferredWidth,
+                .preferredHeight = m_impl->popupPreferredHeight,
+            });
+          }
+        }
+      }
     }
     void OnBeforeClose(CefRefPtr<CefBrowser> /*browser*/) override {
       m_impl->stopExternalScheduler();
+      // Every close path, including JavaScript window.close(), DevTools, and
+      // opener teardown, must return the last exported image before dropping
+      // the browser used by the bridge's release callback. The native close
+      // affordance already drains proactively, but it cannot be the ownership
+      // invariant because web content can close an auxiliary browser itself.
+      if (m_impl->gpuBridge != nullptr) {
+        m_impl->gpuBridge->discardPendingFrame();
+      }
       m_impl->presentationResizeCaptureTimeout.stop();
       m_impl->presentationResizeCaptureMessageId = 0;
       m_impl->presentationResizeCaptureReady = nullptr;
@@ -755,6 +1207,10 @@ namespace {
       m_impl->devToolsObserver = nullptr;
       m_impl->rendererRecovery.reset();
       m_impl->browser = nullptr;
+      m_impl->closing = false;
+      if (m_impl->closedCb) {
+        m_impl->closedCb();
+      }
     }
 
     // CefRequestHandler
@@ -786,9 +1242,15 @@ namespace {
       }
 
       const auto action = m_impl->rendererRecovery.onTerminated();
+      m_impl->setState(
+          action == CefRendererRecovery::Action::Reload ? CefBrowserSessionState::Recovering
+                                                       : CefBrowserSessionState::Fatal,
+          errorString.ToString()
+      );
       kLog.error(
-          "CEF renderer terminated: status={} code={} error={} recovery={}", static_cast<int>(status), errorCode,
-          errorString.ToString(), action == CefRendererRecovery::Action::Reload ? "reload" : "stopped"
+          "CEF renderer for session '{}' terminated: status={} code={} error={} recovery={}", m_impl->id,
+          static_cast<int>(status), errorCode, errorString.ToString(),
+          action == CefRendererRecovery::Action::Reload ? "reload" : "stopped"
       );
       if (action != CefRendererRecovery::Action::Reload || browser == nullptr) {
         return;
@@ -815,13 +1277,19 @@ namespace {
     void OnLoadingStateChange(
         CefRefPtr<CefBrowser> /*browser*/, bool isLoading, bool /*canGoBack*/, bool /*canGoForward*/
     ) override {
-      kLog.info("CEF loading state changed: {}", isLoading ? "loading" : "idle");
+      kLog.info("CEF session '{}' loading state changed: {}", m_impl->id, isLoading ? "loading" : "idle");
+      if (isLoading && !m_impl->hasUsableFrame) {
+        m_impl->setState(CefBrowserSessionState::Loading);
+      }
       m_impl->requestExternalBeginFrame(isLoading);
     }
 
     void OnLoadEnd(CefRefPtr<CefBrowser> /*browser*/, CefRefPtr<CefFrame> frame, int httpStatusCode) override {
       if (frame->IsMain()) {
-        kLog.info("CEF main frame loaded: status={} url={}", httpStatusCode, frame->GetURL().ToString());
+        kLog.info(
+            "CEF session '{}' main frame loaded: status={} url={}", m_impl->id, httpStatusCode,
+            frame->GetURL().ToString()
+        );
       }
     }
 
@@ -831,40 +1299,95 @@ namespace {
     ) override {
       if (frame->IsMain()) {
         kLog.error(
-            "CEF main frame load failed: code={} error={} url={}", static_cast<int>(errorCode), errorText.ToString(),
-            failedUrl.ToString()
+            "CEF session '{}' main frame load failed: code={} error={} url={}", m_impl->id,
+            static_cast<int>(errorCode), errorText.ToString(), failedUrl.ToString()
         );
+        m_impl->setState(CefBrowserSessionState::Failed, errorText.ToString());
       }
     }
 
   private:
-    CefService::Impl* m_impl;
+    CefBrowserSession::Impl* m_impl;
     IMPLEMENT_REFCOUNTING(NoctaliaCefClient);
   };
 
 } // namespace
 
+std::shared_ptr<CefBrowserSession> CefBrowserSession::Impl::createPendingPopup(
+    int requestedPopupId, std::string url, int preferredWidth, int preferredHeight,
+    CefRefPtr<CefClient>& outClient
+) {
+  if (owner == nullptr) {
+    return nullptr;
+  }
+  const std::string childId = std::format("{}-popup-{}-{}", id, requestedPopupId, nextPopupSerial++);
+  auto popup = owner->createBrowserSession(childId);
+  auto* child = popup->m_impl.get();
+  child->auxiliary = true;
+  child->policyId = policyId;
+  child->popupParent = this;
+  child->popupId = requestedPopupId;
+  child->popupPreferredWidth = preferredWidth;
+  child->popupPreferredHeight = preferredHeight;
+  child->logicalWidth = preferredWidth > 0 ? preferredWidth : logicalWidth;
+  child->logicalHeight = preferredHeight > 0 ? preferredHeight : logicalHeight;
+  child->pendingUrl = std::move(url);
+  child->setState(CefBrowserSessionState::Loading);
+  child->client = new NoctaliaCefClient(child);
+  outClient = child->client;
+  pendingPopups.insert_or_assign(requestedPopupId, popup);
+  return popup;
+}
+
+void CefBrowserSession::Impl::abortPendingPopup(int requestedPopupId) {
+  const auto found = pendingPopups.find(requestedPopupId);
+  if (found == pendingPopups.end()) {
+    return;
+  }
+  if (auto popup = found->second.lock()) {
+    popup->m_impl->client = nullptr;
+    popup->m_impl->alive->store(false);
+    popup->m_impl->setState(CefBrowserSessionState::Failed, "Popup creation was aborted");
+  }
+  pendingPopups.erase(found);
+}
+
 // ---------------------------------------------------------------------------
 // CefService
 // ---------------------------------------------------------------------------
-CefService::CefService(std::string cefDir, std::string helperPath) : m_impl(std::make_unique<Impl>()) {
-  m_impl->cefDir = std::move(cefDir);
-  m_impl->helperPath = helperPath.empty() ? helperNextToSelf() : std::move(helperPath);
+CefService::CefService(std::string cefDir, std::string helperPath) : m_runtime(std::make_unique<Runtime>()) {
+  m_runtime->cefDir = std::move(cefDir);
+  m_runtime->helperPath = helperPath.empty() ? helperNextToSelf() : std::move(helperPath);
 }
 
 CefService::~CefService() { shutdown(); }
 
-bool CefService::initialized() const noexcept { return m_impl->initialized; }
+bool CefService::initialized() const noexcept { return m_runtime->initialized; }
+
+std::shared_ptr<CefBrowserSession> CefService::createBrowserSession(std::string id) {
+  for (const auto& session : m_runtime->sessions) {
+    if (session != nullptr && session->id() == id) {
+      return session;
+    }
+  }
+  auto session = std::shared_ptr<CefBrowserSession>(new CefBrowserSession(*this, std::move(id)));
+  session->m_impl->self = session;
+  if (m_runtime->graphics != nullptr) {
+    session->attachGraphicsDevice(*m_runtime->graphics);
+  }
+  m_runtime->sessions.push_back(session);
+  return session;
+}
 
 bool CefService::initialize() {
-  if (m_impl->initialized) {
+  if (m_runtime->initialized) {
     return true;
   }
 
   CefMainArgs mainArgs(0, nullptr);
 
-  auto scheduleWork = m_impl->scheduleWork;
-  m_impl->app = new NoctaliaCefApp([scheduleWork = std::move(scheduleWork)](std::int64_t delayMs) {
+  auto scheduleWork = m_runtime->scheduleWork;
+  m_runtime->app = new NoctaliaCefApp([scheduleWork = std::move(scheduleWork)](std::int64_t delayMs) {
     scheduleWork->dispatch(delayMs);
   });
 
@@ -902,17 +1425,17 @@ bool CefService::initialize() {
   // not relocate or discard the current Apple Music browser data.
   CefString(&settings.root_cache_path).FromString(rootCachePath);
   CefString(&settings.cache_path).FromString(rootCachePath);
-  CefString(&settings.resources_dir_path).FromString(m_impl->cefDir + "/Resources");
-  CefString(&settings.locales_dir_path).FromString(m_impl->cefDir + "/Resources/locales");
-  if (!m_impl->helperPath.empty()) {
-    CefString(&settings.browser_subprocess_path).FromString(m_impl->helperPath);
+  CefString(&settings.resources_dir_path).FromString(m_runtime->cefDir + "/Resources");
+  CefString(&settings.locales_dir_path).FromString(m_runtime->cefDir + "/Resources/locales");
+  if (!m_runtime->helperPath.empty()) {
+    CefString(&settings.browser_subprocess_path).FromString(m_runtime->helperPath);
   }
 
-  if (!CefInitialize(mainArgs, settings, m_impl->app.get(), nullptr)) {
-    m_impl->app = nullptr;
+  if (!CefInitialize(mainArgs, settings, m_runtime->app.get(), nullptr)) {
+    m_runtime->app = nullptr;
     return false;
   }
-  m_impl->initialized = true;
+  m_runtime->initialized = true;
   kLog.info("CEF persistent profile enabled at {}", rootCachePath);
   return true;
 }
@@ -921,18 +1444,91 @@ void CefService::attachGraphicsDevice(GraphicsDevice& graphics) {
   if (!graphics.valid() || !graphics.cefExternalMemoryEnabled()) {
     throw std::runtime_error("CEF requires the Vulkan external-memory GraphicsDevice contract");
   }
+  m_runtime->graphics = &graphics;
+  for (const auto& session : m_runtime->sessions) {
+    session->attachGraphicsDevice(graphics);
+  }
+}
+
+void CefService::prepareForGraphicsDeviceRebuild() {
+  m_runtime->graphics = nullptr;
+  for (const auto& session : m_runtime->sessions) {
+    session->prepareForGraphicsDeviceRebuild();
+  }
+}
+
+void CefService::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
+  if (!graphics.valid() || !graphics.cefExternalMemoryEnabled()) {
+    throw std::runtime_error("CEF requires the Vulkan external-memory GraphicsDevice contract");
+  }
+  m_runtime->graphics = &graphics;
+  for (const auto& session : m_runtime->sessions) {
+    session->resumeAfterGraphicsDeviceRebuild(graphics);
+  }
+}
+
+void CefService::shutdown() {
+  if (!m_runtime->initialized) {
+    return;
+  }
+  m_runtime->scheduleWork->disable();
+  for (const auto& session : m_runtime->sessions) {
+    session->beginShutdown();
+  }
+  for (int i = 0; i < 500; ++i) {
+    bool allClosed = true;
+    for (const auto& session : m_runtime->sessions) {
+      allClosed = allClosed && session->browserClosed();
+    }
+    if (allClosed) {
+      break;
+    }
+    CefDoMessageLoopWork();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  for (const auto& session : m_runtime->sessions) {
+    if (!session->browserClosed()) {
+      kLog.error("CEF session '{}' did not reach OnBeforeClose before shutdown", session->id());
+    }
+    session->finishShutdown();
+  }
+  CefShutdown();
+  m_runtime->app = nullptr;
+  m_runtime->initialized = false;
+  m_runtime->graphics = nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// CefBrowserSession
+// ---------------------------------------------------------------------------
+CefBrowserSession::CefBrowserSession(CefService& service, std::string id)
+    : m_impl(std::make_unique<Impl>()), m_id(std::move(id)) {
+  m_impl->owner = &service;
+  m_impl->id = m_id;
+  m_impl->policyId = m_id;
+}
+
+CefBrowserSession::~CefBrowserSession() { finishShutdown(); }
+
+void CefBrowserSession::attachGraphicsDevice(GraphicsDevice& graphics) {
+  if (m_impl->gpuBridge != nullptr) {
+    return;
+  }
+  auto alive = m_impl->alive;
+  auto* impl = m_impl.get();
   m_impl->gpuBridge = std::make_unique<CefGpuFrameBridge>(
-      graphics, graphics.textureManager(), [this](std::uint64_t transportEpoch, std::int64_t captureCounter, int fd) {
-        if (m_impl->browser == nullptr) {
-          kLog.warn("dropping CEF release fence for closed browser frame {}", captureCounter);
+      graphics, graphics.textureManager(),
+      [alive, impl](std::uint64_t transportEpoch, std::int64_t captureCounter, int fd) {
+        if (!alive->load() || impl->browser == nullptr) {
+          kLog.warn("dropping CEF release fence for closed session '{}' frame {}", impl->id, captureCounter);
           return;
         }
-        m_impl->browser->GetHost()->SetAcceleratedPaintReleaseFence(transportEpoch, captureCounter, fd);
+        impl->browser->GetHost()->SetAcceleratedPaintReleaseFence(transportEpoch, captureCounter, fd);
       }
   );
 }
 
-void CefService::prepareForGraphicsDeviceRebuild() {
+void CefBrowserSession::prepareForGraphicsDeviceRebuild() {
   m_impl->stopExternalScheduler();
   if (m_impl->gpuBridge != nullptr) {
     m_impl->gpuBridge->abandonDevice();
@@ -940,9 +1536,11 @@ void CefService::prepareForGraphicsDeviceRebuild() {
   }
   m_impl->texture = {};
   m_impl->textureChanged = true;
+  m_impl->hasUsableFrame = false;
+  m_impl->setState(CefBrowserSessionState::Recovering);
 }
 
-void CefService::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
+void CefBrowserSession::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
   attachGraphicsDevice(graphics);
   m_impl->texture = {};
   m_impl->textureChanged = true;
@@ -955,45 +1553,45 @@ void CefService::resumeAfterGraphicsDeviceRebuild(GraphicsDevice& graphics) {
   }
 }
 
-void CefService::shutdown() {
-  if (!m_impl->initialized) {
+void CefBrowserSession::beginShutdown() {
+  m_impl->stopExternalScheduler();
+  // Return ownership of the last sampled export while the browser still
+  // exists to receive its release fence. Destroying the browser first leaves
+  // Viz's native-pixmap access open and makes the GPU process treat orderly
+  // shell shutdown as an unrecoverable ownership error.
+  if (m_impl->gpuBridge != nullptr) {
+    m_impl->gpuBridge->discardPendingFrame();
+  }
+  m_impl->alive->store(false);
+  if (m_impl->browser != nullptr) {
+    m_impl->browser->GetHost()->CloseBrowser(true);
+  }
+}
+
+bool CefBrowserSession::browserClosed() const noexcept { return m_impl->browser == nullptr; }
+
+void CefBrowserSession::finishShutdown() {
+  if (m_impl->resourcesFinished) {
     return;
   }
-  m_impl->scheduleWork->disable();
-  m_impl->alive->store(false);
-  m_impl->stopExternalScheduler();
-  if (m_impl->browser) {
-    m_impl->browser->GetHost()->CloseBrowser(true);
-    // OnBeforeClose is the CEF contract that all browser-owned objects have
-    // been released. Give Chromium's child processes real wall-clock time to
-    // drain instead of spinning through 50 message-pump calls immediately.
-    for (int i = 0; i < 500 && m_impl->browser != nullptr; ++i) {
-      CefDoMessageLoopWork();
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (m_impl->browser != nullptr) {
-      kLog.error("CEF browser did not reach OnBeforeClose before shutdown");
-    }
-  }
+  m_impl->resourcesFinished = true;
   m_impl->client = nullptr;
   if (m_impl->gpuBridge != nullptr) {
     const CefGpuFrameBridgeStats stats = m_impl->gpuBridge->stats();
     kLog.info(
-        "CEF GPU bridge summary: accepted={}, directStaged={}, "
+        "CEF session '{}' GPU bridge summary: accepted={}, directStaged={}, "
         "directSampled={}, directDiscarded={}, releaseFences={}, imports={}/{}, "
         "activeImports={}, cacheHits={}, cacheMisses={}, cacheEvictions={}",
-        stats.framesAccepted, stats.directFramesStaged, stats.directFramesSampled, stats.directFramesDiscarded,
-        stats.releaseFenceFdsExported, stats.importsCreated, stats.importsDestroyed, stats.activeImports,
-        stats.importCacheHits, stats.importCacheMisses, stats.importCacheEvictions
+        m_id, stats.framesAccepted, stats.directFramesStaged, stats.directFramesSampled,
+        stats.directFramesDiscarded, stats.releaseFenceFdsExported, stats.importsCreated,
+        stats.importsDestroyed, stats.activeImports, stats.importCacheHits, stats.importCacheMisses,
+        stats.importCacheEvictions
     );
   }
   m_impl->gpuBridge.reset();
-  CefShutdown();
-  m_impl->app = nullptr;
-  m_impl->initialized = false;
 }
 
-void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
+void CefBrowserSession::ensureBrowser(int logicalWidth, int logicalHeight) {
   // Once the browser exists, resize() owns viewport changes and must compare
   // the requested dimensions with the dimensions CEF currently knows. Do not
   // overwrite that state here: CefSurfaceNode deliberately calls
@@ -1005,12 +1603,15 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
   m_impl->logicalWidth = logicalWidth > 0 ? logicalWidth : m_impl->logicalWidth;
   m_impl->logicalHeight = logicalHeight > 0 ? logicalHeight : m_impl->logicalHeight;
   if (m_impl->gpuBridge == nullptr) {
+    m_impl->setState(CefBrowserSessionState::Fatal, "Vulkan DMA-BUF bridge unavailable");
     kLog.error("refusing to create CEF browser: mandatory Vulkan DMA-BUF bridge is unavailable");
     return;
   }
-  if (!m_impl->initialized && !initialize()) {
+  if (m_impl->owner == nullptr || (!m_impl->owner->initialized() && !m_impl->owner->initialize())) {
+    m_impl->setState(CefBrowserSessionState::Fatal, "CEF initialization failed");
     return;
   }
+  m_impl->setState(CefBrowserSessionState::Loading);
   m_impl->client = new NoctaliaCefClient(m_impl.get());
 
   CefWindowInfo windowInfo;
@@ -1026,13 +1627,13 @@ void CefService::ensureBrowser(int logicalWidth, int logicalHeight) {
     kLog.error("CEF browser creation request was rejected");
   } else {
     kLog.info(
-        "CEF browser creation requested: {}x{} fps={} scheduler={} url={}", m_impl->logicalWidth, m_impl->logicalHeight,
-        kCefWindowlessFrameRate, "wayland-frame-callback", url
+        "CEF browser creation requested for session '{}': {}x{} fps={} scheduler={} url={}", m_id,
+        m_impl->logicalWidth, m_impl->logicalHeight, kCefWindowlessFrameRate, "wayland-frame-callback", url
     );
   }
 }
 
-void CefService::resize(int logicalWidth, int logicalHeight) {
+void CefBrowserSession::resize(int logicalWidth, int logicalHeight) {
   if (logicalWidth <= 0 || logicalHeight <= 0) {
     return;
   }
@@ -1047,22 +1648,53 @@ void CefService::resize(int logicalWidth, int logicalHeight) {
   }
 }
 
-void CefService::navigate(const std::string& url) {
+void CefBrowserSession::navigate(const std::string& url) {
   m_impl->pendingUrl = url;
+  if (!m_impl->hasUsableFrame) {
+    m_impl->setState(CefBrowserSessionState::Loading);
+  }
   if (m_impl->browser) {
     m_impl->browser->GetMainFrame()->LoadURL(url);
     m_impl->requestExternalBeginFrame(true);
   }
 }
 
-void CefService::execJs(const std::string& code) {
+void CefBrowserSession::reload() {
+  m_impl->lastError.clear();
+  m_impl->setState(CefBrowserSessionState::Loading);
+  if (m_impl->browser != nullptr) {
+    m_impl->browser->Reload();
+    m_impl->requestExternalBeginFrame(true);
+  }
+}
+
+void CefBrowserSession::close() {
+  if (m_impl->closing) {
+    return;
+  }
+  m_impl->closing = true;
+  m_impl->stopExternalScheduler();
+  if (m_impl->gpuBridge != nullptr) {
+    m_impl->gpuBridge->discardPendingFrame();
+  }
+  if (m_impl->browser != nullptr) {
+    m_impl->browser->GetHost()->CloseBrowser(true);
+    return;
+  }
+  m_impl->closing = false;
+  if (m_impl->closedCb) {
+    m_impl->closedCb();
+  }
+}
+
+void CefBrowserSession::execJs(const std::string& code) {
   if (m_impl->browser) {
     m_impl->browser->GetMainFrame()->ExecuteJavaScript(code, m_impl->browser->GetMainFrame()->GetURL(), 0);
     m_impl->requestExternalBeginFrame(true);
   }
 }
 
-void CefService::preparePresentationResize(std::function<void()> ready) {
+void CefBrowserSession::preparePresentationResize(std::function<void()> ready) {
   if (!ready) {
     return;
   }
@@ -1103,7 +1735,7 @@ void CefService::preparePresentationResize(std::function<void()> ready) {
   });
 }
 
-void CefService::setDeviceScale(float scale) {
+void CefBrowserSession::setDeviceScale(float scale) {
   if (scale <= 0.0f || scale == m_impl->deviceScale) {
     return;
   }
@@ -1115,7 +1747,7 @@ void CefService::setDeviceScale(float scale) {
   }
 }
 
-void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving) {
+void CefBrowserSession::sendMouseMove(float x, float y, std::uint32_t modifiers, bool leaving) {
   if (!m_impl->browser) {
     return;
   }
@@ -1135,13 +1767,15 @@ void CefService::sendMouseMove(float x, float y, std::uint32_t modifiers, bool l
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::flushMouseMove() {
+void CefBrowserSession::flushMouseMove() {
   if (m_impl->flushPointerMotion()) {
     m_impl->requestExternalBeginFrame(true);
   }
 }
 
-void CefService::sendMouseButton(float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers) {
+void CefBrowserSession::sendMouseButton(
+    float x, float y, int button, bool pressed, int clickCount, std::uint32_t modifiers
+) {
   if (!m_impl->browser) {
     return;
   }
@@ -1169,7 +1803,9 @@ void CefService::sendMouseButton(float x, float y, int button, bool pressed, int
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, std::uint32_t modifiers) {
+void CefBrowserSession::sendMouseWheel(
+    float x, float y, float deltaX, float deltaY, std::uint32_t modifiers
+) {
   if (!m_impl->browser) {
     return;
   }
@@ -1183,7 +1819,9 @@ void CefService::sendMouseWheel(float x, float y, float deltaX, float deltaY, st
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed) {
+void CefBrowserSession::sendKey(
+    std::uint32_t sym, std::uint32_t utf32, std::uint32_t modifiers, bool pressed
+) {
   if (!m_impl->browser) {
     return;
   }
@@ -1213,7 +1851,7 @@ void CefService::sendKey(std::uint32_t sym, std::uint32_t utf32, std::uint32_t m
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::goBack() {
+void CefBrowserSession::goBack() {
   if (!m_impl->browser || !m_impl->browser->CanGoBack()) {
     return;
   }
@@ -1221,7 +1859,7 @@ void CefService::goBack() {
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::goForward() {
+void CefBrowserSession::goForward() {
   if (!m_impl->browser || !m_impl->browser->CanGoForward()) {
     return;
   }
@@ -1229,7 +1867,7 @@ void CefService::goForward() {
   m_impl->requestExternalBeginFrame(true);
 }
 
-void CefService::setFocus(bool focused) {
+void CefBrowserSession::setFocus(bool focused) {
   if (m_impl->browser) {
     m_impl->browser->GetHost()->SetFocus(focused);
     if (focused) {
@@ -1238,7 +1876,7 @@ void CefService::setFocus(bool focused) {
   }
 }
 
-void CefService::setDisplayAttached(bool attached) {
+void CefBrowserSession::setDisplayAttached(bool attached) {
   if (m_impl->attached == attached) {
     return;
   }
@@ -1296,7 +1934,7 @@ void CefService::setDisplayAttached(bool attached) {
   }
 }
 
-void CefService::setBackgroundPlaybackActive(bool active) {
+void CefBrowserSession::setBackgroundPlaybackActive(bool active) {
   const bool changed = m_impl->backgroundPlaybackActive != active;
   m_impl->backgroundPlaybackActive = active;
 
@@ -1350,9 +1988,9 @@ void CefService::setBackgroundPlaybackActive(bool active) {
   }
 }
 
-void CefService::onPresentation(const SurfacePresentationFeedback& feedback) { m_impl->onPresentation(feedback); }
+void CefBrowserSession::onPresentation(const SurfacePresentationFeedback& feedback) { m_impl->onPresentation(feedback); }
 
-bool CefService::onFrameOpportunity() {
+bool CefBrowserSession::onFrameOpportunity() {
   const bool forwardedPointerMotion = m_impl->flushPointerMotion();
   if (!m_impl->attached || m_impl->browser == nullptr) {
     return false;
@@ -1370,39 +2008,76 @@ bool CefService::onFrameOpportunity() {
 }
 
 void CefService::doMessageLoopWork() {
-  if (m_impl->initialized) {
+  if (m_runtime->initialized) {
     NOCTALIA_TRACE_ZONE("CEF message-pump work");
     CefDoMessageLoopWork();
+    std::erase_if(m_runtime->sessions, [](const std::shared_ptr<CefBrowserSession>& session) {
+      return session != nullptr && session->m_impl->auxiliary && session->m_impl->browser == nullptr;
+    });
   }
 }
 
 void CefService::setScheduleWorkCallback(std::function<void(std::int64_t)> cb) {
-  m_impl->scheduleWork->set(std::move(cb));
+  m_runtime->scheduleWork->set(std::move(cb));
 }
 
-bool CefService::uploadIfDirty(TextureManager& textures) {
+bool CefBrowserSession::uploadIfDirty(TextureManager& textures) {
   (void)textures;
   return std::exchange(m_impl->textureChanged, false);
 }
 
-TextureHandle CefService::currentTexture() const noexcept { return m_impl->texture; }
+TextureHandle CefBrowserSession::currentTexture() const noexcept { return m_impl->texture; }
 
-void CefService::invalidateGpuTexture() {
+CefBrowserSessionState CefBrowserSession::state() const noexcept { return m_impl->state; }
+
+bool CefBrowserSession::hasUsableFrame() const noexcept { return m_impl->hasUsableFrame; }
+
+const std::string& CefBrowserSession::lastError() const noexcept { return m_impl->lastError; }
+
+const CefBrowserMediaState& CefBrowserSession::mediaState() const noexcept { return m_impl->mediaState; }
+
+void CefBrowserSession::invalidateGpuTexture() {
   if (m_impl->gpuBridge != nullptr) {
     m_impl->gpuBridge->invalidate();
   }
   m_impl->texture = {};
+  m_impl->hasUsableFrame = false;
+  m_impl->setState(CefBrowserSessionState::Recovering);
   if (m_impl->browser) {
     m_impl->browser->GetHost()->Invalidate(PET_VIEW);
     m_impl->requestExternalBeginFrame(true);
   }
 }
 
-void CefService::setFrameReadyCallback(std::function<void()> cb) { m_impl->frameReady = std::move(cb); }
+void CefBrowserSession::setFrameReadyCallback(std::function<void()> cb) { m_impl->frameReady = std::move(cb); }
 
-void CefService::setFrameOpportunityCallback(std::function<void()> cb) {
+void CefBrowserSession::setFrameOpportunityCallback(std::function<void()> cb) {
   m_impl->frameOpportunity = std::move(cb);
   m_impl->armFrameOpportunity();
 }
 
-void CefService::setCursorCallback(std::function<void(std::uint32_t)> cb) { m_impl->cursorCb = std::move(cb); }
+void CefBrowserSession::setCursorCallback(std::function<void(std::uint32_t)> cb) {
+  m_impl->cursorCb = std::move(cb);
+}
+
+void CefBrowserSession::setStateCallback(std::function<void(CefBrowserSessionState)> cb) {
+  m_impl->stateCb = std::move(cb);
+}
+
+void CefBrowserSession::setPermissionRequestCallback(std::function<void(CefBrowserPermissionRequest)> cb) {
+  m_impl->permissionRequestCb = std::move(cb);
+}
+
+void CefBrowserSession::setContextMenuRequestCallback(std::function<void(CefBrowserContextMenuRequest)> cb) {
+  m_impl->contextMenuRequestCb = std::move(cb);
+}
+
+void CefBrowserSession::setPopupCreatedCallback(std::function<void(CefBrowserPopupRequest)> cb) {
+  m_impl->popupCreatedCb = std::move(cb);
+}
+
+void CefBrowserSession::setClosedCallback(std::function<void()> cb) { m_impl->closedCb = std::move(cb); }
+
+void CefBrowserSession::setMediaStateCallback(std::function<void(const CefBrowserMediaState&)> cb) {
+  m_impl->mediaStateCb = std::move(cb);
+}

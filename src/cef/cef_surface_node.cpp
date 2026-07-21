@@ -1,6 +1,6 @@
 #include "cef/cef_surface_node.h"
 
-#include "cef/cef_service.h"
+#include "cef/cef_browser_session.h"
 #include "core/input/key_modifiers.h"
 #include "core/tracy_latency.h"
 #include "render/core/renderer.h"
@@ -44,7 +44,7 @@ namespace {
   bool isAltModifierKey(const InputArea::KeyData& key) { return key.sym == XKB_KEY_Alt_L || key.sym == XKB_KEY_Alt_R; }
 } // namespace
 
-CefSurfaceNode::CefSurfaceNode(CefService& service) : m_service(service) {
+CefSurfaceNode::CefSurfaceNode(CefBrowserSession& session) : m_session(session) {
   auto image = std::make_unique<ImageNode>();
   m_image = image.get();
   addChild(std::move(image));
@@ -78,16 +78,16 @@ void CefSurfaceNode::wireInput() {
 
   m_input->setOnMotion([this](const InputArea::PointerData& p) {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerMove);
-    m_service.sendMouseMove(p.localX, p.localY, 0, false);
+    m_session.sendMouseMove(p.localX, p.localY, 0, false);
   });
   m_input->setOnEnter([this](const InputArea::PointerData& p) {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerMove);
-    m_service.sendMouseMove(p.localX, p.localY, 0, false);
-    m_service.flushMouseMove();
+    m_session.sendMouseMove(p.localX, p.localY, 0, false);
+    m_session.flushMouseMove();
   });
   m_input->setOnLeave([this]() {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerMove);
-    m_service.sendMouseMove(0.0f, 0.0f, 0, true);
+    m_session.sendMouseMove(0.0f, 0.0f, 0, true);
   });
   m_input->setOnPress([this](const InputArea::PointerData& p) {
     if (p.pressed) {
@@ -95,21 +95,21 @@ void CefSurfaceNode::wireInput() {
     }
     if (isHistoryBackButton(p.button)) {
       if (p.pressed) {
-        m_service.goBack();
+        m_session.goBack();
       }
       return;
     }
     if (isHistoryForwardButton(p.button)) {
       if (p.pressed) {
-        m_service.goForward();
+        m_session.goForward();
       }
       return;
     }
-    m_service.sendMouseButton(p.localX, p.localY, cefButtonFromLinux(p.button), p.pressed, 1, 0);
+    m_session.sendMouseButton(p.localX, p.localY, cefButtonFromLinux(p.button), p.pressed, 1, 0);
   });
   m_input->setOnAxisHandler([this](const InputArea::PointerData& p) {
     tracy_latency::inputReceived(tracy_latency::InputKind::PointerWheel);
-    m_service.sendMouseWheel(p.localX, p.localY, 0.0f, -p.scrollDelta(kWheelStep), 0);
+    m_session.sendMouseWheel(p.localX, p.localY, 0.0f, -p.scrollDelta(kWheelStep), 0);
     return true;
   });
 
@@ -123,32 +123,32 @@ void CefSurfaceNode::wireInput() {
       return;
     }
     if (isHistoryBackKey(k)) {
-      m_service.goBack();
+      m_session.goBack();
       return;
     }
     if (isHistoryForwardKey(k)) {
-      m_service.goForward();
+      m_session.goForward();
       return;
     }
-    m_service.sendKey(k.sym, k.utf32, k.modifiers, true);
+    m_session.sendKey(k.sym, k.utf32, k.modifiers, true);
   });
   m_input->setOnKeyUp([this](const InputArea::KeyData& k) {
     if (isAltModifierKey(k) || isHistoryBackKey(k) || isHistoryForwardKey(k)) {
       return;
     }
-    m_service.sendKey(k.sym, k.utf32, k.modifiers, false);
+    m_session.sendKey(k.sym, k.utf32, k.modifiers, false);
   });
-  m_input->setOnFocusGain([this]() { m_service.setFocus(true); });
-  m_input->setOnFocusLoss([this]() { m_service.setFocus(false); });
+  m_input->setOnFocusGain([this]() { m_session.setFocus(true); });
+  m_input->setOnFocusLoss([this]() { m_session.setFocus(false); });
 }
 
 void CefSurfaceNode::attach(
     std::function<void()> requestRedraw, std::function<void()> requestFrameOpportunity,
     std::function<void()> refreshCursor
 ) {
-  m_service.setFrameReadyCallback(std::move(requestRedraw));
-  m_service.setFrameOpportunityCallback(std::move(requestFrameOpportunity));
-  m_service.setCursorCallback([this, refreshCursor = std::move(refreshCursor)](std::uint32_t shape) {
+  m_session.setFrameReadyCallback(std::move(requestRedraw));
+  m_session.setFrameOpportunityCallback(std::move(requestFrameOpportunity));
+  m_session.setCursorCallback([this, refreshCursor = std::move(refreshCursor)](std::uint32_t shape) {
     if (m_input != nullptr) {
       m_input->setCursorShape(shape);
       // CEF chooses cursors asynchronously. Re-apply the new shape now so a
@@ -159,7 +159,7 @@ void CefSurfaceNode::attach(
     }
   });
   if (!m_attached) {
-    m_service.setDisplayAttached(true);
+    m_session.setDisplayAttached(true);
     m_attached = true;
   }
 }
@@ -170,11 +170,11 @@ void CefSurfaceNode::detach(bool preserveDisplayAttachment) {
   }
   m_attached = false;
   if (!preserveDisplayAttachment) {
-    m_service.setDisplayAttached(false);
+    m_session.setDisplayAttached(false);
   }
-  m_service.setFrameReadyCallback(nullptr);
-  m_service.setFrameOpportunityCallback(nullptr);
-  m_service.setCursorCallback(nullptr);
+  m_session.setFrameReadyCallback(nullptr);
+  m_session.setFrameOpportunityCallback(nullptr);
+  m_session.setCursorCallback(nullptr);
 }
 
 void CefSurfaceNode::doLayout(Renderer& renderer) {
@@ -182,9 +182,9 @@ void CefSurfaceNode::doLayout(Renderer& renderer) {
   const auto h = static_cast<int>(height());
   const float renderScale = renderer.renderScale();
 
-  m_service.setDeviceScale(renderScale);
-  m_service.ensureBrowser(w, h);
-  m_service.resize(w, h);
+  m_session.setDeviceScale(renderScale);
+  m_session.ensureBrowser(w, h);
+  m_session.resize(w, h);
   // Keep the last complete browser frame visible while CEF responds to
   // WasResized(). On an xdg fullscreen transition niri is already scaling the
   // old endpoint snapshot, so clearing this image would introduce a blank
@@ -202,8 +202,8 @@ void CefSurfaceNode::doLayout(Renderer& renderer) {
 }
 
 bool CefSurfaceNode::syncTexture(TextureManager& textures) {
-  const bool uploaded = m_service.uploadIfDirty(textures);
-  const TextureHandle handle = m_service.currentTexture();
+  const bool uploaded = m_session.uploadIfDirty(textures);
+  const TextureHandle handle = m_session.currentTexture();
   if (m_image != nullptr) {
     m_image->setTextureId(handle.valid() ? handle.id : TextureId{});
     if (handle.valid()) {
@@ -214,7 +214,7 @@ bool CefSurfaceNode::syncTexture(TextureManager& textures) {
 }
 
 void CefSurfaceNode::doInvalidateGpuResources(Renderer& /*renderer*/) {
-  m_service.invalidateGpuTexture();
+  m_session.invalidateGpuTexture();
   if (m_image != nullptr) {
     m_image->setTextureId({});
   }

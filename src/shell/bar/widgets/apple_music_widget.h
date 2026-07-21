@@ -2,6 +2,8 @@
 
 #include "shell/bar/widgets/media_widget.h"
 
+class CefBrowserSession;
+
 class HttpClient;
 class MprisService;
 struct wl_output;
@@ -9,7 +11,8 @@ struct wl_output;
 class AppleMusicWidget final : public MediaWidget {
 public:
   AppleMusicWidget(
-      MprisService* mpris, HttpClient* httpClient, wl_output* output, float maxWidth, float minWidth, float artSize,
+      MprisService* mpris, std::shared_ptr<CefBrowserSession> session, HttpClient* httpClient, wl_output* output,
+      float maxWidth, float minWidth, float artSize,
       MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia, bool albumArtOnly, bool hideAlbumArt, bool hideArtist
   );
 };

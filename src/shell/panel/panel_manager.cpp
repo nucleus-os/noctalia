@@ -47,6 +47,9 @@ namespace {
   constexpr Logger kLog("panel");
   constexpr std::int32_t kDetachedPanelShadowSafetyPadding = 2;
   constexpr auto kAppleMusicFullscreenCursorIdleTimeout = std::chrono::seconds(10);
+  // Allows the pointer to cross a detached panel's intentional visual gap
+  // without collapsing a hover preview between the bar and panel surfaces.
+  constexpr auto kPanelHoverPreviewBridgeDelay = std::chrono::milliseconds(400);
 
   bool blurTraceEnabled() {
     static const bool enabled = SysUtils::isEnvFlagOn("NOCTALIA_BLUR_TRACE");
@@ -295,6 +298,12 @@ namespace {
 
   [[nodiscard]] bool
   openNearClickEnabled(const Panel* panel, std::string_view panelId, const ConfigService* configService) {
+    if (panel != nullptr && panel->panelOpenNearClick()) {
+      const bool pinned = panel->panelPlacement() == PanelPlacement::Floating
+          && panel->panelScreenPosition() != "auto"
+          && panel->panelScreenPosition() != "center";
+      return !pinned;
+    }
     if (panelId.contains(':')) {
       if (panel == nullptr) {
         return false;
@@ -1232,6 +1241,9 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
 
   m_activePanel = it->second.get();
   m_activePanelId = panelId;
+  resetPanelHoverPreview();
+  m_hoverPreview = request.hoverPreview;
+  m_hoverPreviewSourceHovered = request.hoverPreview;
   m_animateOpen = request.animateOpen;
   m_activePanel->setContentScale(resolvePanelContentScale(m_config));
   m_activePanel->setFullscreenPresentation(false);
@@ -1308,12 +1320,23 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   const bool useFloatingAnchor = !useCenteredPlacement
       && request.hasAnchorPosition
       && openNearClickEnabled(m_activePanel, m_activePanelId, m_config);
-  const auto detachedShadowBleed =
+  auto detachedSurfaceBleed =
       detachedPanelSurfaceBleed(m_activePanel->hasDecoration(), m_config->config().shell.shadow);
+  if (request.hoverPreview && !useCenteredPlacement && !useScreenPosition && !fillWidth && !fillHeight) {
+    if (barConfig.position == "top") {
+      detachedSurfaceBleed.up = std::max(detachedSurfaceBleed.up, panelGap);
+    } else if (barConfig.position == "bottom") {
+      detachedSurfaceBleed.down = std::max(detachedSurfaceBleed.down, panelGap);
+    } else if (barConfig.position == "left") {
+      detachedSurfaceBleed.left = std::max(detachedSurfaceBleed.left, panelGap);
+    } else if (barConfig.position == "right") {
+      detachedSurfaceBleed.right = std::max(detachedSurfaceBleed.right, panelGap);
+    }
+  }
   const std::uint32_t detachedSurfaceWidth =
-      panelSurfaceExtent(panelWidth, detachedShadowBleed.left, detachedShadowBleed.right);
+      panelSurfaceExtent(panelWidth, detachedSurfaceBleed.left, detachedSurfaceBleed.right);
   const std::uint32_t detachedSurfaceHeight =
-      panelSurfaceExtent(panelHeight, detachedShadowBleed.up, detachedShadowBleed.down);
+      panelSurfaceExtent(panelHeight, detachedSurfaceBleed.up, detachedSurfaceBleed.down);
   const auto barRect = resolveBarVisibleRect(barConfig, outputWidth, outputHeight);
   const bool multipleBarsOnEdge =
       hasMultipleEnabledBarsOnEdge(m_config, m_platform, request.output, barConfig.position);
@@ -1406,18 +1429,18 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
 
   if (useCenteredPlacement) {
     standaloneAnchor = LayerShellAnchor::Top | LayerShellAnchor::Left;
-    standaloneMarginLeft = (outputWidth - static_cast<std::int32_t>(panelWidth)) / 2 - detachedShadowBleed.left;
-    standaloneMarginTop = (outputHeight - static_cast<std::int32_t>(panelHeight)) / 2 - detachedShadowBleed.up;
+    standaloneMarginLeft = (outputWidth - static_cast<std::int32_t>(panelWidth)) / 2 - detachedSurfaceBleed.left;
+    standaloneMarginTop = (outputHeight - static_cast<std::int32_t>(panelHeight)) / 2 - detachedSurfaceBleed.up;
   } else {
     if ((standaloneAnchor & LayerShellAnchor::Left) != 0) {
-      standaloneMarginLeft -= detachedShadowBleed.left;
+      standaloneMarginLeft -= detachedSurfaceBleed.left;
     } else if ((standaloneAnchor & LayerShellAnchor::Right) != 0) {
-      standaloneMarginRight -= detachedShadowBleed.right;
+      standaloneMarginRight -= detachedSurfaceBleed.right;
     }
     if ((standaloneAnchor & LayerShellAnchor::Top) != 0) {
-      standaloneMarginTop -= detachedShadowBleed.up;
+      standaloneMarginTop -= detachedSurfaceBleed.up;
     } else if ((standaloneAnchor & LayerShellAnchor::Bottom) != 0) {
-      standaloneMarginBottom -= detachedShadowBleed.down;
+      standaloneMarginBottom -= detachedSurfaceBleed.down;
     }
   }
 
@@ -1460,16 +1483,16 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   std::uint32_t fallbackSurfaceHeight = detachedSurfaceHeight;
   if (fillWidth) {
     standaloneAnchor |= LayerShellAnchor::Left | LayerShellAnchor::Right;
-    standaloneMarginLeft = screenPadding - detachedShadowBleed.left;
-    standaloneMarginRight = screenPadding - detachedShadowBleed.right;
+    standaloneMarginLeft = screenPadding - detachedSurfaceBleed.left;
+    standaloneMarginRight = screenPadding - detachedSurfaceBleed.right;
     requestedSurfaceWidth = 0;
     fallbackSurfaceWidth =
         static_cast<std::uint32_t>(std::max(1, outputWidth - standaloneMarginLeft - standaloneMarginRight));
   }
   if (fillHeight) {
     standaloneAnchor |= LayerShellAnchor::Top | LayerShellAnchor::Bottom;
-    standaloneMarginTop = screenPadding - detachedShadowBleed.up;
-    standaloneMarginBottom = screenPadding - detachedShadowBleed.down;
+    standaloneMarginTop = screenPadding - detachedSurfaceBleed.up;
+    standaloneMarginBottom = screenPadding - detachedSurfaceBleed.down;
     requestedSurfaceHeight = 0;
     fallbackSurfaceHeight =
         static_cast<std::uint32_t>(std::max(1, outputHeight - standaloneMarginTop - standaloneMarginBottom));
@@ -1499,8 +1522,8 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
       LayerShellAnchor::Top, LayerShellAnchor::Bottom
   );
   targetOutputRect = PanelOutputRect{
-      .x = panelOutputX + static_cast<float>(detachedShadowBleed.left),
-      .y = panelOutputY + static_cast<float>(detachedShadowBleed.up),
+      .x = panelOutputX + static_cast<float>(detachedSurfaceBleed.left),
+      .y = panelOutputY + static_cast<float>(detachedSurfaceBleed.up),
       .width = static_cast<float>(panelWidth),
       .height = static_cast<float>(panelHeight),
   };
@@ -1575,6 +1598,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   };
 
   const auto resetPanelOpenState = [this]() {
+    resetPanelHoverPreview();
     deactivateOutsideClickHandlers();
     m_surface.reset();
     m_layerSurface = nullptr;
@@ -1815,9 +1839,7 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
     if (ok) {
       m_output = request.output;
       m_wlSurface = m_surface->wlSurface();
-      m_surface->setInputRegion(
-          {InputRect{m_panelInsetX, m_panelInsetY, static_cast<int>(panelWidth), static_cast<int>(panelHeight)}}
-      );
+      applyPanelInputRegion();
       m_surface->setBlurRegion({});
       publishAttachedPanelGeometry(m_attachedRevealProgress);
       m_surface->requestRedraw();
@@ -1874,12 +1896,12 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   auto layerSurface = std::make_unique<LayerSurface>(m_platform->wayland(), std::move(surfaceConfig));
   m_layerSurface = layerSurface.get();
   m_surface = std::move(layerSurface);
-  m_panelInsetX = detachedShadowBleed.left;
-  m_panelInsetY = detachedShadowBleed.up;
+  m_panelInsetX = detachedSurfaceBleed.left;
+  m_panelInsetY = detachedSurfaceBleed.up;
   m_panelVisualWidth = panelWidth;
   m_panelVisualHeight = panelHeight;
-  m_detachedBleedRight = detachedShadowBleed.right;
-  m_detachedBleedBottom = detachedShadowBleed.down;
+  m_detachedBleedRight = detachedSurfaceBleed.right;
+  m_detachedBleedBottom = detachedSurfaceBleed.down;
   m_attachedBackgroundOpacity = 1.0f;
   m_attachedContactShadow = false;
   m_attachedRevealProgress = 1.0f;
@@ -1908,9 +1930,12 @@ void PanelManager::openPanel(const std::string& panelId, PanelOpenRequest reques
   m_panelOutputRect = targetOutputRect;
   m_panelOutputAnchor = standaloneAnchor;
   syncPanelOutputRectToVisualGeometry();
-  m_surface->setInputRegion(
-      {InputRect{m_panelInsetX, m_panelInsetY, static_cast<int>(panelWidth), static_cast<int>(panelHeight)}}
-  );
+  if (request.hoverPreview && !useCenteredPlacement && !useScreenPosition && !fillWidth && !fillHeight
+      && panelGap > 0) {
+    m_hoverPreviewBarPosition = barConfig.position;
+    m_hoverPreviewGap = panelGap;
+  }
+  applyPanelInputRegion();
   m_surface->setBlurRegion({});
   // Activate outside-click dismissal (focus grab or click shield).
   const bool hasFocusGrab =
@@ -2001,6 +2026,7 @@ void PanelManager::closePanel(bool animateClose) {
     return;
   }
 
+  resetPanelHoverPreview();
   kLog.debug("panel manager: closing \"{}\"", m_activePanelId);
 
   // Drop the outside-click handlers as soon as close starts.
@@ -2050,6 +2076,7 @@ void PanelManager::closePanel(bool animateClose) {
 }
 
 void PanelManager::destroyPanel() {
+  resetPanelHoverPreview();
   completeAppleMusicFullscreenHandoff();
   if (m_attachedToBar && m_attachedPanelGeometryCallback && m_output != nullptr) {
     m_attachedPanelGeometryCallback(m_output, m_sourceBarName, std::nullopt);
@@ -2116,6 +2143,10 @@ void PanelManager::destroyPanel() {
 void PanelManager::togglePanel(const std::string& panelId, PanelOpenRequest request) {
   // Treat a closing panel as closed: re-clicking while it animates out reopens it immediately.
   if (isOpen() && !m_closing && m_activePanelId == panelId) {
+    if (m_hoverPreview) {
+      pinPanelHoverPreview();
+      return;
+    }
     if (!request.context.empty() && m_activePanel != nullptr) {
       if (m_activePanel->isContextActive(request.context)) {
         closePanel();
@@ -2137,8 +2168,108 @@ void PanelManager::togglePanel(const std::string& panelId, PanelOpenRequest requ
   }
 }
 
+void PanelManager::beginPanelHoverPreview(const std::string& panelId, PanelOpenRequest request) {
+  if (isOpen() && !m_closing && m_activePanelId == panelId) {
+    if (m_hoverPreview) {
+      m_hoverPreviewSourceHovered = true;
+      m_hoverPreviewDismissTimer.stop();
+    }
+    return;
+  }
+
+  request.hoverPreview = true;
+  openPanel(panelId, request);
+}
+
+void PanelManager::endPanelHoverPreview(std::string_view panelId) {
+  if (!m_hoverPreview || m_activePanelId != panelId) {
+    return;
+  }
+  m_hoverPreviewSourceHovered = false;
+  schedulePanelHoverPreviewDismiss();
+}
+
+void PanelManager::pinPanelHoverPreview() {
+  if (!m_hoverPreview) {
+    return;
+  }
+  m_hoverPreview = false;
+  m_hoverPreviewSourceHovered = false;
+  m_hoverPreviewDismissTimer.stop();
+  m_hoverPreviewBarPosition.clear();
+  m_hoverPreviewGap = 0;
+  applyPanelInputRegion();
+}
+
+void PanelManager::schedulePanelHoverPreviewDismiss() {
+  if (!m_hoverPreview || m_hoverPreviewSourceHovered || m_pointerInside) {
+    m_hoverPreviewDismissTimer.stop();
+    return;
+  }
+
+  m_hoverPreviewDismissTimer.start(kPanelHoverPreviewBridgeDelay, [this]() {
+    if (!m_hoverPreview || m_hoverPreviewSourceHovered || m_pointerInside || m_closing) {
+      return;
+    }
+    closePanel();
+  });
+}
+
+void PanelManager::resetPanelHoverPreview() noexcept {
+  m_hoverPreviewDismissTimer.stop();
+  m_hoverPreview = false;
+  m_hoverPreviewSourceHovered = false;
+  m_hoverPreviewBarPosition.clear();
+  m_hoverPreviewGap = 0;
+}
+
+void PanelManager::applyPanelInputRegion() {
+  if (m_surface == nullptr || m_panelVisualWidth == 0 || m_panelVisualHeight == 0) {
+    return;
+  }
+
+  std::vector<InputRect> regions;
+  regions.push_back(InputRect{
+      m_panelInsetX, m_panelInsetY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight)
+  });
+
+  if (m_hoverPreview && m_hoverPreviewGap > 0) {
+    const int surfaceWidth = static_cast<int>(m_surface->width());
+    const int surfaceHeight = static_cast<int>(m_surface->height());
+    const int panelWidth = static_cast<int>(m_panelVisualWidth);
+    const int panelHeight = static_cast<int>(m_panelVisualHeight);
+    InputRect corridor;
+
+    if (m_hoverPreviewBarPosition == "top") {
+      const int height = std::min(m_hoverPreviewGap, m_panelInsetY);
+      corridor = InputRect{m_panelInsetX, m_panelInsetY - height, panelWidth, height};
+    } else if (m_hoverPreviewBarPosition == "bottom") {
+      const int y = m_panelInsetY + panelHeight;
+      const int height = std::min(m_hoverPreviewGap, std::max(0, surfaceHeight - y));
+      corridor = InputRect{m_panelInsetX, y, panelWidth, height};
+    } else if (m_hoverPreviewBarPosition == "left") {
+      const int width = std::min(m_hoverPreviewGap, m_panelInsetX);
+      corridor = InputRect{m_panelInsetX - width, m_panelInsetY, width, panelHeight};
+    } else if (m_hoverPreviewBarPosition == "right") {
+      const int x = m_panelInsetX + panelWidth;
+      const int width = std::min(m_hoverPreviewGap, std::max(0, surfaceWidth - x));
+      corridor = InputRect{x, m_panelInsetY, width, panelHeight};
+    }
+
+    if (corridor.width > 0 && corridor.height > 0) {
+      regions.push_back(corridor);
+    }
+  }
+
+  m_surface->setInputRegion(regions);
+}
+
 void PanelManager::togglePanel(const std::string& panelId) {
   if (isOpen() && !m_closing && m_activePanelId == panelId) {
+    if (m_hoverPreview) {
+      pinPanelHoverPreview();
+      return;
+    }
     closePanel();
     return;
   }
@@ -2164,6 +2295,7 @@ bool PanelManager::togglePanelFullscreen(const std::string& panelId) {
   if (!active || m_activePanel == nullptr || m_activePanel->fullscreenPresentation()) {
     return false;
   }
+  pinPanelHoverPreview();
   return beginAppleMusicFullscreen();
 }
 
@@ -2220,6 +2352,9 @@ bool PanelManager::onPointerEvent(const PointerEvent& event) {
   case PointerEvent::Type::Enter: {
     if (event.surface == m_wlSurface) {
       m_pointerInside = true;
+      if (m_hoverPreview) {
+        m_hoverPreviewDismissTimer.stop();
+      }
       m_inputDispatcher.pointerEnter(static_cast<float>(event.sx), static_cast<float>(event.sy), event.serial);
     }
     break;
@@ -2228,6 +2363,7 @@ bool PanelManager::onPointerEvent(const PointerEvent& event) {
     if (event.surface == m_wlSurface) {
       m_pointerInside = false;
       m_inputDispatcher.pointerLeave();
+      schedulePanelHoverPreviewDismiss();
     }
     break;
   }
@@ -3161,11 +3297,7 @@ void PanelManager::buildScene(std::uint32_t width, std::uint32_t height) {
     if (availH > 0 && (m_panelFillHeight || m_panelVisualHeight > static_cast<std::uint32_t>(availH))) {
       m_panelVisualHeight = static_cast<std::uint32_t>(availH);
     }
-    if (m_surface != nullptr) {
-      m_surface->setInputRegion({InputRect{
-          m_panelInsetX, m_panelInsetY, static_cast<int>(m_panelVisualWidth), static_cast<int>(m_panelVisualHeight)
-      }});
-    }
+    applyPanelInputRegion();
     syncPanelOutputRectToVisualGeometry();
   }
 

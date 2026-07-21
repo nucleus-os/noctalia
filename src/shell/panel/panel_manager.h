@@ -42,6 +42,7 @@ struct PanelOpenRequest {
   bool hasExplicitAnchor = false;
   bool hasAnchorPosition = false;
   bool animateOpen = true;
+  bool hoverPreview = false;
   std::string_view context;
   std::string_view sourceBarName;
 };
@@ -100,6 +101,11 @@ public:
   void openPanel(const std::string& panelId, PanelOpenRequest request = {});
   void closePanel(bool animateClose = true);
   void togglePanel(const std::string& panelId, PanelOpenRequest request);
+  // Opens a provisional panel from a bar hover. Its lifetime remains tied to
+  // the source widget/panel hover region until an explicit toggle request or
+  // fullscreen promotion retains it.
+  void beginPanelHoverPreview(const std::string& panelId, PanelOpenRequest request);
+  void endPanelHoverPreview(std::string_view panelId);
   // IPC-friendly overload: asks CompositorPlatform for preferred interactive output.
   void togglePanel(const std::string& panelId);
   // Switch an opt-in, currently open panel between its normal and full-output
@@ -126,6 +132,7 @@ public:
 
   [[nodiscard]] RenderContext* renderContext() const noexcept { return m_renderContext; }
   [[nodiscard]] WaylandConnection* wayland() const noexcept;
+  [[nodiscard]] ConfigService* configService() const noexcept { return m_config; }
 
   void setActivePopup(ContextMenuPopup* popup);
   void clearActivePopup();
@@ -189,6 +196,10 @@ private:
   bool beginAppleMusicFullscreen();
   void finishAppleMusicFullscreen(bool reopenPanel);
   void completeAppleMusicFullscreenHandoff();
+  void pinPanelHoverPreview();
+  void schedulePanelHoverPreviewDismiss();
+  void resetPanelHoverPreview() noexcept;
+  void applyPanelInputRegion();
 
   CompositorPlatform* m_platform = nullptr;
   ConfigService* m_config = nullptr;
@@ -252,6 +263,7 @@ private:
   AttachedRevealDirection m_attachedRevealDirection = AttachedRevealDirection::Down;
   AttachedRevealDirection m_detachedRevealDirection = AttachedRevealDirection::Down;
   Timer m_keyboardRelaxTimer;
+  Timer m_hoverPreviewDismissTimer;
   std::string m_attachedBarPosition; // "top" / "bottom" / "left" / "right" while attached, empty otherwise
   std::string m_sourceBarName;       // name of the bar that opened the current panel
   std::optional<AttachedPanelGeometry> m_attachedPanelGeometry;
@@ -268,6 +280,10 @@ private:
   // an orphaned release event.
   std::optional<std::uint32_t> m_suppressedFullscreenCancelKey;
   bool m_pointerInside = false;
+  bool m_hoverPreview = false;
+  bool m_hoverPreviewSourceHovered = false;
+  std::string m_hoverPreviewBarPosition;
+  std::int32_t m_hoverPreviewGap = 0;
   bool m_inTransition = false;
   bool m_closing = false;
   bool m_attachedToBar = false;

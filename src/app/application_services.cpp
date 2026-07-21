@@ -1,6 +1,7 @@
 #include "app/main_loop.h"
 #include "application.h"
 #include "application_internal.h"
+#include "cef/cef_browser_session.h"
 #include "compositors/compositor_detect.h"
 #include "config/config_types.h"
 #include "core/build_info.h"
@@ -637,6 +638,13 @@ void Application::initStyleThemeAndWayland() {
   std::signal(SIGTERM, signal_handler);
   std::signal(SIGINT, signal_handler);
   m_cefService->attachGraphicsDevice(m_graphicsDevice);
+  m_appleMusicSession = m_cefService->createBrowserSession("apple-music");
+  m_discordSession = m_cefService->createBrowserSession("discord");
+  m_appleMusicSession->setMediaStateCallback([this](const CefBrowserMediaState& state) {
+    m_appleMusicSession->setBackgroundPlaybackActive(state.playing);
+    m_bar.refresh();
+    m_desktopWidgetsController.requestUpdate();
+  });
 
   m_compositorPlatform.initialize();
   m_screenTimeService.initialize(&m_wayland);
@@ -1286,11 +1294,6 @@ void Application::initSessionBusServices() {
       applyMprisConfig();
       m_configService.addReloadCallback(applyMprisConfig);
       m_mprisService->setChangeCallback([this, shouldRefreshControlCenter]() {
-        const auto& players = m_mprisService->players();
-        const auto embeddedPlayer = players.find(currentProcessChromiumMprisBusName());
-        m_cefService->setBackgroundPlaybackActive(
-            embeddedPlayer != players.end() && embeddedPlayer->second.playbackStatus == "Playing"
-        );
         m_bar.refresh();
         m_desktopWidgetsController.requestUpdate();
         m_mediaOsd.onMprisChanged(*m_mprisService);

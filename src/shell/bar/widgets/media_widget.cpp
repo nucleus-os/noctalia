@@ -26,22 +26,30 @@ namespace {
 MediaWidget::MediaWidget(
     MprisService* mpris, HttpClient* httpClient, wl_output* /*output*/, float maxWidth, float minWidth, float artSize,
     MediaTitleScrollMode titleScrollMode, bool hideWhenNoMedia, bool albumArtOnly, bool hideAlbumArt, bool hideArtist,
-    std::string playerBusName, std::string panelId, std::string panelContext
+    std::string playerBusName, std::string panelId, std::string panelContext, bool openPanelOnHover,
+    MediaWidgetStateProvider stateProvider
 )
     : m_mpris(mpris), m_httpClient(httpClient), m_maxWidth(maxWidth), m_minWidth(minWidth), m_artSize(artSize),
       m_titleScrollMode(titleScrollMode), m_hideWhenNoMedia(hideWhenNoMedia), m_albumArtOnly(albumArtOnly),
       m_hideAlbumArt(hideAlbumArt), m_hideArtist(hideArtist), m_playerBusName(std::move(playerBusName)),
-      m_panelId(std::move(panelId)), m_panelContext(std::move(panelContext)) {}
+      m_panelId(std::move(panelId)), m_panelContext(std::move(panelContext)),
+      m_openPanelOnHover(openPanelOnHover), m_stateProvider(std::move(stateProvider)) {}
 
 void MediaWidget::create() {
   auto area = std::make_unique<InputArea>();
   area->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT, BTN_RIGHT}));
   area->setOnEnter([this](const InputArea::PointerData&) {
     applyTitleScrollMode(m_label != nullptr && m_label->visible());
+    if (m_openPanelOnHover) {
+      requestPanelHover(true, m_panelId, m_panelContext);
+    }
     this->requestUpdate();
   });
   area->setOnLeave([this]() {
     applyTitleScrollMode(m_label != nullptr && m_label->visible());
+    if (m_openPanelOnHover) {
+      requestPanelHover(false, m_panelId, m_panelContext);
+    }
     this->requestUpdate();
   });
   area->setOnClick([this](const InputArea::PointerData& data) {
@@ -218,15 +226,19 @@ void MediaWidget::syncState(Renderer& renderer) {
   }
 
   std::optional<MprisPlayerInfo> active;
-  if (m_mpris != nullptr) {
+  std::optional<MediaWidgetState> provided;
+  if (m_stateProvider) {
+    provided = m_stateProvider();
+  } else if (m_mpris != nullptr) {
     if (m_playerBusName.empty()) {
       active = m_mpris->activePlayer();
     } else if (const auto it = m_mpris->players().find(m_playerBusName); it != m_mpris->players().end()) {
       active = it->second;
     }
   }
-  syncWidgetVisibility(active.has_value());
-  if (m_hideWhenNoMedia && !active.has_value()) {
+  const bool hasMedia = provided.has_value() || active.has_value();
+  syncWidgetVisibility(hasMedia);
+  if (m_hideWhenNoMedia && !hasMedia) {
     applyTitleScrollMode(false);
     return;
   }
@@ -235,7 +247,12 @@ void MediaWidget::syncState(Renderer& renderer) {
   std::string displayText = i18n::tr("bar.widgets.media.nothing-playing");
   std::string artUrl;
 
-  if (active.has_value()) {
+  if (provided.has_value()) {
+    playbackStatus = provided->playbackStatus;
+    displayText = m_hideArtist || provided->artist.empty() ? provided->title
+                                                           : provided->title + " — " + provided->artist;
+    artUrl = provided->artUrl;
+  } else if (active.has_value()) {
     playbackStatus = active->playbackStatus;
     displayText = buildDisplayText(*active, m_hideArtist);
     artUrl = effectiveArtUrl(*active);

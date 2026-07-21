@@ -3,6 +3,7 @@
 #include "compositors/compositor_platform.h"
 #include "config/config_service.h"
 #include "core/log.h"
+#include "i18n/i18n.h"
 #include "shell/bar/widgets/active_window_widget.h"
 #include "shell/bar/widgets/audio_visualizer_widget.h"
 #include "shell/bar/widgets/apple_music_widget.h"
@@ -44,6 +45,7 @@
 #include "shell/bar/widgets/volume_widget.h"
 #include "shell/bar/widgets/wallpaper_widget.h"
 #include "shell/bar/widgets/weather_widget.h"
+#include "shell/bar/widgets/web_panel_launcher_widget.h"
 #include "shell/bar/widgets/workspaces_widget.h"
 #include "system/format_units.h"
 #include "ui/style.h"
@@ -108,7 +110,8 @@ WidgetFactory::WidgetFactory(const BarServices& services)
       m_notifications(services.notifications), m_tray(services.tray), m_audio(services.audio),
       m_easyEffects(services.easyEffects), m_upower(services.upower), m_sysmon(services.sysmon),
       m_powerProfiles(services.powerProfiles), m_network(services.network), m_idleInhibitor(services.idleInhibitor),
-      m_mpris(services.mpris), m_audioSpectrum(services.audioSpectrum), m_httpClient(services.httpClient),
+      m_mpris(services.mpris), m_appleMusicSession(services.appleMusicSession),
+      m_audioSpectrum(services.audioSpectrum), m_httpClient(services.httpClient),
       m_weather(services.weather), m_nightLight(services.nightLight), m_themeService(services.theme),
       m_bluetooth(services.bluetooth), m_brightness(services.brightness), m_lockKeys(services.lockKeys),
       m_clipboard(services.clipboard), m_fileWatcher(services.fileWatcher), m_screenshots(services.screenshots),
@@ -188,8 +191,17 @@ std::unique_ptr<Widget> WidgetFactory::create(
     const bool hideAlbumArt = wc != nullptr ? wc->getBool("hide_album_art", false) : false;
     const bool hideArtist = wc != nullptr ? wc->getBool("hide_artist", false) : false;
     auto widget = std::make_unique<AppleMusicWidget>(
-        m_mpris, m_httpClient, output, maxWidth, minWidth, artSize, parseMediaTitleScrollMode(titleScroll),
+        m_mpris, m_appleMusicSession, m_httpClient, output, maxWidth, minWidth, artSize,
+        parseMediaTitleScrollMode(titleScroll),
         hideWhenNoMedia, albumArtOnly, hideAlbumArt, hideArtist
+    );
+    widget->setContentScale(contentScale);
+    return widget;
+  }
+
+  if (type == "discord") {
+    auto widget = std::make_unique<WebPanelLauncherWidget>(
+        "discord", "brand-discord", i18n::tr("settings.widgets.types.discord")
     );
     widget->setContentScale(contentScale);
     return widget;

@@ -4,19 +4,19 @@
 
 #include <functional>
 
-class CefService;
+class CefBrowserSession;
 class ImageNode;
 class InputArea;
 class Renderer;
 class TextureManager;
 
 // Scene node that displays the embedded CEF browser and forwards input to it.
-// Deliberately CEF-free: it talks only to CefService's opaque API. Holds no
-// browser state itself — the browser + texture live in the app-level CefService
-// and survive this node being destroyed and rebuilt on panel close/reopen.
+// Deliberately CEF-free: it talks only to one CefBrowserSession. Holds no
+// browser state itself, so that session and its texture survive this node being
+// destroyed and rebuilt on panel close/reopen.
 class CefSurfaceNode : public Node {
 public:
-  explicit CefSurfaceNode(CefService& service);
+  explicit CefSurfaceNode(CefBrowserSession& session);
   ~CefSurfaceNode() override;
 
   // Wire the display live: requestRedraw is invoked on the main thread whenever
@@ -46,7 +46,7 @@ protected:
 private:
   void wireInput();
 
-  CefService& m_service;
+  CefBrowserSession& m_session;
   ImageNode* m_image = nullptr;
   InputArea* m_input = nullptr;
   bool m_attached = false;

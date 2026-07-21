@@ -58,6 +58,7 @@ namespace settings {
     const std::vector<WidgetTypeSpec> kWidgetTypeSpecs = {
         {.type = "active_window", .labelKey = "settings.widgets.types.active-window", .glyph = "app-window"},
         {.type = "apple-music", .labelKey = "settings.widgets.types.apple-music", .glyph = "brand-apple"},
+        {.type = "discord", .labelKey = "settings.widgets.types.discord", .glyph = "brand-discord"},
         {.type = "audio_visualizer", .labelKey = "settings.widgets.types.audio-visualizer", .glyph = "wave-sine"},
         {.type = "battery", .labelKey = "settings.widgets.types.battery", .glyph = "battery-4"},
         {.type = "bluetooth", .labelKey = "settings.widgets.types.bluetooth", .glyph = "bluetooth"},

@@ -152,8 +152,10 @@
   },
   "common": {
     "actions": {
+      "allow": "Allow",
       "apply": "Apply",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "deny": "Deny"
     },
     "states": {
       "auto": "Auto",
@@ -1133,6 +1135,7 @@
         "lock-screen": "Lock Screen",
         "media": "Media",
         "apple-music": "Apple Music",
+        "discord": "Discord",
         "monitor": "System Monitor",
         "monitor-polling": "Poll Intervals",
         "monitor-thresholds": "Highlight Thresholds",
@@ -3492,6 +3495,7 @@
       },
       "types": {
         "active-window": "Active Window",
+        "apple-music": "Apple Music",
         "audio-visualizer": "Audio Visualizer",
         "battery": "Battery",
         "bluetooth": "Bluetooth",
@@ -3501,6 +3505,7 @@
         "clock": "Clock",
         "control-center": "Control Center",
         "custom-button": "Custom Button",
+        "discord": "Discord",
         "keyboard-layout": "Keyboard Layout",
         "launcher": "Launcher",
         "lock-keys": "Lock Keys",
@@ -3677,6 +3682,19 @@
       "sort-name-asc": "Sort by name (A-Z)",
       "sort-name-desc": "Sort by name (Z-A)",
       "title": "Wallpaper"
+    }
+  },
+  "web-panel": {
+    "loading": "Loading web panel…",
+    "recovering": "Restoring web panel…",
+    "failed": "The web panel could not be loaded.",
+    "retry": "Retry",
+    "permission": {
+      "microphone": "Allow this web panel to use your microphone?",
+      "camera": "Allow this web panel to use your camera?",
+      "camera-and-microphone": "Allow this web panel to use your camera and microphone?",
+      "notifications": "Allow this web panel to show notifications?",
+      "clipboard": "Allow this web panel to read your clipboard?"
     }
   },
   "weather": {

@@ -26,6 +26,10 @@ public:
       std::string_view panelId, std::string_view context, std::optional<float> anchorSurfaceX,
       std::optional<float> anchorSurfaceY
   )>;
+  using PanelHoverCallback = std::function<void(
+      bool hovered, std::string_view panelId, std::string_view context, std::optional<float> anchorSurfaceX,
+      std::optional<float> anchorSurfaceY
+  )>;
 
   virtual ~Widget();
 
@@ -64,6 +68,7 @@ public:
   void setRedrawCallback(RedrawCallback callback);
   void setFrameTickRequestCallback(FrameTickRequestCallback callback);
   void setPanelToggleCallback(PanelToggleCallback callback);
+  void setPanelHoverCallback(PanelHoverCallback callback);
   void setContentScale(float scale) noexcept { m_contentScale = scale; }
   [[nodiscard]] float contentScale() const noexcept { return m_contentScale; }
   void setLabelFontWeight(FontWeight fontWeight) noexcept { m_labelFontWeight = fontWeight; }
@@ -110,6 +115,10 @@ protected:
       std::string_view panelId, std::string_view context = {}, std::optional<float> anchorSurfaceX = std::nullopt,
       std::optional<float> anchorSurfaceY = std::nullopt
   );
+  void requestPanelHover(
+      bool hovered, std::string_view panelId, std::string_view context = {},
+      std::optional<float> anchorSurfaceX = std::nullopt, std::optional<float> anchorSurfaceY = std::nullopt
+  );
   void setRoot(std::unique_ptr<Node> root);
   void clearReleasedRoot() noexcept { m_rootPtr = nullptr; }
   virtual void doLayout(Renderer& renderer, float containerWidth, float containerHeight) = 0;
@@ -125,6 +134,7 @@ protected:
   RedrawCallback m_redrawCallback;
   FrameTickRequestCallback m_frameTickRequestCallback;
   PanelToggleCallback m_panelToggleCallback;
+  PanelHoverCallback m_panelHoverCallback;
   WidgetBarCapsuleSpec m_barCapsuleSpec{};
   std::optional<ColorSpec> m_widgetForeground;
   std::optional<ColorSpec> m_widgetIconColor;

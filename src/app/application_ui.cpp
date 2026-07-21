@@ -68,6 +68,7 @@
 #include "shell/greeter/greeter_appearance_sync.h"
 #include "shell/launcher/launcher_panel.h"
 #include "shell/apple_music/apple_music_panel.h"
+#include "shell/web_panel/web_panel.h"
 #include "shell/panel/plugin_panel.h"
 #include "shell/polkit/polkit_panel.h"
 #include "shell/session/session_ipc.h"
@@ -596,7 +597,10 @@ void Application::initPanelManagerAndPanels() {
       },
       "launcher-usage"
   );
-  m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(*m_cefService));
+  m_panelManager.registerPanel("apple-music", std::make_unique<AppleMusicPanel>(m_appleMusicSession));
+  m_panelManager.registerPanel(
+      "discord", std::make_unique<WebPanel>(m_discordSession, WebPanelSite::Discord)
+  );
   m_settingsWindow.setResetLauncherUsage([this]() {
     if (m_launcherPanel != nullptr) {
       m_launcherPanel->clearUsage();
@@ -793,6 +797,7 @@ void Application::initBarDockAndLayout() {
       .network = m_networkService.get(),
       .idleInhibitor = &m_idleInhibitor,
       .mpris = m_mprisService.get(),
+      .appleMusicSession = m_appleMusicSession,
       .audioSpectrum = m_pipewireSpectrum.get(),
       .httpClient = &m_httpClient,
       .weather = &m_weatherService,

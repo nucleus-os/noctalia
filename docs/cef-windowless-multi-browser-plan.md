@@ -1,8 +1,26 @@
 # CEF Windowless Multi-Browser and Popup Plan
 
-Last updated: 2026-07-18
+Last updated: 2026-07-20
 
-Status: Phase 1 fail-closed containment implemented; Phases 2–9 planned.
+Status: top-level multi-session and bounded auxiliary popup presentation implemented; live site acceptance remains.
+
+## Implementation update
+
+`CefService` now owns only the process runtime, message pump, graphics-device
+binding, and session registry. Apple Music and Discord are independent
+`CefBrowserSession` instances, each with its own client, external-BeginFrame
+scheduler, recovery state, `CefGpuFrameBridge`, texture, input/cursor state,
+and callback set. `CefSurfaceNode` consumes a specific session, and ordered
+shutdown/device rebuilding iterate the registry.
+
+Trusted in-app popups are now independent accelerated windowless sessions
+presented in a bounded Noctalia sheet stack. Empty/`about:blank` auxiliary
+bootstrap pages and the trusted site origin are permitted; untrusted automatic
+navigation remains fail-closed, while user-initiated external URLs are handed
+to the system browser. Closing an auxiliary sheet closes its CEF session and
+returns focus to its opener. This document's single-browser descriptions below
+are retained as historical problem evidence; Phases 2–4 are no longer future
+work for ordinary top-level sessions.
 
 ## Decision
 
@@ -934,9 +952,11 @@ free-running timers.
 ### Auxiliary browser consumes unbounded resources
 
 Transient popups close with the panel and descendants close with parents.
-Rely on Chromium popup blocking plus explicit UI ownership. Add a small maximum
-only if a concrete site can create unbounded accepted sessions; do not start
-with a configurable policy framework.
+Rely on Chromium popup blocking plus explicit UI ownership. The presenter caps
+the nested sheet stack at three and rejects deeper creation without adding a
+configurable policy framework. Closed and aborted auxiliary sessions are also
+retired from the process registry; bounding only the visible stack would still
+leak session/bridge objects across repeated popup cycles.
 
 ### External link breaks authentication
 

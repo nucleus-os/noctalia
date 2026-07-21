@@ -4,10 +4,12 @@ Last updated: 2026-07-17
 
 ## Decision
 
-Noctalia embeds Apple Music with CEF Alloy windowless rendering and consumes
-accelerated DMA-BUF frames directly as Skia Graphite textures. This is the only
-CEF rendering path. There is no CPU paint, GLES, persistent-image copy, or
-runtime backend fallback.
+Noctalia embeds trusted web panels (currently Apple Music and Discord) with
+CEF Alloy windowless rendering and consumes accelerated DMA-BUF frames directly
+as Skia Graphite textures. This is the only CEF rendering path. There is no CPU
+paint, GLES, persistent-image copy, or runtime backend fallback. Each browser
+session owns an independent producer/bridge/texture domain; only the CEF
+runtime and message pump are process-wide.
 
 The workspace pins CEF branch 7922 and Chromium 151.0.7922.19. The SDK is built
 from source with the required codec support. Viz renders through Skia Graphite
@@ -181,6 +183,14 @@ At shutdown:
 3. close the browser and drain `OnBeforeClose`;
 4. release the bridge;
 5. call `CefShutdown`.
+
+The producer has a narrow terminal ownership-abandon path for an exported read
+whose backing is being destroyed. It is used only after the consumer has
+returned or abandoned its lease and the output slot itself is terminal. This
+prevents ordinary output-device destruction from being misclassified as an
+unreleased external-Vulkan access and losing the GPU context; normal frame
+retirement still requires an explicit release state and retains the strict
+failure behavior for a genuinely missing release.
 
 ## Patch ownership
 

@@ -106,6 +106,8 @@ void Widget::setFrameTickRequestCallback(FrameTickRequestCallback callback) {
 
 void Widget::setPanelToggleCallback(PanelToggleCallback callback) { m_panelToggleCallback = std::move(callback); }
 
+void Widget::setPanelHoverCallback(PanelHoverCallback callback) { m_panelHoverCallback = std::move(callback); }
+
 void Widget::requestUpdate() {
   if (m_updateCallback) {
     m_updateCallback();
@@ -130,5 +132,14 @@ void Widget::requestPanelToggle(
 ) {
   if (m_panelToggleCallback) {
     m_panelToggleCallback(panelId, context, anchorSurfaceX, anchorSurfaceY);
+  }
+}
+
+void Widget::requestPanelHover(
+    bool hovered, std::string_view panelId, std::string_view context, std::optional<float> anchorSurfaceX,
+    std::optional<float> anchorSurfaceY
+) {
+  if (m_panelHoverCallback) {
+    m_panelHoverCallback(hovered, panelId, context, anchorSurfaceX, anchorSurfaceY);
   }
 }

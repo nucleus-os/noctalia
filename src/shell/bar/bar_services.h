@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 class BluetoothService;
 class BrightnessService;
 class ClipboardService;
@@ -23,6 +25,7 @@ class TrayService;
 class UPowerService;
 class WeatherService;
 class GammaService;
+class CefBrowserSession;
 
 namespace noctalia::theme {
   class ThemeService;
@@ -44,6 +47,7 @@ struct BarServices {
   INetworkService* network = nullptr;
   IdleInhibitor* idleInhibitor = nullptr;
   MprisService* mpris = nullptr;
+  std::shared_ptr<CefBrowserSession> appleMusicSession;
   PipeWireSpectrum* audioSpectrum = nullptr;
   HttpClient* httpClient = nullptr;
   WeatherService* weather = nullptr;

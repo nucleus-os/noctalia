@@ -1192,6 +1192,7 @@ bool Bar::initialize(const BarServices& services) {
   m_network = services.network;
   m_idleInhibitor = services.idleInhibitor;
   m_mpris = services.mpris;
+  m_appleMusicSession = services.appleMusicSession;
   m_audioSpectrum = services.audioSpectrum;
   m_httpClient = services.httpClient;
   m_weatherService = services.weather;
@@ -1243,6 +1244,7 @@ BarServices Bar::services() const {
       .network = m_network,
       .idleInhibitor = m_idleInhibitor,
       .mpris = m_mpris,
+      .appleMusicSession = m_appleMusicSession,
       .audioSpectrum = m_audioSpectrum,
       .httpClient = m_httpClient,
       .weather = m_weatherService,
@@ -2313,10 +2315,10 @@ void Bar::attachWidgetsToSections(BarInstance& instance) {
           return panel != nullptr && panel->isPanelTransitionActive();
         });
       }
-      widget->setPanelToggleCallback([this, inst = &instance](
-                                         std::string_view panelId, std::string_view context,
-                                         std::optional<float> anchorSurfaceX, std::optional<float> anchorSurfaceY
-                                     ) {
+      const auto panelRequestForWidget = [this, inst = &instance](
+                                             std::string_view context, std::optional<float> anchorSurfaceX,
+                                             std::optional<float> anchorSurfaceY
+                                         ) {
         float anchorX = inst->lastPointerSx;
         float anchorY = inst->lastPointerSy;
         if (anchorSurfaceX.has_value()) {
@@ -2332,18 +2334,35 @@ void Bar::attachWidgetsToSections(BarInstance& instance) {
             anchorY += surfaceY;
           }
         }
+        return PanelOpenRequest{
+            .output = inst->output,
+            .anchorX = anchorX,
+            .anchorY = anchorY,
+            .hasExplicitAnchor = anchorSurfaceX.has_value() || anchorSurfaceY.has_value(),
+            .hasAnchorPosition = true,
+            .context = context,
+            .sourceBarName = inst->barConfig.name
+        };
+      };
+      widget->setPanelToggleCallback([panelRequestForWidget](
+                                         std::string_view panelId, std::string_view context,
+                                         std::optional<float> anchorSurfaceX, std::optional<float> anchorSurfaceY
+                                     ) {
         PanelManager::instance().togglePanel(
-            std::string(panelId),
-            PanelOpenRequest{
-                .output = inst->output,
-                .anchorX = anchorX,
-                .anchorY = anchorY,
-                .hasExplicitAnchor = anchorSurfaceX.has_value() || anchorSurfaceY.has_value(),
-                .hasAnchorPosition = true,
-                .context = context,
-                .sourceBarName = inst->barConfig.name
-            }
+            std::string(panelId), panelRequestForWidget(context, anchorSurfaceX, anchorSurfaceY)
         );
+      });
+      widget->setPanelHoverCallback([panelRequestForWidget](
+                                        bool hovered, std::string_view panelId, std::string_view context,
+                                        std::optional<float> anchorSurfaceX, std::optional<float> anchorSurfaceY
+                                    ) {
+        if (hovered) {
+          PanelManager::instance().beginPanelHoverPreview(
+              std::string(panelId), panelRequestForWidget(context, anchorSurfaceX, anchorSurfaceY)
+          );
+        } else {
+          PanelManager::instance().endPanelHoverPreview(panelId);
+        }
       });
       widget->create();
       if (widget->root() != nullptr) {
